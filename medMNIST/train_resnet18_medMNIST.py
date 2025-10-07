@@ -8,16 +8,16 @@ import matplotlib.pyplot as plt
 import os, json, time
 
 #flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist']
-flags = ['tissuemnist']  # Just run one for testing
+flags = ['dermamnist-e']
 #colors = [False, False, False, True, False, True, True, False]  # Colors for the flags
-colors = [False]
+colors = [True]
 #batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640]  # Batch sizes for the flags
 batch_sizes = [640]
+
 cuda = 'cuda:1'
 for flag, color, batch_size in zip(flags, colors, batch_sizes):
     print(f"Training on {flag} with color={color} and batch_size={batch_size}")
-
-    use_randaugment = True         # <- enable/disable RandAugment here
+    use_randaugment = False         # <- enable/disable RandAugment here
     randaugment_ops = 2            # number of ops per image
     randaugment_mag = 9            # magnitude (0-10 typical)
     device = torch.device(cuda if torch.cuda.is_available() else 'cpu')
