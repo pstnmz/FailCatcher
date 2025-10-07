@@ -7,6 +7,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 from torchvision.models import resnet18, ResNet18_Weights
 import medmnist
 from medmnist import INFO
+from medMNIST.local_dermamnist_e import DermaMNIST_E, DERMAMNIST_E_INFO
 import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.optim as optim
@@ -42,9 +43,13 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
             torch.cuda.manual_seed_all(random_seed)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-
-    info = INFO[data_flag]
-    DataClass = getattr(medmnist, info['python_class'])
+    if data_flag == 'dermamnist-e':
+        # use the local INFO we registered above
+        info = DERMAMNIST_E_INFO
+        DataClass = getattr(medmnist, info['python_class'])
+    else : 
+        info = INFO[data_flag]
+        DataClass = getattr(medmnist, info['python_class'])
     if transform is None:
         if color:
             transform = transforms.Compose([
@@ -64,6 +69,11 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
     train_dataset = DataClass(split='train', transform=transform, size=im_size, download=download)
     val_dataset = DataClass(split='val', transform=transform, size=im_size, download=download)
     test_dataset = DataClass(split='test', transform=transform, size=im_size, download=download)
+
+    # later, grab your meta
+    centers = getattr(test_dataset, 'test_centers', None)  # or test_ds.get_test_centers()
+    if centers is not None:
+        print("test_centers shape:", centers.shape)
 
     return [train_dataset, val_dataset, test_dataset], info
 
@@ -222,7 +232,10 @@ def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001,
 
 
 def evaluate_model(model, test_loader, data_flag, device=None, output_dir=None, prefix="test"):
-    info = INFO[data_flag]
+    if data_flag == 'dermamnist-e':
+        info = DERMAMNIST_E_INFO
+    else:
+        info = INFO[data_flag]
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
 
     class_names = list(info['label'].values())
@@ -370,8 +383,7 @@ def load_models(flag, device, size=224):
         models.append(model)
     return models
 
-def load_datasets(dataflag, color, im_size, transform, batch_size):
-        
+def load_datasets(dataflag, color, im_size, transform, batch_size):    
     datasets, info = get_datasets(dataflag, im_size=im_size, color=color, transform=transform)
     # Combine train_dataset and val_dataset
     combined_train_dataset = ConcatDataset([datasets[0], datasets[1]])
