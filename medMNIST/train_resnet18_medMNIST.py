@@ -12,7 +12,7 @@ flags = ['dermamnist-e']
 #colors = [False, False, False, True, False, True, True, False]  # Colors for the flags
 colors = [True]
 #batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640]  # Batch sizes for the flags
-batch_sizes = [640]
+batch_sizes = [128]
 
 cuda = 'cuda:1'
 for flag, color, batch_size in zip(flags, colors, batch_sizes):
