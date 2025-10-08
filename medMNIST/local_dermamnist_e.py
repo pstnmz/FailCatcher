@@ -2,6 +2,8 @@ import medmnist
 from medmnist.dataset import MedMNIST
 from pathlib import Path
 import numpy as np
+import torch
+from PIL import Image
 
 DERMAMNIST_E_INFO = {
     'python_class': 'DermaMNIST_E',
@@ -62,6 +64,70 @@ class DermaMNIST_E(MedMNIST):
         except Exception:
             # keep training robust even if the metadata is missing
             self.test_centers = None
+    def __len__(self):
+        # Prefer explicit length attributes if present
+        if hasattr(self, "data"):
+            return len(self.data)
+        for name in ("imgs", "images", "x", "X"):
+            if hasattr(self, name):
+                return len(getattr(self, name))
+        raise AttributeError("No image array attribute found (expected data/imgs/images/x).")
+
+    def _get_arrays(self):
+        # Figure out image array
+        if hasattr(self, "data"):
+            imgs = self.data
+        elif hasattr(self, "imgs"):
+            imgs = self.imgs
+        elif hasattr(self, "images"):
+            imgs = self.images
+        elif hasattr(self, "x"):
+            imgs = self.x
+        else:
+            raise AttributeError("Could not find images (data/imgs/images/x).")
+
+        # Figure out label array
+        if hasattr(self, "targets"):
+            labels = self.targets
+        elif hasattr(self, "labels"):
+            labels = self.labels
+        elif hasattr(self, "y"):
+            labels = self.y
+        else:
+            raise AttributeError("Could not find labels (targets/labels/y).")
+        return imgs, labels
+
+    def __getitem__(self, index):
+        imgs, labels = self._get_arrays()
+        img = imgs[index]
+        label = labels[index]
+
+        # Convert label to plain int
+        if isinstance(label, (np.ndarray, np.generic)):
+            label = int(label)
+        elif torch.is_tensor(label):
+            label = int(label.item())
+
+        # Ensure numpy array then to PIL if needed for transforms
+        if torch.is_tensor(img):
+            img = img.cpu().numpy()
+
+        if isinstance(img, np.ndarray):
+            # If shape (H,W) make it 3-channel
+            if img.ndim == 2:
+                img = np.repeat(img[..., None], 3, axis=2)
+            # If shape (C,H,W) transpose to (H,W,C)
+            if img.ndim == 3 and img.shape[0] in (1,3) and img.shape[-1] != 3:
+                # assume CHW
+                img = np.transpose(img, (1,2,0))
+            img = Image.fromarray(img.astype(np.uint8))
+
+        if hasattr(self, "transform") and self.transform:
+            img = self.transform(img)
+        if hasattr(self, "target_transform") and self.target_transform:
+            label = self.target_transform(label)
+
+        return img, label
 
 # Register into medmnist module
 setattr(medmnist, 'DermaMNIST_E', DermaMNIST_E)
