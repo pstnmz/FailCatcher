@@ -10,14 +10,16 @@ import os, json, time
 flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
 colors = [False, False, False, True, False, True, True, False, True]  # Colors for the flags
 batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640, 128]  # Batch sizes for the flags
-num_epochs = 5  # Number of epochs for training
-num_epochs_no_aug = [5, 5, 5, 5, 5, 5, 5, 5, 5]  # Number of epochs for training without augmentation
-num_epochs_aug = [7, 7, 7, 7, 7, 7, 7, 7, 7]  # Number of epochs for training with augmentation
+use_randaugment = True         # <- enable/disable RandAugment here
+if use_randaugment:
+    num_epochs = 7
+else:
+    num_epochs = 5
 
 cuda = 'cuda:2'
 for flag, color, batch_size in zip(flags, colors, batch_sizes):
     print(f"Training on {flag} with color={color} and batch_size={batch_size}")
-    use_randaugment = True         # <- enable/disable RandAugment here
+    
     randaugment_ops = 2            # number of ops per image
     randaugment_mag = 9            # magnitude (0-10 typical)
     device = torch.device(cuda if torch.cuda.is_available() else 'cpu')
@@ -60,7 +62,7 @@ for flag, color, batch_size in zip(flags, colors, batch_sizes):
         ])
 
     # Load plain datasets/loaders (no augmentation)
-    [train_dataset_plain, calibration_dataset, test_dataset], [_, calibration_loader, test_loader], info = tr.load_datasets(flag, color, size, transform_eval, batch_size)
+    [study_dataset_plain, calibration_dataset, test_dataset], [_, calibration_loader, test_loader], info = tr.load_datasets(flag, color, size, transform_eval, batch_size)
 
     if use_randaugment:
         print(f'Using RandAugment with {randaugment_ops} ops and magnitude {randaugment_mag}')
@@ -70,12 +72,12 @@ for flag, color, batch_size in zip(flags, colors, batch_sizes):
         combined_aug = ConcatDataset([aug_triplet[0], aug_triplet[1]])
 
         # 2) Wrap with the exact same indices as the 80% train subset
-        train_dataset_aug = torch.utils.data.Subset(combined_aug, train_dataset_plain.indices)
+        study_dataset_aug = torch.utils.data.Subset(combined_aug, study_dataset_plain.indices)
 
-        train_loaders, val_loaders = tr.CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size=batch_size)
+        train_loaders, val_loaders = tr.CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size=batch_size)
     else:
         print('Not using RandAugment')
-        train_loaders, val_loaders = tr.CV_train_val_loaders(None, train_dataset_plain, batch_size=batch_size)
+        train_loaders, val_loaders = tr.CV_train_val_loaders(None, study_dataset_plain, batch_size=batch_size)
 
     models = []
     results = []
