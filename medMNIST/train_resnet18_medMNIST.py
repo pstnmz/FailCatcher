@@ -7,24 +7,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os, json, time
 
-#flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist']
-flags = ['dermamnist-e']
-#colors = [False, False, False, True, False, True, True, False]  # Colors for the flags
-colors = [True]
-#batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640]  # Batch sizes for the flags
-batch_sizes = [128]
+flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
+colors = [False, False, False, True, False, True, True, False, True]  # Colors for the flags
+batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640, 128]  # Batch sizes for the flags
+num_epochs = 5  # Number of epochs for training
+num_epochs_no_aug = [5, 5, 5, 5, 5, 5, 5, 5, 5]  # Number of epochs for training without augmentation
+num_epochs_aug = [7, 7, 7, 7, 7, 7, 7, 7, 7]  # Number of epochs for training with augmentation
 
-cuda = 'cuda:1'
+cuda = 'cuda:2'
 for flag, color, batch_size in zip(flags, colors, batch_sizes):
     print(f"Training on {flag} with color={color} and batch_size={batch_size}")
-    use_randaugment = False         # <- enable/disable RandAugment here
+    use_randaugment = True         # <- enable/disable RandAugment here
     randaugment_ops = 2            # number of ops per image
     randaugment_mag = 9            # magnitude (0-10 typical)
     device = torch.device(cuda if torch.cuda.is_available() else 'cpu')
     size = 224  # Image size for the models
 
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    exp_dir = os.path.join("/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/runs", flag, f"resnet18_{size}_{timestamp}_randaug{int(use_randaugment)}")
+    exp_dir = os.path.join("/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/runs", flag, f"resnet18_{size}_{timestamp}_randaug{int(use_randaugment)}_numepochs{num_epochs}_bs{batch_size}")
     os.makedirs(os.path.join(exp_dir, "figs"), exist_ok=True)
 
     if color is True:
@@ -86,12 +86,12 @@ for flag, color, batch_size in zip(flags, colors, batch_sizes):
             train_loader=train_loaders[i],
             val_loader=val_loaders[i],
             test_loader=test_loader,
-            num_epochs=4,
+            num_epochs=num_epochs,
             learning_rate=0.0001,
             device=cuda,
             random_seed=42,
             output_dir=exp_dir,
-            run_name=f"fold_{i}"
+            run_name=f"fold_{i}"    
         )
         models.append(model)
         results.append(res)
@@ -108,6 +108,6 @@ for flag, color, batch_size in zip(flags, colors, batch_sizes):
 
     # Save models
     for i, model in enumerate(models):
-        path = os.path.join(exp_dir, f'resnet18_augmented_{flag}_224_{i}.pt')
+        path = os.path.join(exp_dir, f'resnet18_{flag}_224_augmented{i}.pt')
         tr.save_model(model, path=path)
         print(f"Saved: {path}")

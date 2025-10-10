@@ -7,7 +7,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 from torchvision.models import resnet18, ResNet18_Weights
 import medmnist
 from medmnist import INFO
-from medMNIST.local_dermamnist_e import DermaMNIST_E, DERMAMNIST_E_INFO
+from utils.local_dermamnist_e import DermaMNIST_E, DERMAMNIST_E_INFO
 import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.optim as optim
@@ -70,10 +70,6 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
     val_dataset = DataClass(split='val', transform=transform, size=im_size, download=download)
     test_dataset = DataClass(split='test', transform=transform, size=im_size, download=download)
 
-    # later, grab your meta
-    centers = getattr(test_dataset, 'test_centers', None)  # or test_ds.get_test_centers()
-    if centers is not None:
-        print("test_centers shape:", centers.shape)
 
     return [train_dataset, val_dataset, test_dataset], info
 
