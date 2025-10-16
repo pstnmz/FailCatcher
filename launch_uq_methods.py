@@ -23,6 +23,19 @@ import pandas as pd
 from PIL import Image
 import umap.umap_ as umap
 from medMNIST.utils import train_load_datasets_resnet as tr
+import time
+import threading
+import json
+try:
+    import psutil
+except ImportError:
+    psutil = None
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _NVML_AVAILABLE = True
+except Exception:
+    _NVML_AVAILABLE = False
 
 # Add picklable callables
 class RepeatGrayToRGB:
@@ -135,6 +148,83 @@ def test_eval(test_loader, device, models, data_flag):
 def apply_softmax(y):
     y_scores = np.array(F.softmax(torch.tensor(y), dim=1))
     return y_scores
+
+# -------------------- Resource profiling helpers --------------------
+
+def _get_cuda_index(device):
+    if isinstance(device, torch.device) and device.type == 'cuda':
+        return 0 if device.index is None else device.index
+    if isinstance(device, str) and device.startswith('cuda'):
+        parts = device.split(':')
+        return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    return None
+
+class ResourceProfiler:
+    def __init__(self, device=None, label=""):
+        self.device = device
+        self.label = label
+        self.records = {}
+        self._gpu_thread = None
+        self._gpu_utils = []
+        self._stop_evt = threading.Event()
+        self._nvml_handle = None
+        self.cuda_idx = _get_cuda_index(device)
+
+    def __enter__(self):
+        self.t0 = time.perf_counter()
+        self.proc = psutil.Process(os.getpid()) if psutil else None
+        if self.proc:
+            self.cpu_times0 = self.proc.cpu_times()
+            self.rss0 = self.proc.memory_info().rss
+        if torch.cuda.is_available() and self.cuda_idx is not None:
+            torch.cuda.reset_peak_memory_stats(self.cuda_idx)
+            self.gpu_mem0 = torch.cuda.memory_allocated(self.cuda_idx)
+            if _NVML_AVAILABLE:
+                try:
+                    self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(self.cuda_idx)
+                    def _poll():
+                        while not self._stop_evt.is_set():
+                            try:
+                                util = pynvml.nvmlDeviceGetUtilizationRates(self._nvml_handle).gpu
+                                self._gpu_utils.append(util)
+                            except Exception:
+                                pass
+                            time.sleep(0.2)
+                    self._gpu_thread = threading.Thread(target=_poll, daemon=True)
+                    self._gpu_thread.start()
+                except Exception:
+                    pass
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._gpu_thread:
+            self._stop_evt.set()
+            self._gpu_thread.join()
+        t1 = time.perf_counter()
+        rec = {"label": self.label, "wall_time_s": t1 - self.t0}
+
+        if self.proc:
+            cpu_times1 = self.proc.cpu_times()
+            rss1 = self.proc.memory_info().rss
+            rec.update({
+                "cpu_user_s": getattr(cpu_times1, "user", 0.0) - getattr(self.cpu_times0, "user", 0.0),
+                "cpu_system_s": getattr(cpu_times1, "system", 0.0) - getattr(self.cpu_times0, "system", 0.0),
+                "rss_mb_start": self.rss0 / (1024**2),
+                "rss_mb_end": rss1 / (1024**2),
+            })
+
+        if torch.cuda.is_available() and self.cuda_idx is not None:
+            rec.update({
+                "cuda_idx": self.cuda_idx,
+                "gpu_mem_mb_peak": torch.cuda.max_memory_allocated(self.cuda_idx) / (1024**2),
+                "gpu_mem_mb_end": torch.cuda.memory_allocated(self.cuda_idx) / (1024**2),
+                "gpu_util_avg": (sum(self._gpu_utils) / len(self._gpu_utils)) if self._gpu_utils else None,
+                "gpu_util_max": max(self._gpu_utils) if self._gpu_utils else None,
+            })
+        self.records = rec
+
+# -------------------- end profiling helpers --------------------
+
 
 def train_val_loaders(train_dataset, batch_size):
     # Create stratified K-fold cross-validator
@@ -474,12 +564,20 @@ def call_UQ_methods(
     calib_method='temperature',
     batch_size=None,
     image_size=None,
-    flag=None
+    flag=None,
+    log_dir=None
 ):
     metrics = []
     methods = methods or []
     aucs = []
     balanced_acc = []
+    resource_logs = []
+
+    # build log path
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    log_dir = log_dir or os.getcwd()
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"uq_resource_log_{flag or 'unknown'}_{ts}.json")
 
     for method in methods:
         if task_type == 'binary-class':
@@ -488,62 +586,77 @@ def call_UQ_methods(
         else:
             y_axis = '1-y_pred'
             title = 'MSR'
-        if method == 'MSR':
-            if y_prob is not None and y_true is not None and task_type is not None:
-                metric = computeMSR(y_prob, y_true, task_type, calibration_needed=False, display_calibration_curve=True)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, y_axis, title, optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
-        elif method == 'MSR_temp_scale':
-            if digits is not None and y_true is not None and task_type is not None and digits_calib is not None and y_true_calibration is not None:
-                metric = computeMSR(digits, y_true, task_type, calibration_needed=True, display_calibration_curve=True, method_calibration=calib_method, y_scores_calibration=digits_calib, y_true_calibration=y_true_calibration)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, y_axis, title + ' after temperature scaling', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
-        elif method == 'Ensembling':
-            if indiv_scores is not None:
-                metric = compute_ensembling(indiv_scores)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'Ensembling Results', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
-        elif method == 'TTA':
-            if models is not None and test_dataset_tta is not None and device is not None:
-                metric = computeTTA('randaugment', models, test_dataset_tta, device, num_classes=num_classes, image_normalization=image_normalization, batch_size=batch_size, color=color)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'TTA', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
-        elif method == 'TTA_without_geometric_transforms':
-            if models is not None and test_dataset_tta is not None and device is not None:
-                metric = computeTTA('randaugment_without_geometric_transforms', models, test_dataset_tta, device, num_classes=num_classes, image_normalization=image_normalization, batch_size=batch_size, color=color)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'TTA_no_geom_transforms', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
-        elif method == 'GPS':
-            if models is not None and test_dataset_tta is not None and device is not None:
-                metric = computeTTA('GPS', models, test_dataset_tta, device, num_classes=num_classes, correct_predictions_calibration=correct_predictions_calibration, incorrect_predictions_calibration=incorrect_predictions_calibration, image_normalization=image_normalization, aug_folder=aug_folder, max_iterations=max_iteration, gps_augment=gps_augment, im_size=image_size, batch_size=batch_size)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'GPS', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
-        elif method == 'KNNshap':
-            if models is not None and train_loaders is not None and test_loader is not None and device is not None and num_classes is not None and latent_spaces is not None and shap_values_folds is not None:
-                metric = computeKNNshap(models, train_loaders, test_loader, device, num_classes, latent_spaces, shap_values_folds, labels_folds=labels_fold, shap=True)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'KNN distances after features selection', 'KNNshap', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
-        elif method == 'KNNall':
-            if models is not None and train_loaders is not None and test_loader is not None and device is not None:
-                metric = computeKNNshap(models, train_loaders, test_loader, device, shap=False)
-                auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'KNN distances', 'KNNall', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
-                aucs.append((method, auc))
-                balanced_acc.append((method, b_acc))
-                metrics.append((method, metric))
+        
+        with ResourceProfiler(device=device, label=method) as rp:
+            if method == 'MSR':
+                if y_prob is not None and y_true is not None and task_type is not None:
+                    metric = computeMSR(y_prob, y_true, task_type, calibration_needed=False, display_calibration_curve=True)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, y_axis, title, optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+            elif method == 'MSR_temp_scale':
+                if digits is not None and y_true is not None and task_type is not None and digits_calib is not None and y_true_calibration is not None:
+                    metric = computeMSR(digits, y_true, task_type, calibration_needed=True, display_calibration_curve=True, method_calibration=calib_method, y_scores_calibration=digits_calib, y_true_calibration=y_true_calibration)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, y_axis, title + ' after temperature scaling', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+            elif method == 'Ensembling':
+                if indiv_scores is not None:
+                    metric = compute_ensembling(indiv_scores)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'Ensembling Results', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+            elif method == 'TTA':
+                if models is not None and test_dataset_tta is not None and device is not None:
+                    metric = computeTTA('randaugment', models, test_dataset_tta, device, num_classes=num_classes, image_normalization=image_normalization, batch_size=batch_size, color=color)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'TTA', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+            elif method == 'TTA_without_geometric_transforms':
+                if models is not None and test_dataset_tta is not None and device is not None:
+                    metric = computeTTA('randaugment_without_geometric_transforms', models, test_dataset_tta, device, num_classes=num_classes, image_normalization=image_normalization, batch_size=batch_size, color=color)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'TTA_no_geom_transforms', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+            elif method == 'GPS':
+                if models is not None and test_dataset_tta is not None and device is not None:
+                    metric = computeTTA('GPS', models, test_dataset_tta, device, num_classes=num_classes, correct_predictions_calibration=correct_predictions_calibration, incorrect_predictions_calibration=incorrect_predictions_calibration, image_normalization=image_normalization, aug_folder=aug_folder, max_iterations=max_iteration, gps_augment=gps_augment, im_size=image_size, batch_size=batch_size)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'std', 'GPS', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+            elif method == 'KNNshap':
+                if models is not None and train_loaders is not None and test_loader is not None and device is not None and num_classes is not None and latent_spaces is not None and shap_values_folds is not None:
+                    metric = computeKNNshap(models, train_loaders, test_loader, device, num_classes, latent_spaces, shap_values_folds, labels_folds=labels_fold, shap=True)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'KNN distances after features selection', 'KNNshap', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+            elif method == 'KNNall':
+                if models is not None and train_loaders is not None and test_loader is not None and device is not None:
+                    metric = computeKNNshap(models, train_loaders, test_loader, device, shap=False)
+                    auc, b_acc = display_UQ_results(metric, correct_predictions, incorrect_predictions, 'KNN distances', 'KNNall', optim_metric=optim_metric, swarmplot=swarmplot, flag=flag)
+                    aucs.append((method, auc))
+                    balanced_acc.append((method, b_acc))
+                    metrics.append((method, metric))
+                # collect and append resource log
+        rp.records.update({
+            "flag": flag,
+            "num_classes": num_classes,
+            "batch_size": batch_size,
+        })
+        resource_logs.append(rp.records)
+        
+    if resource_logs:
+        with open(log_file, "w") as f:
+            json.dump(resource_logs, f, indent=2)
+        print(f"Saved UQ resource log to: {log_file}")
+        
     return metrics, aucs, balanced_acc
 
 flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist']
