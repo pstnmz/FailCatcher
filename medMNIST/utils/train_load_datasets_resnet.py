@@ -350,7 +350,7 @@ def save_model(model, path):
     print(f"Model saved to {path}")
 
 
-def load_models(flag, device, size=224):
+def load_models(flag, device, waugmentation=False, size=224):
 
     # Load organAMNIST dataset
     data_flag = flag
@@ -367,8 +367,12 @@ def load_models(flag, device, size=224):
             model.fc = nn.Linear(model.fc.in_features, num_classes)  # Output logits for each class
         
         # Load the state dictionary
-        state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}x{size}/resnet18_augmented_{flag}_{size}_{i}.pt')
-
+        if waugmentation:
+            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}x{size}/resnet18_{flag}_{size}_augmented{i}.pt')
+        else:
+            # Load the state dictionary
+            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}x{size}/resnet18_{flag}_{size}_{i}.pt')
+            
         # Remove the 'model.' prefix from the state_dict keys if necessary
         state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}
 

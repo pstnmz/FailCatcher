@@ -58,6 +58,7 @@ def get_prediction(model, image, device):
     return prediction
 
 
+
 def extract_gps_augmentations_info(policies):
     """
     Extracts N, M values and the list of policies from a list of policy filenames.
