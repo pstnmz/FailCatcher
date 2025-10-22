@@ -2,7 +2,6 @@ import UQ_toolbox as uq
 from medMNIST.utils import train_load_datasets_resnet as tr
 import torch
 import torchvision.transforms as transforms
-# ...existing code...
 import os
 import time
 import threading
@@ -91,85 +90,98 @@ class ResourceProfiler:
         self.records = rec
 # -------------------- end profiling helpers --------------------
         
-dataflag = 'tissuemnist'
-color = False # True for color, False for grayscale
-activation = 'softmax'
+#flags = ['bloodmnist', 'bloodmnist', 'octmnist', 'octmnist']#
+flags=['pathmnist', 'pathmnist', 'dermamnist-e', 'organamnist', 'tissuemnist']
+#colors = [True, True, False, False]
+colors = [True, True, True, False, False]
+#activations = ['softmax', 'softmax', 'softmax', 'softmax']
+activations=['softmax', 'softmax', 'softmax', 'softmax', 'softmax']
+#model_augmentations = [False, True, False, True]#, 
+model_augmentations = [False, True, True, True, True]
+#color = True # True for color, False for grayscale
+#activation = 'softmax'  # 'sigmoid' for binary-class, 'softmax' for multi-class
 batch_size = 4000
 device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
 size = 224  # Image size for the models
-output_dir = f'/mnt/data/psteinmetz/archive_notebooks/Documents/medMNIST/gps_augment/{size}*{size}/{dataflag}_calibration_set'
-os.makedirs(output_dir, exist_ok=True)
-model_augmentation = False
+#model_augmentation = False  # Whether the models were trained with data augmentation
 randaugment_ops = 2
 randaugment_mag = 45
 max_iterations = 500
 nb_channels = 3
+for model_augmentation, dataflag, color, activation in zip(model_augmentations, flags, colors, activations):
+    # Loop over different datasets and settings
+    if model_augmentation:
+        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_wdataaug_calibration_set'
+    else:
+        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_calibration_set'
+    os.makedirs(output_dir, exist_ok=True)
 
-print(f"Processing {dataflag} with color={color} and activation={activation}")
-if color is True:
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
-    ])
-    
-    transform_tta = transforms.Compose([
-        transforms.ToTensor()
-    ])
-else:
-    # For grayscale images, repeat the single channel to make it compatible with ResNet
-    # ResNet expects 3 channels, so we repeat the single channel image
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[.5], std=[.5]),
-        transforms.Lambda(lambda x: x.repeat(3, 1, 1))
-    ])
-    
-    transform_tta = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x.repeat(3, 1, 1))
+
+    print(f"Processing {dataflag} with color={color} and activation={activation}")
+    if color is True:
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
         ])
-models = tr.load_models(dataflag, waugmentation=model_augmentation, device=device)
-_, _, info = tr.load_datasets(dataflag, color, size, transform, batch_size)
-task_type = info['task']  # Determine the task type (binary-class or multi-class)
-num_classes = len(info['label'])  # Number of classes
-[_, calibration_dataset_tta, test_dataset_tta], [_, calibration_loader_tta, test_loader_tta], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
+        
+        transform_tta = transforms.Compose([
+            transforms.ToTensor()
+        ])
+    else:
+        # For grayscale images, repeat the single channel to make it compatible with ResNet
+        # ResNet expects 3 channels, so we repeat the single channel image
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[.5], std=[.5]),
+            transforms.Lambda(lambda x: x.repeat(3, 1, 1))
+        ])
+        
+        transform_tta = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Lambda(lambda x: x.repeat(3, 1, 1))
+            ])
+    models = tr.load_models(dataflag, waugmentation=model_augmentation, device=device)
+    _, _, info = tr.load_datasets(dataflag, color, size, transform, batch_size)
+    task_type = info['task']  # Determine the task type (binary-class or multi-class)
+    num_classes = len(info['label'])  # Number of classes
+    [_, calibration_dataset_tta, test_dataset_tta], [_, calibration_loader_tta, test_loader_tta], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
 
-with ResourceProfiler(device=device, label="GPS_calibration_randaugment") as rp:
-    uq.apply_randaugment_and_store_results(
-        calibration_dataset_tta,
-        models,
-        randaugment_ops,
-        randaugment_mag,
-        max_iterations,
-        device,
-        folder_name=output_dir,
-        image_normalization=True,
-        mean=[.5],
-        std=[.5],
-        image_size=size,
-        nb_channels=nb_channels,
-        output_activation=activation,
-        batch_size=batch_size
-    )
+    with ResourceProfiler(device=device, label="GPS_calibration_randaugment") as rp:
+        uq.apply_randaugment_and_store_results(
+            calibration_dataset_tta,
+            models,
+            randaugment_ops,
+            randaugment_mag,
+            max_iterations,
+            device,
+            folder_name=output_dir,
+            image_normalization=True,
+            mean=[.5],
+            std=[.5],
+            image_size=size,
+            nb_channels=nb_channels,
+            output_activation=activation,
+            batch_size=batch_size
+        )
 
-# Save JSON log
-ts = time.strftime("%Y%m%d-%H%M%S")
-log_path = os.path.join(output_dir, f"gps_resource_log_{dataflag}_{ts}.json")
-rec = dict(rp.records)
-rec.update({
-    "flag": dataflag,
-    "color": color,
-    "device": str(device),
-    "im_size": size,
-    "batch_size": batch_size,
-    "activation": activation,
-    "randaugment_ops": randaugment_ops,
-    "randaugment_mag": randaugment_mag,
-    "max_iterations": max_iterations,
-    "nb_channels": nb_channels,
-    "num_models": len(models),
-    "num_calibration_samples": len(calibration_dataset_tta),
-})
-with open(log_path, "w") as f:
-    json.dump(rec, f, indent=2)
-print(f"Saved GPS resource log to: {log_path}")
+    # Save JSON log
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    log_path = os.path.join(output_dir, f"gps_resource_log_{dataflag}_{ts}.json")
+    rec = dict(rp.records)
+    rec.update({
+        "flag": dataflag,
+        "color": color,
+        "device": str(device),
+        "im_size": size,
+        "batch_size": batch_size,
+        "activation": activation,
+        "randaugment_ops": randaugment_ops,
+        "randaugment_mag": randaugment_mag,
+        "max_iterations": max_iterations,
+        "nb_channels": nb_channels,
+        "num_models": len(models),
+        "num_calibration_samples": len(calibration_dataset_tta),
+    })
+    with open(log_path, "w") as f:
+        json.dump(rec, f, indent=2)
+    print(f"Saved GPS resource log to: {log_path}")

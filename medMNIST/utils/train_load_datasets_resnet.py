@@ -7,7 +7,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 from torchvision.models import resnet18, ResNet18_Weights
 import medmnist
 from medmnist import INFO
-from local_dermamnist_e import DermaMNIST_E, DERMAMNIST_E_INFO
+from utils.local_dermamnist_e import DERMAMNIST_E_INFO
 import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.optim as optim
@@ -368,10 +368,10 @@ def load_models(flag, device, waugmentation=False, size=224):
         
         # Load the state dictionary
         if waugmentation:
-            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}x{size}/resnet18_{flag}_{size}_augmented{i}.pt')
+            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_augmented{i}.pt')
         else:
             # Load the state dictionary
-            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}x{size}/resnet18_{flag}_{size}_{i}.pt')
+            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}.pt')
             
         # Remove the 'model.' prefix from the state_dict keys if necessary
         state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}
