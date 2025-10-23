@@ -21,6 +21,8 @@ import random
 import numpy as np
 import os, json, time
 
+torch.backends.cudnn.benchmark=True
+
 
 def _ensure_dir(d):
     os.makedirs(d, exist_ok=True)
@@ -73,11 +75,11 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
 
     return [train_dataset, val_dataset, test_dataset], info
 
-def get_dataloaders(datasets, batch_size=32, num_workers=20):
+def get_dataloaders(datasets, batch_size=32, num_workers=12):
     train_dataset, calib_dataset, test_dataset = datasets
-    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, prefetch_factor=3, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False, prefetch_factor=3, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False, prefetch_factor=3, num_workers=num_workers, pin_memory=True, persistent_workers=True,)
 
     return train_loader, calib_loader, test_loader
 
@@ -86,7 +88,7 @@ def train(model, device, train_loader, optimizer, criterion, epoch):
     model.train()
     epoch_loss = 0
     for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
+        data, target = data.to(device, non_blocking=True), target.to(device, non_blocking=True)
         optimizer.zero_grad()
         output = model(data)
         # Check the criterion type and adjust the target size accordingly
@@ -132,7 +134,7 @@ def validate(model, device, val_loader, criterion):
 
 def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001, device=None,
                    train_loader=None, val_loader=None, test_loader=None, color=False, im_size=224,
-                   transform=None, random_seed=None, output_dir=None, run_name="run"):
+                   transform=None, random_seed=None, output_dir=None, run_name="run", scheduler=False):
         # Optional seeding
     if random_seed is not None:
         import random
@@ -172,6 +174,8 @@ def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001,
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     #optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
+    if scheduler is True:
+        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 75], gamma=0.1)
 
     train_losses = []
     val_losses = []
@@ -187,6 +191,9 @@ def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001,
         ep_t0 = time.time()
         train_loss = train(model, device, train_loader, optimizer, criterion, epoch)
         val_loss = validate(model, device, val_loader, criterion)
+        
+        # (optional) current LR logging
+        current_lr = optimizer.param_groups[0]["lr"]
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -194,7 +201,10 @@ def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001,
         ep_dur = time.time() - ep_t0
         epoch_times.append(ep_dur)
         if output_dir:
-            _append_log(log_path, f"{run_name} epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f} epoch_time_s={ep_dur:.2f}")
+            _append_log(log_path, f"{run_name} epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f} lr={current_lr:.6e} epoch_time_s={ep_dur:.2f}")
+        
+        if scheduler is not None:
+            scheduler.step()
 
         print(f"{run_name} | epoch {epoch}/{num_epochs} | train {train_loss:.4f} | val {val_loss:.4f}")
     
