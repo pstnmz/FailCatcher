@@ -7,16 +7,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os, json, time
 
-flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
-colors = [False, False, False, True, False, True, True, False, True]  # Colors for the flags
-batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640, 128]  # Batch sizes for the flags
-use_randaugment = True         # <- enable/disable RandAugment here
-if use_randaugment:
-    num_epochs = 7
-else:
-    num_epochs = 5
+flags = ['organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
+colors = [False, False, True, False, True, True, False, True]  # Colors for the flags
+#batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640, 128]  # Batch sizes for the flags
+#batch_sizes = [128, 128, 128, 128, 128, 128, 
+batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
+use_randaugment = False         # <- enable/disable RandAugment here
+flags = [flags[1]]          # <- select which dataset to run here
+colors = [colors[1]]
+batch_sizes = [batch_sizes[1]]
 
-cuda = 'cuda:2'
+if use_randaugment:
+    num_epochs = 100
+else:
+    num_epochs = 100
+
+cuda = 'cuda:1'
 for flag, color, batch_size in zip(flags, colors, batch_sizes):
     print(f"Training on {flag} with color={color} and batch_size={batch_size}")
     
@@ -89,11 +95,12 @@ for flag, color, batch_size in zip(flags, colors, batch_sizes):
             val_loader=val_loaders[i],
             test_loader=test_loader,
             num_epochs=num_epochs,
-            learning_rate=0.0001,
+            learning_rate=0.001,
             device=cuda,
             random_seed=42,
             output_dir=exp_dir,
-            run_name=f"fold_{i}"    
+            run_name=f"fold_{i}",
+            scheduler=True    
         )
         models.append(model)
         results.append(res)
