@@ -13,16 +13,16 @@ colors = [False, False, True, False, True, True, False, True]  # Colors for the 
 #batch_sizes = [128, 128, 128, 128, 128, 128, 
 batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
 use_randaugment = False         # <- enable/disable RandAugment here
-flags = [flags[1]]          # <- select which dataset to run here
-colors = [colors[1]]
-batch_sizes = [batch_sizes[1]]
+flags = [flags[-1]]          # <- select which dataset to run here
+colors = [colors[-1]]
+batch_sizes = [batch_sizes[-1]]
 
 if use_randaugment:
     num_epochs = 100
 else:
     num_epochs = 100
 
-cuda = 'cuda:1'
+cuda = 'cuda:2'
 for flag, color, batch_size in zip(flags, colors, batch_sizes):
     print(f"Training on {flag} with color={color} and batch_size={batch_size}")
     
