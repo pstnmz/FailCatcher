@@ -23,6 +23,40 @@ import os, json, time
 
 torch.backends.cudnn.benchmark=True
 
+# Prefetcher: moves batches to device asynchronously to overlap CPU/GPU work
+class PrefetchLoader:
+    def __init__(self, loader, device):
+        self.loader = loader
+        self.device = torch.device(device)
+        self.stream = torch.cuda.Stream() if self.device.type == 'cuda' else None
+        # expose common attributes for compatibility (e.g. `.dataset`, `.batch_size`, ...)
+        self.dataset = getattr(loader, "dataset", None)
+        self.batch_size = getattr(loader, "batch_size", None)
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        self._iter = iter(self.loader)
+        return self
+
+    def __next__(self):
+        batch = next(self._iter)  # may raise StopIteration
+        if self.stream is None:
+            x, y = batch
+            return x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
+        # async copy on separate stream
+        with torch.cuda.stream(self.stream):
+            x, y = batch
+            x = x.to(self.device, non_blocking=True)
+            y = y.to(self.device, non_blocking=True)
+        # ensure main stream waits for the prefetch stream
+        torch.cuda.current_stream().wait_stream(self.stream)
+        return x, y
+
+    def __getattr__(self, name):
+        # Delegate unknown attributes to the underlying loader (keeps compatibility)
+        return getattr(self.loader, name)
 
 def _ensure_dir(d):
     os.makedirs(d, exist_ok=True)
@@ -75,13 +109,50 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
 
     return [train_dataset, val_dataset, test_dataset], info
 
-def get_dataloaders(datasets, batch_size=32, num_workers=12):
+def get_dataloaders(datasets, batch_size=32, num_workers=None):
+    # default: half of CPUs but allow override via NUM_WORKERS env var
+    if num_workers is None:
+        try:
+            # explicit override (preferred)
+            env_n = os.environ.get("NUM_WORKERS")
+            if env_n is not None:
+                num_workers = int(env_n)
+            else:
+                # conservative shared‑machine heuristic:
+                n_cpu = os.cpu_count() or 1
+                # how many concurrent users share the machine (set via env if known)
+                n_users = int(os.environ.get("SHARED_USERS", "4"))
+                # allocate a modest fraction per user (very conservative)
+                per_user = max(2, n_cpu // (n_users * 8))
+                # clamp to reasonable bounds
+                num_workers = int(min(max(per_user, 2), 16))
+        except Exception:
+            num_workers = 4
+
     train_dataset, calib_dataset, test_dataset = datasets
-    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, prefetch_factor=3, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False, prefetch_factor=3, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False, prefetch_factor=3, num_workers=num_workers, pin_memory=True, persistent_workers=True,)
+    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True,
+                              prefetch_factor=3, num_workers=num_workers,
+                              pin_memory=True, persistent_workers=True)
+    calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False,
+                              prefetch_factor=3, num_workers=num_workers,
+                              pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False,
+                             prefetch_factor=3, num_workers=num_workers,
+                             pin_memory=True, persistent_workers=True,)
 
     return train_loader, calib_loader, test_loader
+
+# small helper to benchmark loader throughput
+def benchmark_loader(loader, n_batches=50):
+    t0 = time.time()
+    n = 0
+    for i, (x, y) in enumerate(loader):
+        n += x.size(0)
+        if i + 1 >= n_batches:
+            break
+    dt = time.time() - t0
+    print(f"Loader: {n} samples in {dt:.2f}s -> {n/dt:.1f} samples/s")
+    return n/dt
 
 
 def train(model, device, train_loader, optimizer, criterion, epoch):
@@ -160,6 +231,15 @@ def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001,
         _, _, info = datasets_and_loaders  # keep info
 
     num_classes = len(info['label'])
+    
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Wrap loaders with PrefetchLoader to overlap copies (only for CUDA)
+    if device and 'cuda' in str(device).lower():
+        train_loader = PrefetchLoader(train_loader, device)
+        val_loader = PrefetchLoader(val_loader, device)
+        test_loader = PrefetchLoader(test_loader, device)
 
     model = models.resnet18(weights=ResNet18_Weights.DEFAULT)
     in_features = model.fc.in_features
