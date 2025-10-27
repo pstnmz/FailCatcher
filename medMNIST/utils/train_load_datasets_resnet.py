@@ -646,6 +646,7 @@ def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
                 num_workers = int(min(max(per_user, 2), 16))
         except Exception:
             num_workers = 4
+        print(f"CV loaders: using num_workers={num_workers}")
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
 
