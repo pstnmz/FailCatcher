@@ -6,15 +6,14 @@ from torch.utils.data import DataLoader
 import torch
 import os, json, time
 
-flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e', 'breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
-colors = [False, False, False, True, False, True, True, False, True, False, False, False, True, False, True, True, False, True]  # Colors for the flags
+#flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 
+flags = ['tissuemnist', 'dermamnist-e', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
+#colors = [False, False, False, True, False, True, True, 
+colors=[False, True, False, False, True, False, True, True, False, True]  # Colors for the flags
 #batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640, 128]  # Batch sizes for the flags
 #batch_sizes = [128, 128, 128, 128, 128, 128, 
-batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
-use_randaugments = [False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True]         # <- enable/disable RandAugment here
-#flags = [flags[-1]]          # <- select which dataset to run here
-#colors = [colors[-1]]
-#batch_sizes = [batch_sizes[-1]]
+batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
+use_randaugments = [False, True, True, True, True, True, True, True, True]         # <- enable/disable RandAugment here
 
 num_epochs = 100
 
@@ -32,86 +31,92 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
     os.makedirs(os.path.join(exp_dir, "figs"), exist_ok=True)
 
     if color is True:
-        # Base for caching: only ToTensor (unnormalized) — caches store unnormalized data.
-        transform_base = transforms.Compose([
-            transforms.ToTensor()
-        ])
-        # Normalize to apply at runtime (both train and val/test)
         normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
-        # augment-only transform applied at runtime; includes Normalize at the end so model sees normalized tensors
-        transform_augment = transforms.Compose([
-            transforms.Lambda(lambda x: to_pil_image(x) if torch.is_tensor(x) else x),
-            transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag),
-            transforms.ToTensor(),
-            normalize,
-        ])
-        transform_train = transform_augment  # runtime augment+normalize
-        transform_eval = transforms.Compose([transforms.ToTensor(), normalize])  # for on-the-fly eval (non-cached path)
+        if use_randaugment:
+            # cache unnormalized; apply RandAugment + Normalize at runtime for training
+            transform_base = transforms.Compose([transforms.ToTensor()])
+            transform_train = transforms.Compose([
+                transforms.Lambda(lambda x: to_pil_image(x) if torch.is_tensor(x) else x),
+                transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag),
+                transforms.ToTensor(),
+                normalize,
+            ])
+            # val/test: normalize at runtime
+            transform_eval = transforms.Compose([transforms.ToTensor(), normalize])
+        else:
+            # cache normalized tensors (normalization performed once at cache time)
+            transform_base = transforms.Compose([transforms.ToTensor(), normalize])
+            transform_train = None
+            transform_eval = transform_base
 
     else:
-        # Base for caching: ToTensor + repeat to 3 channels (unnormalized)
-        transform_base = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Lambda(lambda x: x.repeat(3, 1, 1))
-        ])
         normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
-        transform_augment = transforms.Compose([
-            transforms.Lambda(lambda x: to_pil_image(x) if torch.is_tensor(x) else x),
-            transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag),
-            transforms.ToTensor(),
-            normalize,
-        ])
-        transform_train = transform_augment
-        transform_eval = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.repeat(3,1,1)), normalize])
+        if use_randaugment:
+            # cache unnormalized; repeat channels after ToTensor, apply augment+normalize at runtime
+            transform_base = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.repeat(3,1,1))])
+            transform_train = transforms.Compose([
+                transforms.Lambda(lambda x: to_pil_image(x) if torch.is_tensor(x) else x),
+                transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag),
+                transforms.ToTensor(),
+                normalize,
+            ])
+            transform_eval = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.repeat(3,1,1)), normalize])
+        else:
+            # cache normalized tensors (repeat then normalize once)
+            transform_base = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.repeat(3,1,1)), normalize])
+            transform_train = None
+            transform_eval = transform_base
 
 
-    # IMPORTANT: call load_datasets with the unnormalized base transform so CacheDataset stores raw tensors.
-        # transform_base is unnormalized (ToTensor +/- repeat). We'll apply Normalize at runtime.
+    # Build datasets using transform_base (cached transform). When use_randaugment == False
+    # transform_base already includes Normalize so cache will be normalized once.
     [study_dataset_plain, calibration_dataset, test_dataset], [_, _, _], info = tr.load_datasets(flag, color, size, transform_base, batch_size)
-    
-    # Build normalized val/test loaders from the plain datasets (apply normalize at runtime)
-    class NormalizeWrapper(torch.utils.data.Dataset):
-        def __init__(self, ds, normalize_transform):
-            self.ds = ds
-            self.normalize = normalize_transform
-        def __len__(self):
-            return len(self.ds)
-        def __getitem__(self, idx):
-            x, y = self.ds[idx]
-            x = self.normalize(x)
-            return x, y
-    
-    # choose a modest number of workers for val/test loaders (shared machine)
+
+    # create calibration/test loaders:
     num_workers_val = 2
-    # create normalized calibration and test loaders
-    calibration_loader = DataLoader(NormalizeWrapper(calibration_dataset, normalize), batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
-    test_loader = DataLoader(NormalizeWrapper(test_dataset, normalize), batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
+    if use_randaugment:
+        # cache is unnormalized -> apply normalize at runtime for val/test
+        class NormalizeWrapper(torch.utils.data.Dataset):
+            def __init__(self, ds, normalize_transform):
+                self.ds = ds
+                self.normalize = normalize_transform
+            def __len__(self):
+                return len(self.ds)
+            def __getitem__(self, idx):
+                x, y = self.ds[idx]
+                x = self.normalize(x)
+                return x, y
+        calibration_loader = DataLoader(NormalizeWrapper(calibration_dataset, normalize), batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
+        test_loader = DataLoader(NormalizeWrapper(test_dataset, normalize), batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
+    else:
+        # cache already normalized -> use datasets directly
+        calibration_loader = DataLoader(calibration_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
 
     # Decide loader/cache strategy
     use_monai_loader = True       # set False to force torch DataLoader
     use_cache = True              # set False to disable MONAI CacheDataset
     cache_rate = 1.0              # fraction of items to cache (0..1)
-    num_workers = None            # or set explicit int / use NUM_WORKERS env var
+    num_workers = 8            # or set explicit int / use NUM_WORKERS env var
 
     if use_randaugment:
         print(f'Using RandAugment with {randaugment_ops} ops and magnitude {randaugment_mag}')
-        # IMPORTANT: do NOT build the augmented dataset for caching.  We keep the base (deterministic)
-        # dataset for caching and apply RandAugment on-the-fly via train_augment_transform so it
-        # remains random each epoch.
+        # cache is unnormalized; pass augment (which includes Normalize) and do NOT set normalize_transform
         train_loaders, val_loaders = tr.CV_train_val_loaders(
-            None,  # don't pass an already-augmented dataset as cache source
+            None,
             study_dataset_plain,
             batch_size=batch_size,
             use_monai=use_monai_loader,
             use_cache=use_cache,
             cache_rate=cache_rate,
-            train_augment_transform=transform_train,  # transform_train includes Normalize at the end
-            normalize_transform=normalize,            # ensure val cached folds are normalized
+            train_augment_transform=transform_train,  # augment + Normalize at runtime
+            normalize_transform=None,                 # cache unnormalized -> do not trigger denorm/re-norm wrappers
             num_workers=num_workers,
             pin_memory=True
         )
     else:
         print('Not using RandAugment')
+        # cache already normalized; no runtime augment or normalize needed
         train_loaders, val_loaders = tr.CV_train_val_loaders(
             None,
             study_dataset_plain,
@@ -120,7 +125,7 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
             use_cache=use_cache,
             cache_rate=cache_rate,
             train_augment_transform=None,
-            normalize_transform=normalize,
+            normalize_transform=None,
             num_workers=num_workers,
             pin_memory=True
         )
