@@ -2,6 +2,7 @@ from utils import train_load_datasets_resnet as tr
 from torch.utils.data import ConcatDataset
 from torchvision import transforms
 from torchvision.transforms.functional import to_pil_image
+from monai.data import CacheDataset as MONAI_CacheDataset, ThreadDataLoader as MONAI_ThreadDataLoader
 from torch.utils.data import DataLoader
 import torch
 import os, json, time
@@ -14,7 +15,10 @@ colors=[False, True, False, False, True, False, True, True, False, True]  # Colo
 #batch_sizes = [128, 128, 128, 128, 128, 128, 
 batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
 use_randaugments = [False, True, True, True, True, True, True, True, True]         # <- enable/disable RandAugment here
-
+flags = ['breastmnist']
+colors = [False]
+batch_sizes = [128]
+use_randaugments = [True]
 num_epochs = 100
 
 cuda = 'cuda:2'
@@ -73,7 +77,7 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
     [study_dataset_plain, calibration_dataset, test_dataset], [_, _, _], info = tr.load_datasets(flag, color, size, transform_base, batch_size)
 
     # create calibration/test loaders:
-    num_workers_val = 2
+    num_workers_val = 8
     if use_randaugment:
         # cache is unnormalized -> apply normalize at runtime for val/test
         class NormalizeWrapper(torch.utils.data.Dataset):
@@ -86,18 +90,66 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
                 x, y = self.ds[idx]
                 x = self.normalize(x)
                 return x, y
-        calibration_loader = DataLoader(NormalizeWrapper(calibration_dataset, normalize), batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
-        test_loader = DataLoader(NormalizeWrapper(test_dataset, normalize), batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
+        test_loader = DataLoader(NormalizeWrapper(test_dataset, normalize), batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True, persistent_workers=(num_workers_val>0))
     else:
         # cache already normalized -> use datasets directly
-        calibration_loader = DataLoader(calibration_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True, persistent_workers=(num_workers_val>0))
 
     # Decide loader/cache strategy
     use_monai_loader = True       # set False to force torch DataLoader
     use_cache = True              # set False to disable MONAI CacheDataset
     cache_rate = 1.0              # fraction of items to cache (0..1)
     num_workers = 8            # or set explicit int / use NUM_WORKERS env var
+
+        # --- optional: build MONAI cached, normalized eval loaders (always when use_cache True) ---
+    if use_cache and use_monai_loader:
+        try:
+            def _build_data_list(ds):
+                data_list = []
+                if isinstance(ds, torch.utils.data.Subset):
+                    base = ds.dataset
+                    indices = ds.indices
+                else:
+                    base = ds
+                    indices = range(len(ds))
+                for i in indices:
+                    item = base[i]
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        img, lbl = item[0], int(item[1])
+                    elif isinstance(item, dict) and 'image' in item:
+                        img, lbl = item['image'], int(item['label'])
+                    else:
+                        raise RuntimeError("Unsupported item format for caching")
+                    arr = img.detach().cpu().numpy() if torch.is_tensor(img) else _np.asarray(img)
+                    data_list.append({'image': arr, 'label': int(lbl)})
+                return data_list
+
+            def _to_tensor_normalized(d):
+                import torch as _torch
+                img = _torch.from_numpy(d['image']).float()
+                # If your transform_base already normalized (use_randaugment==False) this is a no-op.
+                # If transform_base was unnormalized (use_randaugment==True), ensure we apply normalize here
+                # for cached eval sets (so cached eval tensors are normalized once).
+                try:
+                    img = normalize(img)
+                except Exception:
+                    # fallback: if normalize not defined for some reason, leave as-is
+                    pass
+                lbl = _torch.tensor(int(d['label']), dtype=_torch.long)
+                return img, lbl
+
+            test_list  = _build_data_list(test_dataset)
+            test_cache_ds  = MONAI_CacheDataset(data=test_list,  transform=_to_tensor_normalized, cache_rate=1.0)
+            test_cache_loader  = MONAI_ThreadDataLoader(test_cache_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers_val, pin_memory=True)
+
+            # pre-warm eval caches so first evaluation is smooth
+            for _ in test_cache_loader:
+                pass
+
+            test_loader = test_cache_loader
+            print("Using MONAI cached eval loaders for test (normalized).")
+        except Exception as e:
+            print("Failed to build MONAI cached eval loaders (fallback to existing eval loaders):", e)
 
     if use_randaugment:
         print(f'Using RandAugment with {randaugment_ops} ops and magnitude {randaugment_mag}')
@@ -112,7 +164,8 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
             train_augment_transform=transform_train,  # augment + Normalize at runtime
             normalize_transform=None,                 # cache unnormalized -> do not trigger denorm/re-norm wrappers
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=True,
+            prewarm_cache=True                         # pre-warm per-fold caches to avoid stalls during epochs
         )
     else:
         print('Not using RandAugment')
@@ -127,7 +180,8 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
             train_augment_transform=None,
             normalize_transform=None,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=True,
+            prewarm_cache=True                         # pre-warm per-fold caches to avoid stalls during epochs
         )
 
     models = []
