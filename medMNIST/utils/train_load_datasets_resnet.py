@@ -307,7 +307,7 @@ def validate(model, device, val_loader, criterion):
     correct = 0
     with torch.no_grad():
         for data, target in val_loader:
-            data, target = data.to(device), target.to(device)
+            data, target = data.to(device, non_blocking=True), target.to(device, non_blocking=True)
             output = model(data)
             if isinstance(criterion, nn.BCEWithLogitsLoss):
                 target_t = target.float().view(-1, 1)
@@ -625,7 +625,7 @@ def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
                          n_splits=5, seed=42,
                          use_monai=False, use_cache=False, cache_rate=1.0,
                          train_augment_transform=None, normalize_transform=None,
-                         num_workers=None, pin_memory=True):
+                         num_workers=None, pin_memory=True, prewarm_cache=False):
     """
     Create CV train/val DataLoaders with optional MONAI ThreadDataLoader and CacheDataset support.
     - use_monai: prefer MONAI ThreadDataLoader (if available)
@@ -804,12 +804,22 @@ def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
 
                 train_loader = MONAI_loader(train_ds_wrapped, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory, collate_fn=None)
                 val_loader = MONAI_loader(val_ds_wrapped, batch_size=batch_size, shuffle=False, num_workers=max(0, num_workers), pin_memory=pin_memory, collate_fn=None)
+                if prewarm_cache and use_cache:
+                    try:
+                        t0 = time.time()
+                        print("Pre-warming MONAI cache for this fold (this may take some time)...")
+                        for _ in train_loader:
+                            pass
+                        print(f"Cache pre-warm done ({time.time()-t0:.1f}s)")
+                    except Exception as e:
+                        print("Pre-warm failed or was interrupted:", e)
             except Exception as e:
                 print("MONAI CacheDataset failed for fold:", e, "- falling back to torch DataLoader.")
+                persistent = True if (num_workers and num_workers > 0) else False
                 train_loader = DataLoader(dataset=train_subset, batch_size=batch_size, shuffle=True,
-                                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True)
+                                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
                 val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
-                                        num_workers=max(0, num_workers), pin_memory=pin_memory)
+                                        num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
         else:
             # no caching: optionally wrap train subset with runtime augment transform
             if train_augment_transform is not None:
@@ -865,15 +875,17 @@ def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
                     val_loader = MONAI_loader(val_subset, batch_size=batch_size, shuffle=False,
                                               num_workers=max(0, num_workers), pin_memory=pin_memory, collate_fn=None)
                 except Exception:
+                    persistent = True if (num_workers and num_workers > 0) else False
                     train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
-                                              num_workers=num_workers, pin_memory=pin_memory, drop_last=True)
+                                              num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
                     val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
-                                            num_workers=max(0, num_workers), pin_memory=pin_memory)
+                                            num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
             else:
+                persistent = True if (num_workers and num_workers > 0) else False
                 train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
-                                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True)
+                                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
                 val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
-                                        num_workers=max(0, num_workers), pin_memory=pin_memory)
+                                        num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
 
         train_loaders.append(train_loader)
         val_loaders.append(val_loader)
