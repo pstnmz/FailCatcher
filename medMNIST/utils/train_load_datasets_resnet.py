@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.optim as optim
 from torchvision.transforms.functional import to_pil_image
+from PIL import Image
 from torchvision import transforms as T
 from torchvision.models import ResNet18_Weights
 import numpy as np
@@ -23,6 +24,7 @@ import random
 import numpy as np
 import os, json, time
 from monai.data import ThreadDataLoader as MONAI_ThreadDataLoader
+from monai.data import CacheDataset as MONAI_CacheDataset
 MONAI_AVAILABLE = True
 
 torch.backends.cudnn.benchmark=True
@@ -74,7 +76,7 @@ def _append_log(path, text):
         f.write(text.rstrip() + '\n')
 
 
-def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=False, transform=None):
+def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=False, transform=None, transform_test=None):
     if random_seed is not None:
         torch.manual_seed(random_seed)
         np.random.seed(random_seed)
@@ -101,22 +103,18 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
             # ResNet expects 3 channels, so we repeat the single channel image
             transform = transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[.5], std=[.5]),
-                transforms.Lambda(lambda x: x.repeat(3, 1, 1))
+                transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
+                transforms.Normalize(mean=[.5], std=[.5])
             ])
 
-    
     train_dataset = DataClass(split='train', transform=transform, size=im_size, download=download)
     val_dataset = DataClass(split='val', transform=transform, size=im_size, download=download)
-    test_dataset = DataClass(split='test', transform=transform, size=im_size, download=download)
-
+    test_dataset = DataClass(split='test', transform=transform_test, size=im_size, download=download)
 
     return [train_dataset, val_dataset, test_dataset], info
 
-def get_dataloaders(datasets, batch_size=32, num_workers=None,
-                    use_monai=False, monai_params=None,
-                    use_cache=False, cache_backend='monai', cache_rate=1.0,
-                    train_augment_transform=None):
+
+def get_dataloaders(datasets, batch_size=32, num_workers=None, use_monai=False, monai_params=None, use_cache_test=False, cache_backend='monai', cache_rate=1.0):
     """
     Build dataloaders for (train, calibration, test) datasets.
 
@@ -149,10 +147,9 @@ def get_dataloaders(datasets, batch_size=32, num_workers=None,
     train_dataset, calib_dataset, test_dataset = datasets
 
     # MONAI CacheDataset backend (preferred when use_cache=True)
-    if use_cache and cache_backend == 'monai' and MONAI_AVAILABLE:
+    if use_cache_test and cache_backend == 'monai' and MONAI_AVAILABLE:
         try:
-            from monai.data import CacheDataset as MONAI_CacheDataset
-            # build MONAI-style data list (dicts with 'image' numpy and 'label')
+            # build MONAI-style data list (keep tensors as tensors to avoid needless numpy<->tensor roundtrip)
             def _build_data_list(ds):
                 data_list = []
                 if isinstance(ds, torch.utils.data.Subset):
@@ -170,60 +167,40 @@ def get_dataloaders(datasets, batch_size=32, num_workers=None,
                     else:
                         raise RuntimeError("Unsupported dataset item format for MONAI caching.")
                     if torch.is_tensor(img):
-                        arr = img.detach().cpu().numpy()
+                        # keep tensor (detached on CPU) to avoid round-trip
+                        data_list.append({'image_tensor': img.detach().cpu(), 'label': int(lbl)})
                     else:
-                        arr = np.asarray(img)
-                    data_list.append({'image': arr, 'label': int(lbl)})
+                        # keep numpy array
+                        data_list.append({'image_numpy': np.asarray(img), 'label': int(lbl)})
                 return data_list
-
-            train_list = _build_data_list(train_dataset)
-            calib_list = _build_data_list(calib_dataset)
+            
             test_list = _build_data_list(test_dataset)
 
-            # transform that returns (tensor, label)
+            # transform that returns (tensor, label) and handles both stored tensor or numpy
             def _to_tensor_tuple(d):
-                import torch as _torch
-                img = _torch.from_numpy(d['image']).float()
-                lbl = _torch.tensor(int(d['label']), dtype=_torch.long)
+                if 'image_tensor' in d:
+                    img = d['image_tensor']
+                    if not isinstance(img, torch.Tensor):
+                        img = torch.as_tensor(img)
+                    img = img.float()
+                else:
+                    img = torch.from_numpy(d['image_numpy']).float()
+                lbl = torch.tensor(int(d['label']), dtype=torch.long)
                 return img, lbl
 
-            train_cache_ds = MONAI_CacheDataset(data=train_list, transform=_to_tensor_tuple, cache_rate=float(cache_rate))
-            calib_cache_ds = MONAI_CacheDataset(data=calib_list, transform=_to_tensor_tuple, cache_rate=float(cache_rate))
             test_cache_ds  = MONAI_CacheDataset(data=test_list,  transform=_to_tensor_tuple, cache_rate=float(cache_rate))
-
-            # Optional runtime augmentation for training cached dataset
-            if train_augment_transform is not None:
-                class AugmentCachedDataset(torch.utils.data.Dataset):
-                    def __init__(self, cache_ds, augment):
-                        self.cache_ds = cache_ds
-                        self.augment = augment
-                    def __len__(self):
-                        return len(self.cache_ds)
-                    def __getitem__(self, idx):
-                        x, y = self.cache_ds[idx]  # x is tensor on CPU
-                        try:
-                            x_aug = self.augment(x)
-                        except Exception:
-                            from torchvision.transforms.functional import to_pil_image, to_tensor
-                            x_pil = to_pil_image(x)
-                            x_aug = self.augment(x_pil)
-                            if not torch.is_tensor(x_aug):
-                                x_aug = to_tensor(x_aug)
-                        return x_aug, y
-                train_ds_wrapped = AugmentCachedDataset(train_cache_ds, train_augment_transform)
-            else:
-                train_ds_wrapped = train_cache_ds
 
             mp = monai_params or {}
             mp.setdefault("pin_memory", True)
             mp.setdefault("batch_size", batch_size)
             mp.setdefault("num_workers", num_workers)
-            train_loader = MONAI_ThreadDataLoader(train_ds_wrapped, batch_size=mp["batch_size"],
-                                                  shuffle=True, num_workers=mp["num_workers"],
-                                                  pin_memory=mp["pin_memory"], collate_fn=None)
-            calib_loader = MONAI_ThreadDataLoader(calib_cache_ds, batch_size=mp["batch_size"],
-                                                  shuffle=False, num_workers=mp["num_workers"],
-                                                  pin_memory=mp["pin_memory"], collate_fn=None)
+            
+            train_loader = MONAI_ThreadDataLoader(train_dataset, batch_size=mp["batch_size"],
+                                              shuffle=True, num_workers=mp["num_workers"],
+                                              pin_memory=mp["pin_memory"], collate_fn=None)
+            calib_loader = MONAI_ThreadDataLoader(calib_dataset, batch_size=mp["batch_size"],
+                                              shuffle=False, num_workers=mp["num_workers"],
+                                              pin_memory=mp["pin_memory"], collate_fn=None)
             test_loader = MONAI_ThreadDataLoader(test_cache_ds, batch_size=mp["batch_size"],
                                                  shuffle=False, num_workers=mp["num_workers"],
                                                  pin_memory=mp["pin_memory"], collate_fn=None)
@@ -233,7 +210,7 @@ def get_dataloaders(datasets, batch_size=32, num_workers=None,
             print("MONAI CacheDataset construction failed, falling back to non-cached loaders:", e)
 
     # If MONAI ThreadDataLoader requested (no caching) and available
-    if use_monai and MONAI_AVAILABLE:
+    if use_cache_test is False and use_monai and MONAI_AVAILABLE:
         mp = monai_params or {}
         mp.setdefault("pin_memory", True)
         mp.setdefault("batch_size", batch_size)
@@ -598,8 +575,8 @@ def load_models(flag, device, waugmentation=False, size=224):
         models.append(model)
     return models
 
-def load_datasets(dataflag, color, im_size, transform, batch_size):    
-    datasets, info = get_datasets(dataflag, im_size=im_size, color=color, transform=transform)
+def load_datasets(dataflag, color, im_size, transform, batch_size, use_monai=False, cache_test=False, transform_test=None):    
+    datasets, info = get_datasets(dataflag, im_size=im_size, color=color, transform=transform, transform_test=transform_test)
     # Combine train_dataset and val_dataset
     combined_train_dataset = ConcatDataset([datasets[0], datasets[1]])
 
@@ -614,18 +591,15 @@ def load_datasets(dataflag, color, im_size, transform, batch_size):
     train_dataset, calibration_dataset = random_split(combined_train_dataset, [train_size, calibration_size])
     test_dataset = datasets[2]  # Use the test dataset as is
 
-    dataloaders = get_dataloaders([train_dataset, calibration_dataset, test_dataset], batch_size=batch_size)
+    dataloaders = get_dataloaders([train_dataset, calibration_dataset, test_dataset], batch_size=batch_size, use_monai=use_monai, use_cache_test=cache_test)
 
     print(f'Training dataset size: {len(train_dataset)}')
     print(f'Calibration dataset size: {len(calibration_dataset)}')
     
     return [train_dataset, calibration_dataset, test_dataset], dataloaders, info
 
-def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
-                         n_splits=5, seed=42,
-                         use_monai=False, use_cache=False, cache_rate=1.0,
-                         train_augment_transform=None, normalize_transform=None,
-                         num_workers=None, pin_memory=True, prewarm_cache=False):
+def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
+                         n_splits=5, seed=42, use_monai=False, use_cache=False, cache_rate=1.0, train_augment_transform=None, num_workers=None, pin_memory=True, prewarm_cache=False):
     """
     Create CV train/val DataLoaders with optional MONAI ThreadDataLoader and CacheDataset support.
     - use_monai: prefer MONAI ThreadDataLoader (if available)
@@ -651,11 +625,11 @@ def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
 
     # Labels from the plain (non-augmented) view
-    labels = [label for _, label in train_dataset_plain]
+    labels = [label for _, label in study_dataset_plain]
 
     train_loaders = []
     val_loaders = []
-
+    normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
     use_monai_local = bool(use_monai) and MONAI_AVAILABLE
     MONAI_loader = globals().get('MONAI_ThreadDataLoader', None)
 
@@ -676,131 +650,101 @@ def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
             else:
                 raise RuntimeError("Unsupported dataset item format for caching.")
             if torch.is_tensor(img):
-                arr = img.detach().cpu().numpy()
+                data_list.append({'image_tensor': img.detach().cpu(), 'label': int(lbl)})
             else:
-                arr = np.asarray(img)
-            data_list.append({'image': arr, 'label': int(lbl)})
+                data_list.append({'image_numpy': np.asarray(img), 'label': int(lbl)})
         return data_list
 
     for train_index, val_index in skf.split(np.zeros(len(labels)), labels):
         # Build subsets (indices are relative to the combined train set)
-        if train_dataset_aug is not None:
-            train_subset = torch.utils.data.Subset(train_dataset_aug, train_index)
+        if study_dataset_aug is not None:
+            train_subset = torch.utils.data.Subset(study_dataset_aug, train_index)
         else:
-            train_subset = torch.utils.data.Subset(train_dataset_plain, train_index)
-        val_subset = torch.utils.data.Subset(train_dataset_plain, val_index)
+            train_subset = torch.utils.data.Subset(study_dataset_plain, train_index)
+        val_subset = torch.utils.data.Subset(study_dataset_plain, val_index)
 
         # If caching with MONAI is requested and available, build CacheDataset per-fold
         if use_cache and use_monai_local:
             try:
-                from monai.data import CacheDataset
                 train_list = _build_data_list_from_subset(train_subset)
                 val_list = _build_data_list_from_subset(val_subset)
 
                 def _to_tensor_tuple(d):
-                    import torch as _torch
-                    img = _torch.from_numpy(d['image']).float()
-                    lbl = _torch.tensor(int(d['label']), dtype=_torch.long)
+                    # handle cached tensor or numpy entry without unnecessary roundtrip
+                    if 'image_tensor' in d:
+                        img = d['image_tensor']
+                        if not isinstance(img, torch.Tensor):
+                            img = torch.as_tensor(img)
+                        img = img.float()
+                    else:
+                        img = torch.from_numpy(d['image_numpy']).float()
+                    # when training uses RandAugment we want val cached as normalized tensors
+                    if train_augment_transform is not None:
+                        img = normalize(img)
+                    lbl = torch.tensor(int(d['label']), dtype=torch.long)
                     return img, lbl
+                def _to_train_cached(d):
+                    # produce cached item for training: prefer to keep tensor when possible,
+                    # but convert to PIL if we want to cache PIL for faster augment use
+                    if 'image_tensor' in d:
+                        img = d['image_tensor']
+                        if not isinstance(img, torch.Tensor):
+                            img = torch.as_tensor(img)
+                        img = img.float()
+                    else:
+                        img = torch.from_numpy(d['image_numpy']).float()
 
-                train_cache_ds = CacheDataset(data=train_list, transform=_to_tensor_tuple, cache_rate=float(cache_rate))
-                val_cache_ds = CacheDataset(data=val_list, transform=_to_tensor_tuple, cache_rate=float(cache_rate))
+                    if train_augment_transform is not None:
+                        # cache as PIL to avoid repeated to_pil_image at runtime (optional)
+                        img_pil = to_pil_image(torch.clamp(img, 0., 1.))
+                        lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                        return img_pil, lbl
+                    else:
+                        lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                        return img, lbl
+                train_cache_ds = MONAI_CacheDataset(data=train_list, transform=_to_train_cached, cache_rate=float(cache_rate))
+                val_cache_ds = MONAI_CacheDataset(data=val_list, transform=_to_tensor_tuple, cache_rate=float(cache_rate))
 
                 # wrap training cached dataset with augment transform if requested (augment should include Normalize)
                 if train_augment_transform is not None:
                     class AugmentCachedDataset(torch.utils.data.Dataset):
                         """
                         Wrap a cached dataset and apply a (PIL-based) augment transform at runtime.
-                        If the cache contains normalized tensors, provide normalize_transform so the
-                        wrapper will de-normalize -> PIL -> augment -> tensor -> re-normalize.
+                        
+                        wrapper will augment -> tensor -> normalize.
                         """
-                        def __init__(self, cache_ds, augment, normalize_transform=None):
+                        def __init__(self, cache_ds, augment):
                             self.cache_ds = cache_ds
                             self.augment = augment
-                            self.normalize = normalize_transform
-                            # build tensors for inverse normalization if provided
-                            if self.normalize is not None:
-                                mean = torch.tensor(self.normalize.mean).view(-1, 1, 1)
-                                std = torch.tensor(self.normalize.std).view(-1, 1, 1)
-                                self._mean = mean
-                                self._std = std
-                            else:
-                                self._mean = None
-                                self._std = None
 
                         def __len__(self):
                             return len(self.cache_ds)
 
-                        def _denormalize(self, x):
-                            if self._mean is None:
-                                return x
-                            return x * self._std + self._mean
-
-                        def __getitem__(self, idx):
-                            x, y = self.cache_ds[idx]  # x is tensor (possibly normalized) on CPU
-                            x = x.detach().cpu().float()
-
-                            # De-normalize to [0,1] image space for PIL augmentations if needed
-                            x_dn = self._denormalize(x)
-                            x_dn = torch.clamp(x_dn, 0.0, 1.0)
-
-                            # Prefer PIL path (most RandAugment usages expect PIL). If that fails, try tensor path.
-                            try:
-                                x_pil = to_pil_image(x_dn)
-                                aug_res = self.augment(x_pil)
-                                if torch.is_tensor(aug_res):
-                                    x_aug = aug_res
-                                else:
-                                    x_aug = T.ToTensor()(aug_res)
-                            except Exception:
-                                # fallback: try applying augment directly on tensor (some transforms accept tensors)
-                                aug_res = self.augment(x)
-                                if torch.is_tensor(aug_res):
-                                    x_aug = aug_res
-                                else:
-                                    x_aug = T.ToTensor()(aug_res)
-
-                            # Ensure float tensor on CPU and same channels/order
-                            x_aug = x_aug.float()
-
-                            # Re-apply normalization if original cache used Normalize
-                            if self._mean is not None:
-                                x_aug = T.Normalize(mean=self.normalize.mean, std=self.normalize.std)(x_aug)
-
-                            return x_aug, y
-                    train_ds_wrapped = AugmentCachedDataset(train_cache_ds, train_augment_transform, normalize_transform)
-                else:    
-                    # No augmentation: ensure training cached dataset is normalized at runtime if requested
-                    if normalize_transform is not None:
-                        class NormalizeCachedDataset(torch.utils.data.Dataset):
-                            def __init__(self, cache_ds, normalize):
-                                self.cache_ds = cache_ds
-                                self.normalize = normalize
-                            def __len__(self):
-                                return len(self.cache_ds)
-                            def __getitem__(self, idx):
-                                x, y = self.cache_ds[idx]
-                                x = self.normalize(x)
-                                return x, y
-                        train_ds_wrapped = NormalizeCachedDataset(train_cache_ds, normalize_transform)
-                    else:
-                        train_ds_wrapped = train_cache_ds
-
-                # ensure validation cached dataset is normalized at runtime (if caller provided normalize_transform)
-                if normalize_transform is not None:
-                    class NormalizeCachedDataset(torch.utils.data.Dataset):
-                        def __init__(self, cache_ds, normalize):
-                            self.cache_ds = cache_ds
-                            self.normalize = normalize
-                        def __len__(self):
-                            return len(self.cache_ds)
                         def __getitem__(self, idx):
                             x, y = self.cache_ds[idx]
-                            x = self.normalize(x)
-                            return x, y
-                    val_ds_wrapped = NormalizeCachedDataset(val_cache_ds, normalize_transform)
-                else:
-                    val_ds_wrapped = val_cache_ds
+                            if train_augment_transform is not None and isinstance(x, Image.Image):
+                                aug = self.augment(x)
+                                x_aug = aug if torch.is_tensor(aug) else T.ToTensor()(aug)
+                            else:
+                                x = x.detach().cpu().float()
+                                try:
+                                    print("")
+                                    x_aug = self.augment(x)
+                                    if not torch.is_tensor(x_aug):
+                                        x_aug = T.ToTensor()(x_aug)
+                                except Exception:
+                                    x_aug = self.augment(to_pil_image(torch.clamp(x, 0., 1.)))
+                                    if not torch.is_tensor(x_aug):
+                                        x_aug = T.ToTensor()(x_aug)
+                            if train_augment_transform is not None:
+                                x_aug = x_aug.float()
+                            return x_aug, y
+                    train_ds_wrapped = AugmentCachedDataset(train_cache_ds, train_augment_transform)
+                else:    
+                    train_ds_wrapped = train_cache_ds
+
+                
+                val_ds_wrapped = val_cache_ds
 
                 train_loader = MONAI_loader(train_ds_wrapped, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory, collate_fn=None)
                 val_loader = MONAI_loader(val_ds_wrapped, batch_size=batch_size, shuffle=False, num_workers=max(0, num_workers), pin_memory=pin_memory, collate_fn=None)
@@ -851,21 +795,7 @@ def CV_train_val_loaders(train_dataset_aug, train_dataset_plain, batch_size,
                         return x_aug, y
                 train_ds_wrapped = AugmentDataset(train_subset, train_augment_transform)
             else:
-                # No augmentation: if a normalize_transform was provided, apply it to training items
-                if normalize_transform is not None:
-                    class NormalizeDataset(torch.utils.data.Dataset):
-                        def __init__(self, ds, normalize):
-                            self.ds = ds
-                            self.normalize = normalize
-                        def __len__(self):
-                            return len(self.ds)
-                        def __getitem__(self, idx):
-                            x, y = self.ds[idx]
-                            x = self.normalize(x)
-                            return x, y
-                    train_ds_wrapped = NormalizeDataset(train_subset, normalize_transform)
-                else:
-                    train_ds_wrapped = train_subset
+                train_ds_wrapped = train_subset
 
             # choose MONAI ThreadDataLoader or torch DataLoader for normal (non-cache) case
             if use_monai_local and MONAI_loader is not None:
