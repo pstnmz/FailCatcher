@@ -1,29 +1,23 @@
 from utils import train_load_datasets_resnet as tr
-from torch.utils.data import DataLoader, ConcatDataset
-from torch.utils.data import random_split
+from torch.utils.data import ConcatDataset
 from torchvision import transforms
-import torch
+from torchvision.transforms.functional import to_pil_image
+from monai.data import CacheDataset as MONAI_CacheDataset, ThreadDataLoader as MONAI_ThreadDataLoader
+from torch.utils.data import DataLoader
 import numpy as np
-import matplotlib.pyplot as plt
+import torch
 import os, json, time
 
-flags = ['organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
-colors = [False, False, True, False, True, True, False, True]  # Colors for the flags
+flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e', 'breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
+colors = [False, False, False, True, False, True, True, False, True, False, False, False, True, False, True, True, False, True]  # Colors for the flags
 #batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640, 128]  # Batch sizes for the flags
-#batch_sizes = [128, 128, 128, 128, 128, 128, 
-batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
-use_randaugment = False         # <- enable/disable RandAugment here
-flags = [flags[-1]]          # <- select which dataset to run here
-colors = [colors[-1]]
-batch_sizes = [batch_sizes[-1]]
+batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
+use_randaugments = [False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True]         # <- enable/disable RandAugment here
 
-if use_randaugment:
-    num_epochs = 100
-else:
-    num_epochs = 100
+num_epochs = 100
 
 cuda = 'cuda:2'
-for flag, color, batch_size in zip(flags, colors, batch_sizes):
+for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, use_randaugments):
     print(f"Training on {flag} with color={color} and batch_size={batch_size}")
     
     randaugment_ops = 2            # number of ops per image
@@ -36,54 +30,87 @@ for flag, color, batch_size in zip(flags, colors, batch_sizes):
     os.makedirs(os.path.join(exp_dir, "figs"), exist_ok=True)
 
     if color is True:
-        train_tfms = []
+        normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
         if use_randaugment:
-            train_tfms.append(transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag))
-        train_tfms += [
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
-        ]
-        transform_train = transforms.Compose(train_tfms)
+            transform_base = transforms.Compose([transforms.ToTensor()])
+            transform_train = transforms.Compose([
+                transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag),
+                transforms.ToTensor(),
+                normalize,
+            ])
+            transform_eval = transforms.Compose([transforms.ToTensor(), normalize])
+        else:
+            # cache normalized tensors (normalization performed once at cache time)
+            transform_base = transforms.Compose([transforms.ToTensor(), normalize])
+            transform_train = None
+            transform_eval = transform_base
 
-        transform_eval = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
-        ])
-        
     else:
-        train_tfms = []
+        normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
         if use_randaugment:
-            train_tfms.append(transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag))
-        train_tfms += [
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[.5], std=[.5]),
-            transforms.Lambda(lambda x: x.repeat(3, 1, 1))
-        ]
-        transform_train = transforms.Compose(train_tfms)
+            transform_base = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.repeat(3,1,1))
+            ])
+            # runtime training augment only (no Normalize here)
+            transform_train = transforms.Compose([
+                transforms.RandAugment(num_ops=randaugment_ops, magnitude=randaugment_mag),
+                transforms.ToTensor(),
+                normalize
+            ])
+            transform_eval = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x.repeat(3,1,1)),
+                normalize
+            ])
+        else:
+            # cache normalized tensors (repeat then normalize once)
+            transform_base = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.repeat(3,1,1)), normalize])
+            transform_train = None
+            transform_eval = transform_base
 
-        transform_eval = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[.5], std=[.5]),
-            transforms.Lambda(lambda x: x.repeat(3, 1, 1))
-        ])
 
-    # Load plain datasets/loaders (no augmentation)
-    [study_dataset_plain, calibration_dataset, test_dataset], [_, calibration_loader, test_loader], info = tr.load_datasets(flag, color, size, transform_eval, batch_size)
+    # Build datasets using transform_base (cached transform). When use_randaugment == False
+    # transform_base already includes Normalize so cache will be normalized once.
+    [study_dataset_plain, _, test_dataset], [_, _, test_loader], info = tr.load_datasets(flag, color, size, transform_base, batch_size, use_monai=True, cache_test=True, transform_test=transform_eval)
+
+    # Decide loader/cache strategy
+    use_monai_loader = True       # set False to force torch DataLoader
+    use_cache = True              # set False to disable MONAI CacheDataset
+    cache_rate = 1.0              # fraction of items to cache (0..1)
+    num_workers = num_workers_val= 8            # or set explicit int / use NUM_WORKERS env var
 
     if use_randaugment:
         print(f'Using RandAugment with {randaugment_ops} ops and magnitude {randaugment_mag}')
-        # Build an augmented view aligned to the same 80% train indices
-        # 1) Recreate train+val with augmented transform
-        aug_triplet, _ = tr.get_datasets(flag, im_size=size, color=color, transform=transform_train)
-        combined_aug = ConcatDataset([aug_triplet[0], aug_triplet[1]])
+        # cache is unnormalized; pass augment (which includes Normalize) and do NOT set normalize_transform
+        train_loaders, val_loaders = tr.CV_train_val_loaders(
+            None,
+            study_dataset_plain,
+            batch_size=batch_size,
+            use_monai=use_monai_loader,
+            use_cache=use_cache,
+            cache_rate=cache_rate,
+            train_augment_transform=transform_train,  # augment+Normalize at runtime
+            num_workers=num_workers,
+            pin_memory=True,
+            prewarm_cache=True,         # pre-warm per-fold caches to avoid stalls during epochs                         
+        )
 
-        # 2) Wrap with the exact same indices as the 80% train subset
-        study_dataset_aug = torch.utils.data.Subset(combined_aug, study_dataset_plain.indices)
-
-        train_loaders, val_loaders = tr.CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size=batch_size)
     else:
         print('Not using RandAugment')
-        train_loaders, val_loaders = tr.CV_train_val_loaders(None, study_dataset_plain, batch_size=batch_size)
+        # cache already normalized; no runtime augment or normalize needed
+        train_loaders, val_loaders = tr.CV_train_val_loaders(
+            None,
+            study_dataset_plain,
+            batch_size=batch_size,
+            use_monai=use_monai_loader,
+            use_cache=use_cache,
+            cache_rate=cache_rate,
+            train_augment_transform=None,
+            num_workers=num_workers,
+            pin_memory=True,
+            prewarm_cache=True                         # pre-warm per-fold caches to avoid stalls during epochs
+        )
 
     models = []
     results = []
@@ -110,8 +137,7 @@ for flag, color, batch_size in zip(flags, colors, batch_sizes):
         json.dump(results, f, indent=2)
 
     # Evaluate ensemble and save
-    ensemble_res = tr.evaluate_model(model=models, test_loader=test_loader, data_flag=flag,
-                                    device=cuda, output_dir=exp_dir, prefix="ensemble")
+    ensemble_res = tr.evaluate_model(model=models, test_loader=test_loader, data_flag=flag, device=cuda, output_dir=exp_dir, prefix="ensemble")
     with open(os.path.join(exp_dir, "results_ensemble.json"), "w") as f:
         json.dump(ensemble_res, f, indent=2)
 
