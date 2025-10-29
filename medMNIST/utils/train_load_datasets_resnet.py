@@ -368,9 +368,24 @@ def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001,
     run_t0 = time.time()
     for epoch in range(num_epochs):
         ep_t0 = time.time()
+        t0_train = time.perf_counter()
         train_loss = train(model, device, train_loader, optimizer, criterion, epoch)
+        # ensure GPU work finished before taking the post-train timestamp
+        if torch.cuda.is_available() and ('cuda' in str(device).lower()):
+            torch.cuda.synchronize()
+        t1_train = time.perf_counter()
+
+        if torch.cuda.is_available() and ('cuda' in str(device).lower()):
+            torch.cuda.synchronize()
+        t_before_val = time.perf_counter()
+
         val_loss = validate(model, device, val_loader, criterion)
-        
+        if torch.cuda.is_available() and ('cuda' in str(device).lower()):
+            torch.cuda.synchronize()
+        t_after_val = time.perf_counter()
+
+        # print timing diagnostics per epoch
+        print(f"[timing] epoch={epoch} train_exec_s={(t1_train - t0_train):.3f} transition_s={(t_before_val - t1_train):.3f} val_exec_s={(t_after_val - t_before_val):.3f}")
         # (optional) current LR logging
         current_lr = optimizer.param_groups[0]["lr"]
 
@@ -747,7 +762,11 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
                 val_ds_wrapped = val_cache_ds
 
                 train_loader = MONAI_loader(train_ds_wrapped, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory, collate_fn=None)
-                val_loader = MONAI_loader(val_ds_wrapped, batch_size=batch_size, shuffle=False, num_workers=max(0, num_workers), pin_memory=pin_memory, collate_fn=None)
+                persistent = True if (num_workers and num_workers>0) else False
+                val_loader = DataLoader(val_ds_wrapped, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True, persistent_workers=persistent, prefetch_factor=3)
+                print('val loader using torch DataLoader for cached val dataset')
+                
                 if prewarm_cache and use_cache:
                     try:
                         t0 = time.time()
