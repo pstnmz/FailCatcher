@@ -2,16 +2,62 @@ from utils import train_load_datasets_resnet as tr
 from torchvision import transforms
 import torch
 import os, json, time
+import argparse
 
-flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e', 'breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
-colors = [False, False, False, True, False, True, True, False, True, False, False, False, True, False, True, True, False, True]  # Colors for the flags
-#batch_sizes = [32, 640, 128, 128, 640, 640, 640, 640, 128]  # Batch sizes for the flags
-batch_sizes = [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]  # Batch sizes for the flags
-use_randaugments = [False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True]         # <- enable/disable RandAugment here
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    v = str(v).lower()
+    if v in ('yes', 'true', 't', 'y', '1'):
+        return True
+    if v in ('no', 'false', 'f', 'n', '0'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
 
-num_epochs = 100
+# CLI args
+parser = argparse.ArgumentParser(description="Train ResNet18 on medMNIST dataset")
+parser.add_argument("--flag", type=str, default=None, help="Dataset flag to run (e.g. pneumoniamnist). If omitted runs default list)")
+parser.add_argument("--color", type=str2bool, nargs='?', const=True, default=False, help="Use color images (True/False)")
+parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
+parser.add_argument("--use_randaugment", type=str2bool, nargs='?', const=True, default=False, help="Use RandAugment (True/False)")
+parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device string")
+parser.add_argument("--num_epochs", type=int, default=2, help="Number of epochs")
+args = parser.parse_args()
 
-cuda = 'cuda:2'
+# override defaults with CLI args
+cuda = args.cuda
+num_epochs = args.num_epochs
+
+default_flags = ['pneumoniamnist', 'breastmnist']
+default_colors = [False, False]
+default_batch_sizes = [128, 128]
+default_use_randaugments = [False, False]
+default_num_epochs = 100
+default_cuda = "cuda:2"
+
+# override defaults with CLI args
+cuda = args.cuda
+num_epochs = args.num_epochs
+batch_size_arg = args.batch_size
+use_randaugment_arg = args.use_randaugment
+color_arg = args.color
+
+
+# if --flag passed, run only that dataset in this process
+if args.flag:
+    flags = [args.flag]
+    colors = [color_arg]
+    batch_sizes = [batch_size_arg]
+    use_randaugments = [use_randaugment_arg]
+    num_epochs = num_epochs
+else:
+    flags = default_flags
+    colors = default_colors
+    batch_sizes = default_batch_sizes
+    use_randaugments = default_use_randaugments
+    num_epochs = default_num_epochs
+    cuda = default_cuda
+
 for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, use_randaugments):
     print(f"Training on {flag} with color={color} and batch_size={batch_size}")
     
