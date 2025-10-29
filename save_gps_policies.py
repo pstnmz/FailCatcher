@@ -101,7 +101,7 @@ model_augmentations = [False, True, True, True, True]
 #color = True # True for color, False for grayscale
 #activation = 'softmax'  # 'sigmoid' for binary-class, 'softmax' for multi-class
 batch_size = 4000
-device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 size = 224  # Image size for the models
 #model_augmentation = False  # Whether the models were trained with data augmentation
 randaugment_ops = 2
@@ -144,7 +144,7 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
     _, _, info = tr.load_datasets(dataflag, color, size, transform, batch_size)
     task_type = info['task']  # Determine the task type (binary-class or multi-class)
     num_classes = len(info['label'])  # Number of classes
-    [_, calibration_dataset_tta, test_dataset_tta], [_, calibration_loader_tta, test_loader_tta], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
+    [_, calibration_dataset_tta, _], [_, calibration_loader_tta, _], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
 
     with ResourceProfiler(device=device, label="GPS_calibration_randaugment") as rp:
         uq.apply_randaugment_and_store_results(
