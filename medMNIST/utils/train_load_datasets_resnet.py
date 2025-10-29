@@ -760,13 +760,15 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
 
                 
                 val_ds_wrapped = val_cache_ds
-
-                train_loader = MONAI_loader(train_ds_wrapped, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory, collate_fn=None)
                 persistent = True if (num_workers and num_workers>0) else False
+                train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
+                                          num_workers=num_workers, pin_memory=pin_memory,
+                                          persistent_workers=persistent, prefetch_factor=2, drop_last=True)
+                
                 val_loader = DataLoader(val_ds_wrapped, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=True, persistent_workers=persistent, prefetch_factor=3)
-                print('val loader using torch DataLoader for cached val dataset')
-                
+                print('train/val loaders using torch DataLoader for cached val dataset')
+
                 if prewarm_cache and use_cache:
                     try:
                         t0 = time.time()
