@@ -113,11 +113,10 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
 
     # Build datasets using transform_base (cached transform). When use_randaugment == False
     # transform_base already includes Normalize so cache will be normalized once.
-    [study_dataset_plain, _, test_dataset], [_, _, test_loader], info = tr.load_datasets(flag, color, size, transform_base, batch_size, use_monai=True, cache_test=True, transform_test=transform_eval)
+    [study_dataset_plain, _, test_dataset], [_, _, test_loader], info = tr.load_datasets(flag, color, size, transform_base, batch_size, cache_test=True, transform_test=transform_eval)
 
     # Decide loader/cache strategy
-    use_monai_loader = True       # set False to force torch DataLoader
-    use_cache = True              # set False to disable MONAI CacheDataset
+    use_monai = True       # set False to disable MONAI CacheDataset
     cache_rate = 1.0              # fraction of items to cache (0..1)
     num_workers = num_workers_val= 8            # or set explicit int / use NUM_WORKERS env var
 
@@ -128,8 +127,7 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
             None,
             study_dataset_plain,
             batch_size=batch_size,
-            use_monai=use_monai_loader,
-            use_cache=use_cache,
+            use_monai=use_monai,
             cache_rate=cache_rate,
             train_augment_transform=transform_train,  # augment+Normalize at runtime
             num_workers=num_workers,
@@ -144,8 +142,7 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
             None,
             study_dataset_plain,
             batch_size=batch_size,
-            use_monai=use_monai_loader,
-            use_cache=use_cache,
+            use_monai=use_monai,
             cache_rate=cache_rate,
             train_augment_transform=None,
             num_workers=num_workers,

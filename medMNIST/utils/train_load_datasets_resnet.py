@@ -23,7 +23,6 @@ import seaborn as sns
 import random
 import numpy as np
 import os, json, time
-from monai.data import ThreadDataLoader as MONAI_ThreadDataLoader
 from monai.data import CacheDataset as MONAI_CacheDataset
 MONAI_AVAILABLE = True
 
@@ -114,7 +113,7 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
     return [train_dataset, val_dataset, test_dataset], info
 
 
-def get_dataloaders(datasets, batch_size=32, num_workers=None, use_monai=False, monai_params=None, use_cache_test=False, cache_backend='monai', cache_rate=1.0):
+def get_dataloaders(datasets, batch_size=32, num_workers=None, use_cache_test=False, cache_backend='monai', cache_rate=1.0):
     """
     Build dataloaders for (train, calibration, test) datasets.
 
@@ -190,56 +189,36 @@ def get_dataloaders(datasets, batch_size=32, num_workers=None, use_monai=False, 
 
             test_cache_ds  = MONAI_CacheDataset(data=test_list,  transform=_to_tensor_tuple, cache_rate=float(cache_rate))
 
-            mp = monai_params or {}
-            mp.setdefault("pin_memory", True)
-            mp.setdefault("batch_size", batch_size)
-            mp.setdefault("num_workers", num_workers)
-            
-            train_loader = MONAI_ThreadDataLoader(train_dataset, batch_size=mp["batch_size"],
-                                              shuffle=True, num_workers=mp["num_workers"],
-                                              pin_memory=mp["pin_memory"], collate_fn=None)
-            calib_loader = MONAI_ThreadDataLoader(calib_dataset, batch_size=mp["batch_size"],
-                                              shuffle=False, num_workers=mp["num_workers"],
-                                              pin_memory=mp["pin_memory"], collate_fn=None)
-            test_loader = MONAI_ThreadDataLoader(test_cache_ds, batch_size=mp["batch_size"],
-                                                 shuffle=False, num_workers=mp["num_workers"],
-                                                 pin_memory=mp["pin_memory"], collate_fn=None)
-            print(f"Using MONAI CacheDataset (cache_rate={cache_rate}) + ThreadDataLoader (num_workers={num_workers}).")
+            persistent = True if (num_workers and num_workers>0) else False
+
+            train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True,
+                                    prefetch_factor=3, num_workers=num_workers,
+                                    pin_memory=True, persistent_workers=persistent)
+            calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False,
+                                    prefetch_factor=3, num_workers=num_workers,
+                                    pin_memory=True, persistent_workers=persistent)
+            test_loader = DataLoader(dataset=test_cache_ds, batch_size=batch_size, shuffle=False,
+                                    prefetch_factor=3, num_workers=num_workers,
+                                    pin_memory=True, persistent_workers=persistent)
+            print(f"Using MONAI CacheDataset (cache_rate={cache_rate}) for test set with {len(test_cache_ds)} items.")
             return train_loader, calib_loader, test_loader
         except Exception as e:
             print("MONAI CacheDataset construction failed, falling back to non-cached loaders:", e)
 
-    # If MONAI ThreadDataLoader requested (no caching) and available
-    if use_cache_test is False and use_monai and MONAI_AVAILABLE:
-        mp = monai_params or {}
-        mp.setdefault("pin_memory", True)
-        mp.setdefault("batch_size", batch_size)
-        mp.setdefault("num_workers", num_workers)
-        train_loader = MONAI_ThreadDataLoader(train_dataset, batch_size=mp["batch_size"],
-                                              shuffle=True, num_workers=mp["num_workers"],
-                                              pin_memory=mp["pin_memory"], collate_fn=None)
-        calib_loader = MONAI_ThreadDataLoader(calib_dataset, batch_size=mp["batch_size"],
-                                              shuffle=False, num_workers=mp["num_workers"],
-                                              pin_memory=mp["pin_memory"], collate_fn=None)
-        test_loader = MONAI_ThreadDataLoader(test_dataset, batch_size=mp["batch_size"],
-                                             shuffle=False, num_workers=mp["num_workers"],
-                                             pin_memory=mp["pin_memory"], collate_fn=None)
-        print(f"Using MONAI ThreadDataLoader (num_workers={num_workers}).")
+    else:
+        # Default: standard torch DataLoader
+        persistent = True if (num_workers and num_workers > 0) else False
+        train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True,
+                                prefetch_factor=3, num_workers=num_workers,
+                                pin_memory=True, persistent_workers=persistent)
+        calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False,
+                                prefetch_factor=3, num_workers=num_workers,
+                                pin_memory=True, persistent_workers=persistent)
+        test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False,
+                                prefetch_factor=3, num_workers=num_workers,
+                                pin_memory=True, persistent_workers=persistent)
+
         return train_loader, calib_loader, test_loader
-
-    # Default: standard torch DataLoader
-    persistent = True if (num_workers and num_workers > 0) else False
-    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True,
-                              prefetch_factor=3, num_workers=num_workers,
-                              pin_memory=True, persistent_workers=persistent)
-    calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False,
-                              prefetch_factor=3, num_workers=num_workers,
-                              pin_memory=True, persistent_workers=persistent)
-    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False,
-                             prefetch_factor=3, num_workers=num_workers,
-                             pin_memory=True, persistent_workers=persistent)
-
-    return train_loader, calib_loader, test_loader
 
 # small helper to benchmark loader throughput
 def benchmark_loader(loader, n_batches=50):
@@ -590,7 +569,7 @@ def load_models(flag, device, waugmentation=False, size=224):
         models.append(model)
     return models
 
-def load_datasets(dataflag, color, im_size, transform, batch_size, use_monai=False, cache_test=False, transform_test=None):    
+def load_datasets(dataflag, color, im_size, transform, batch_size, cache_test=False, transform_test=None):    
     datasets, info = get_datasets(dataflag, im_size=im_size, color=color, transform=transform, transform_test=transform_test)
     # Combine train_dataset and val_dataset
     combined_train_dataset = ConcatDataset([datasets[0], datasets[1]])
@@ -606,7 +585,7 @@ def load_datasets(dataflag, color, im_size, transform, batch_size, use_monai=Fal
     train_dataset, calibration_dataset = random_split(combined_train_dataset, [train_size, calibration_size])
     test_dataset = datasets[2]  # Use the test dataset as is
 
-    dataloaders = get_dataloaders([train_dataset, calibration_dataset, test_dataset], batch_size=batch_size, use_monai=use_monai, use_cache_test=cache_test)
+    dataloaders = get_dataloaders([train_dataset, calibration_dataset, test_dataset], batch_size=batch_size, use_cache_test=cache_test)
 
     print(f'Training dataset size: {len(train_dataset)}')
     print(f'Calibration dataset size: {len(calibration_dataset)}')
@@ -614,7 +593,7 @@ def load_datasets(dataflag, color, im_size, transform, batch_size, use_monai=Fal
     return [train_dataset, calibration_dataset, test_dataset], dataloaders, info
 
 def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
-                         n_splits=5, seed=42, use_monai=False, use_cache=False, cache_rate=1.0, train_augment_transform=None, num_workers=None, pin_memory=True, prewarm_cache=False):
+                         n_splits=5, seed=42, use_monai=False, cache_rate=1.0, train_augment_transform=None, num_workers=None, pin_memory=True, prewarm_cache=False):
     """
     Create CV train/val DataLoaders with optional MONAI ThreadDataLoader and CacheDataset support.
     - use_monai: prefer MONAI ThreadDataLoader (if available)
@@ -646,7 +625,6 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
     val_loaders = []
     normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
     use_monai_local = bool(use_monai) and MONAI_AVAILABLE
-    MONAI_loader = globals().get('MONAI_ThreadDataLoader', None)
 
     def _build_data_list_from_subset(ds):
         data_list = []
@@ -679,7 +657,7 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
         val_subset = torch.utils.data.Subset(study_dataset_plain, val_index)
 
         # If caching with MONAI is requested and available, build CacheDataset per-fold
-        if use_cache and use_monai_local:
+        if use_monai_local:
             try:
                 train_list = _build_data_list_from_subset(train_subset)
                 val_list = _build_data_list_from_subset(val_subset)
@@ -769,7 +747,7 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
                         num_workers=num_workers, pin_memory=True, persistent_workers=persistent, prefetch_factor=3)
                 print('train/val loaders using torch DataLoader for cached val dataset')
 
-                if prewarm_cache and use_cache:
+                if prewarm_cache and use_monai_local:
                     try:
                         t0 = time.time()
                         print("Pre-warming MONAI cache for this fold (this may take some time)...")
@@ -818,29 +796,17 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
             else:
                 train_ds_wrapped = train_subset
 
-            # choose MONAI ThreadDataLoader or torch DataLoader for normal (non-cache) case
-            if use_monai_local and MONAI_loader is not None:
-                try:
-                    train_loader = MONAI_loader(train_ds_wrapped, batch_size=batch_size, shuffle=True,
-                                                num_workers=num_workers, pin_memory=pin_memory, collate_fn=None)
-                    val_loader = MONAI_loader(val_subset, batch_size=batch_size, shuffle=False,
-                                              num_workers=max(0, num_workers), pin_memory=pin_memory, collate_fn=None)
-                except Exception:
-                    persistent = True if (num_workers and num_workers > 0) else False
-                    train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
-                                              num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
-                    val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
-                                            num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
-            else:
-                persistent = True if (num_workers and num_workers > 0) else False
-                train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
-                                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
-                val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
-                                        num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
+            # DataLoader for normal (non-cache) case
+            persistent = True if (num_workers and num_workers > 0) else False
+            train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
+                                        num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
+            val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
+                                    num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
+
 
         train_loaders.append(train_loader)
         val_loaders.append(val_loader)
 
-    loader_type = "MONAI ThreadDataLoader + CacheDataset" if use_cache and use_monai_local else ("MONAI ThreadDataLoader" if use_monai_local else "torch DataLoader")
+    loader_type = "DataLoader w persistent workers + MONAI CacheDataset" if use_monai_local else "torch DataLoader"
     print(f"CV loaders created: {n_splits} folds using {loader_type} (num_workers={num_workers}, cache_rate={cache_rate})")
     return train_loaders, val_loaders
