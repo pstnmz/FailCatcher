@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 from sklearn.calibration import calibration_curve
-from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score, log_loss, brier_score_loss
+from sklearn.metrics import roc_auc_score, roc_curve, brier_score_loss
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from scipy.cluster.hierarchy import linkage, leaves_list, fcluster
@@ -8,15 +8,12 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import os
-from concurrent.futures import ThreadPoolExecutor
 import torch
 import re
 from torchvision import transforms
-import torch.nn.functional as F
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-from collections import defaultdict
 from gps_augment.utils.randaugment import BetterRandAugment
 import shap
 import torch.multiprocessing as mp
@@ -24,7 +21,7 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from sklearn.linear_model import LogisticRegression
 from sklearn.isotonic import IsotonicRegression
-from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 from sklearn.preprocessing import StandardScaler
 

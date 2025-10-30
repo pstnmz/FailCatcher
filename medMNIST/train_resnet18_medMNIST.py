@@ -3,6 +3,7 @@ from torchvision import transforms
 import torch
 import os, json, time
 import argparse
+import gc
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -41,6 +42,81 @@ num_epochs = args.num_epochs
 batch_size_arg = args.batch_size
 use_randaugment_arg = args.use_randaugment
 color_arg = args.color
+
+def _clear_monai_cache(obj):
+    """Best-effort clear for MONAI CacheDataset internals and dataloader wrappers."""
+    # unwrap dataloader
+    ds = getattr(obj, "dataset", obj)
+    # handle lists/tuples of datasets
+    if isinstance(ds, (list, tuple)):
+        for d in ds:
+            _clear_monai_cache(d)
+        return
+    # call clear_cache if provided
+    if hasattr(ds, "clear_cache"):
+        try:
+            ds.clear_cache()
+        except Exception:
+            pass
+    # wipe common internal attributes (best-effort)
+    for attr in ("_cache", "_cached", "cache"):
+        if hasattr(ds, attr):
+            try:
+                val = getattr(ds, attr)
+                if isinstance(val, dict):
+                    val.clear()
+                else:
+                    setattr(ds, attr, None)
+            except Exception:
+                pass
+
+def shutdown_dataloader_workers_and_clear_MONAI_cache(dl):
+    # Remove references for this fold's loaders/datasets so GC can free memory
+    try:
+        # best-effort clear MONAI caches
+        _clear_monai_cache(dl)
+    except Exception:
+        print("Warning: failed to clear MONAI cache for fold", i)
+        pass
+
+    # try to shutdown data loader workers so they don't keep references
+    try:
+        it = getattr(dl, "_iterator", None)
+        if it is not None:
+            try:
+                it._shutdown_workers()
+            except Exception:
+                print("Warning: failed to shutdown dataloader workers")
+                pass
+    except Exception:
+        print("Warning: failed to access dataloader iterator")
+        pass
+
+    # best-effort clear MONAI caches and delete refs
+    try:
+        _clear_monai_cache(dl)
+    except Exception:
+        pass
+
+    dl = None
+
+    # force GC and free CUDA pinned memory
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    # drop any other large references you don't need per-fold
+    # e.g., if you stored fold-specific dataset objects, del them here
+
+    # force python GC and release CUDA memory
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        print("Warning: failed to empty CUDA cache for fold", i)
+        pass
 
 
 # if --flag passed, run only that dataset in this process
@@ -120,55 +196,46 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
     cache_rate = 1.0              # fraction of items to cache (0..1)
     num_workers = num_workers_val= 8            # or set explicit int / use NUM_WORKERS env var
 
-    if use_randaugment:
-        print(f'Using RandAugment with {randaugment_ops} ops and magnitude {randaugment_mag}')
-        # cache is unnormalized; pass augment (which includes Normalize) and do NOT set normalize_transform
-        train_loaders, val_loaders = tr.CV_train_val_loaders(
-            None,
-            study_dataset_plain,
-            batch_size=batch_size,
-            use_monai=use_monai,
-            cache_rate=cache_rate,
-            train_augment_transform=transform_train,  # augment+Normalize at runtime
-            num_workers=num_workers,
-            pin_memory=True,
-            prewarm_cache=True,         # pre-warm per-fold caches to avoid stalls during epochs                         
-        )
-
-    else:
-        print('Not using RandAugment')
-        # cache already normalized; no runtime augment or normalize needed
-        train_loaders, val_loaders = tr.CV_train_val_loaders(
-            None,
-            study_dataset_plain,
-            batch_size=batch_size,
-            use_monai=use_monai,
-            cache_rate=cache_rate,
-            train_augment_transform=None,
-            num_workers=num_workers,
-            pin_memory=True,
-            prewarm_cache=True                         # pre-warm per-fold caches to avoid stalls during epochs
-        )
-
     models = []
     results = []
-    for i in range(5):
-        print('MODEL ' + str(i))
+    fold_gen = tr.CV_fold_generator(
+        None,
+        study_dataset_plain,
+        batch_size=batch_size,
+        n_splits=5,
+        seed=42,
+        use_monai=use_monai,
+        cache_rate=cache_rate,
+        train_augment_transform=transform_train if use_randaugment else None,
+        num_workers=num_workers,
+        pin_memory=True,
+        prewarm_cache=True
+    )
+
+
+    for fold_idx, train_loader, val_loader in fold_gen:
+        print('MODEL ' + str(fold_idx))
         model, res = tr.train_resnet18(
             flag,
-            train_loader=train_loaders[i],
-            val_loader=val_loaders[i],
-            test_loader=test_loader,
+            info,
             num_epochs=num_epochs,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
             learning_rate=0.001,
             device=cuda,
             random_seed=42,
             output_dir=exp_dir,
-            run_name=f"fold_{i}",
-            scheduler=True    
+            run_name=f"fold_{fold_idx}",
+            scheduler=True
         )
         models.append(model)
         results.append(res)
+
+        # Shutdown dataloader workers and clear MONAI cache to free memory
+        shutdown_dataloader_workers_and_clear_MONAI_cache(train_loader)
+        shutdown_dataloader_workers_and_clear_MONAI_cache(val_loader)
+        
 
     # Save per-fold results summary
     with open(os.path.join(exp_dir, "results_folds.json"), "w") as f:
