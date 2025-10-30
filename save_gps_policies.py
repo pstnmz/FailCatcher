@@ -92,12 +92,16 @@ class ResourceProfiler:
         
 #flags = ['bloodmnist', 'bloodmnist', 'octmnist', 'octmnist']#
 flags=['pathmnist', 'pathmnist', 'dermamnist-e', 'organamnist', 'tissuemnist']
+flags=['breastmnist']
 #colors = [True, True, False, False]
 colors = [True, True, True, False, False]
+colors = [False]
 #activations = ['softmax', 'softmax', 'softmax', 'softmax']
 activations=['softmax', 'softmax', 'softmax', 'softmax', 'softmax']
+activations=['sigmoid']
 #model_augmentations = [False, True, False, True]#, 
 model_augmentations = [False, True, True, True, True]
+model_augmentations = [False]
 #color = True # True for color, False for grayscale
 #activation = 'softmax'  # 'sigmoid' for binary-class, 'softmax' for multi-class
 batch_size = 4000
@@ -111,9 +115,9 @@ nb_channels = 3
 for model_augmentation, dataflag, color, activation in zip(model_augmentations, flags, colors, activations):
     # Loop over different datasets and settings
     if model_augmentation:
-        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_wdataaug_calibration_set'
+        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_wdataaug_calibration_set_test'
     else:
-        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_calibration_set'
+        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_calibration_set_test'
     os.makedirs(output_dir, exist_ok=True)
 
 
@@ -144,7 +148,9 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
     _, _, info = tr.load_datasets(dataflag, color, size, transform, batch_size)
     task_type = info['task']  # Determine the task type (binary-class or multi-class)
     num_classes = len(info['label'])  # Number of classes
-    [_, calibration_dataset_tta, _], [_, calibration_loader_tta, _], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
+    [_, calibration_dataset_tta, _], [_, _, _], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
+
+    cache_workers = max(os.cpu_count() - 1, 0) if os.cpu_count() else 0
 
     with ResourceProfiler(device=device, label="GPS_calibration_randaugment") as rp:
         uq.apply_randaugment_and_store_results(
@@ -161,7 +167,10 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
             image_size=size,
             nb_channels=nb_channels,
             output_activation=activation,
-            batch_size=batch_size
+            batch_size=batch_size,
+            use_monai_cache=True,
+            cache_num_workers=cache_workers,
+            dataloader_workers=0
         )
 
     # Save JSON log
