@@ -13,7 +13,8 @@ import re
 from torchvision import transforms
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset
+from monai.data import CacheDataset
 from gps_augment.utils.randaugment import BetterRandAugment
 import shap
 import torch.multiprocessing as mp
@@ -24,6 +25,7 @@ from sklearn.isotonic import IsotonicRegression
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 from sklearn.preprocessing import StandardScaler
+from PIL import Image
 
 class AddBatchDimension:
     def __call__(self, image):
@@ -31,6 +33,54 @@ class AddBatchDimension:
         if isinstance(image, torch.Tensor):
             return image.unsqueeze(0).float()
         raise TypeError("Input should be a torch Tensor")
+
+class _CachedRandAugDataset(Dataset):
+    def __init__(self, cache_dataset, augmentation):
+        self.cache_dataset = cache_dataset
+        self.augmentation = augmentation
+
+    def __len__(self):
+        return len(self.cache_dataset)
+
+    def __getitem__(self, index):
+        sample = self.cache_dataset[index]
+        img = sample["image"]
+        label = sample.get("label")
+        # If the cache stores a tensor/ndarray, convert to PIL Image before running
+        # the torchvision augmentation pipeline (which expects PIL or ndarray for ToTensor).
+        if isinstance(img, torch.Tensor):
+            img = img.detach().cpu()
+            try:
+                pil_img = transforms.ToPILImage()(img)
+            except Exception:
+                pil_img = Image.fromarray((img.numpy() * 255).astype('uint8')) if img.dtype == torch.float32 else Image.fromarray(img.numpy())
+            augmented_img = self.augmentation(pil_img)
+        elif isinstance(img, np.ndarray):
+            pil_img = Image.fromarray(img)
+            augmented_img = self.augmentation(pil_img)
+        else:
+            # already a PIL Image or other acceptable type
+            augmented_img = self.augmentation(img)
+        return augmented_img, label
+    
+
+def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
+    if CacheDataset is None:
+        raise ImportError("MONAI is required to build a cache dataset. Please install monai.")
+    data = []
+    for idx in range(len(dataset)):
+        sample = dataset[idx]
+        if isinstance(sample, dict):
+            img = sample.get("image")
+            label = sample.get("label")
+        else:
+            img, label = sample
+        if isinstance(img, torch.Tensor):
+            img = img.detach().cpu()
+        if isinstance(label, torch.Tensor):
+            label = label.detach().cpu()
+        data.append({"image": img, "label": label})
+    return CacheDataset(data=data, transform=None, cache_rate=cache_rate, num_workers=num_workers)
 
 
 def get_prediction(model, image, device):
@@ -166,20 +216,23 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
 def apply_randaugment_and_store_results(
     dataset, models, N, M, num_policies, device, folder_name='savedpolicies',
     image_normalization=False, mean=False, std=False, nb_channels=1, image_size=51,
-    output_activation=None, batch_size=None
+    output_activation=None, batch_size=None, use_monai_cache=False, cache_rate=1.0, cache_num_workers=0, dataloader_workers=None
 ):
     """
     Apply RandAugment transformations to the data and store the results, one augmentation at a time.
     """
     
     os.makedirs(folder_name, exist_ok=True)
+    cached_dataset = None
+    if use_monai_cache:
+        cached_dataset = build_monai_cache_dataset(dataset, cache_rate=cache_rate, num_workers=cache_num_workers)
 
     for i in range(num_policies):
     
         print(f"Applying augmentation policy {i+1}/{num_policies}")
         # Apply augmentation and get augmented images
         augmented_inputs, augmentations = apply_augmentations(
-            dataset, 1, True, N, M, image_normalization, nb_channels, mean, std, image_size, batch_size=batch_size
+            dataset, 1, True, N, M, image_normalization, nb_channels, mean, std, image_size, batch_size=batch_size, cached_dataset=cached_dataset, dataloader_workers=dataloader_workers
         )
         # augmented_inputs shape: [1, batch_size, C, H, W]
         augmented_input = augmented_inputs[0]  # shape: [batch_size, C, H, W]
@@ -197,7 +250,7 @@ def apply_randaugment_and_store_results(
         np.savez_compressed(filename, predictions=averaged_predictions.numpy())
 
 
-def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None):
+def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None, cached_dataset=None, dataloader_workers=None):
     """
     Apply augmentations to the images.
 
@@ -213,11 +266,38 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         mean (list or None): Mean for normalization.
         std (list or None): Standard deviation for normalization.
         image_size (int): Size of the input images.
+        cached_dataset (CacheDataset or None): Pre-cached dataset to speed up augmentation.
+        dataloader_workers (int or None): Number of workers for the augmentation DataLoader.
 
     Returns:
         torch.Tensor: Augmented images.
     """
     augmented_inputs = []
+    worker_count = 4 if dataloader_workers is None else dataloader_workers
+
+    def _get_loader(augmentation):
+        if cached_dataset is not None:
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentation)
+            return DataLoader(
+                dataset=aug_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=worker_count,
+                pin_memory=True,
+            )
+        if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
+            for subds in dataset.dataset.datasets:
+                subds.transform = augmentation
+        else:
+            dataset.transform = augmentation
+        return DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=worker_count,
+            pin_memory=True,
+        )
+    
     if usingBetterRandAugment:
         if isinstance(transformations, list):
             rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=True, randomize_sign=False, image_size=image_size) for policy in transformations]
@@ -240,18 +320,10 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         for i, augmentation in enumerate(augmentations):
             augmented_inputs_batch = []
             print(f"Applying augmentation n : {i}")
-            if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
-                for subds in dataset.dataset.datasets:
-                    subds.transform = augmentation
-            else:
-                dataset.transform = augmentation
-            
-            data_loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False, num_workers=72, pin_memory=True)
-
+            data_loader = _get_loader(augmentation)
             for batch in data_loader:
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
-                
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
 
@@ -259,13 +331,7 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         for i in range(nb_augmentations):
             augmented_inputs_batch = []
             print(f"Applying augmentation n : {i}")
-            if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
-                for subds in dataset.dataset.datasets:
-                    subds.transform = transformations
-            else:
-                dataset.transform = transformations
-            data_loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False, num_workers=72, pin_memory=True)
-
+            data_loader = _get_loader(transformations)
             for batch in data_loader:
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)

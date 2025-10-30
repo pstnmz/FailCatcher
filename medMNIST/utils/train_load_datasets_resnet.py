@@ -7,7 +7,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 from torchvision.models import resnet18, ResNet18_Weights
 import medmnist
 from medmnist import INFO
-from utils.local_dermamnist_e import DERMAMNIST_E_INFO
+from .local_dermamnist_e import DERMAMNIST_E_INFO
 import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.optim as optim
@@ -227,19 +227,7 @@ def get_dataloaders(datasets, batch_size=32, num_workers=None, use_cache_test=Fa
                                 pin_memory=True, persistent_workers=persistent)
 
         return train_loader, calib_loader, test_loader
-
-# small helper to benchmark loader throughput
-def benchmark_loader(loader, n_batches=50):
-    t0 = time.time()
-    n = 0
-    for i, (x, y) in enumerate(loader):
-        n += x.size(0)
-        if i + 1 >= n_batches:
-            break
-    dt = time.time() - t0
-    print(f"Loader: {n} samples in {dt:.2f}s -> {n/dt:.1f} samples/s")
-    return n/dt
-
+    
 
 def train(model, device, train_loader, optimizer, criterion, epoch):
     model.train()

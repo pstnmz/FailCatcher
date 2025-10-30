@@ -4,6 +4,8 @@ import torch
 import os, json, time
 import argparse
 import gc
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+torch.cuda.set_device(0) 
 
 def str2bool(v):
     if isinstance(v, bool):
