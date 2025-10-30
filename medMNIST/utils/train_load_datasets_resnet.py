@@ -191,14 +191,9 @@ def get_dataloaders(datasets, batch_size=32, num_workers=None, use_cache_test=Fa
 
             persistent = True if (num_workers and num_workers>0) else False
 
-            train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True,
-                                    prefetch_factor=3, num_workers=num_workers,
-                                    pin_memory=True, persistent_workers=persistent)
-            calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False,
-                                    prefetch_factor=3, num_workers=num_workers,
-                                    pin_memory=True, persistent_workers=persistent)
-            test_loader = DataLoader(dataset=test_cache_ds, batch_size=batch_size, shuffle=False,
-                                    prefetch_factor=3, num_workers=num_workers,
+            train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+            calib_loader = DataLoader(dataset=calib_dataset, batch_size=batch_size, shuffle=False)
+            test_loader = DataLoader(dataset=test_cache_ds, batch_size=batch_size, shuffle=False, prefetch_factor=3, num_workers=num_workers,
                                     pin_memory=True, persistent_workers=persistent)
             print(f"Using MONAI CacheDataset (cache_rate={cache_rate}) for test set with {len(test_cache_ds)} items.")
             return train_loader, calib_loader, test_loader
@@ -281,7 +276,7 @@ def validate(model, device, val_loader, criterion):
     return val_loss
 
 
-def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001, device=None,
+def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=0.001, device=None,
                    train_loader=None, val_loader=None, test_loader=None, color=False, im_size=224,
                    transform=None, random_seed=None, output_dir=None, run_name="run", scheduler=False):
         # Optional seeding
@@ -296,18 +291,6 @@ def train_resnet18(data_flag, num_epochs=10, batch_size=32, learning_rate=0.001,
         torch.backends.cudnn.benchmark = False
 
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # If loaders are not given, fall back to default dataset loading
-    datasets_and_loaders = load_datasets(data_flag, color, im_size, transform, batch_size)
-    if (train_loader is None) or (val_loader is None) or (test_loader is None):
-        _, (train_loader_fallback, calib_loader, test_loader_fallback), info = datasets_and_loaders
-        # Use fallback only if missing
-        train_loader = train_loader or train_loader_fallback
-        val_loader = val_loader or calib_loader
-        test_loader = test_loader or test_loader_fallback
-    else:
-        _, _, info = datasets_and_loaders  # keep info
-
     num_classes = len(info['label'])
     
     if device is None:
@@ -810,3 +793,192 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
     loader_type = "DataLoader w persistent workers + MONAI CacheDataset" if use_monai_local else "torch DataLoader"
     print(f"CV loaders created: {n_splits} folds using {loader_type} (num_workers={num_workers}, cache_rate={cache_rate})")
     return train_loaders, val_loaders
+
+def CV_fold_generator(study_dataset_aug, study_dataset_plain, batch_size,
+                      n_splits=5, seed=42, use_monai=False, cache_rate=1.0,
+                      train_augment_transform=None, num_workers=None, pin_memory=True, prewarm_cache=False):
+    """
+    Generator that yields (train_loader, val_loader, fold_index) for each CV fold.
+    Build and return one fold at a time so caller can free memory after training that fold.
+    Same parameters/behavior as CV_train_val_loaders but lazily constructs per-fold loaders.
+    """
+    if num_workers is None:
+        try:
+            env_n = os.environ.get("NUM_WORKERS")
+            if env_n is not None:
+                num_workers = int(env_n)
+            else:
+                n_cpu = os.cpu_count() or 1
+                n_users = int(os.environ.get("SHARED_USERS", "4"))
+                per_user = max(2, n_cpu // (n_users * 8))
+                num_workers = int(min(max(per_user, 2), 16))
+        except Exception:
+            num_workers = 4
+
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    labels = [label for _, label in study_dataset_plain]
+    use_monai_local = bool(use_monai) and MONAI_AVAILABLE
+    normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
+
+    def _build_data_list_from_subset(ds):
+        data_list = []
+        if isinstance(ds, torch.utils.data.Subset):
+            base = ds.dataset
+            indices = ds.indices
+        else:
+            base = ds
+            indices = range(len(ds))
+        for i in indices:
+            item = base[i]
+            if isinstance(item, dict) and 'image' in item and 'label' in item:
+                img, lbl = item['image'], item['label']
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                img, lbl = item[0], item[1]
+            else:
+                raise RuntimeError("Unsupported dataset item format for caching.")
+            if torch.is_tensor(img):
+                data_list.append({'image_tensor': img.detach().cpu(), 'label': int(lbl)})
+            else:
+                data_list.append({'image_numpy': np.asarray(img), 'label': int(lbl)})
+        return data_list
+
+    for fold_idx, (train_index, val_index) in enumerate(skf.split(np.zeros(len(labels)), labels)):
+        # build subsets
+        if study_dataset_aug is not None:
+            train_subset = torch.utils.data.Subset(study_dataset_aug, train_index)
+        else:
+            train_subset = torch.utils.data.Subset(study_dataset_plain, train_index)
+        val_subset = torch.utils.data.Subset(study_dataset_plain, val_index)
+
+        # Build loaders for this fold (reuse the same logic as CV_train_val_loaders)
+        if use_monai_local:
+            try:
+                train_list = _build_data_list_from_subset(train_subset)
+                val_list = _build_data_list_from_subset(val_subset)
+
+                def _to_tensor_tuple(d):
+                    if 'image_tensor' in d:
+                        img = d['image_tensor']
+                        if not isinstance(img, torch.Tensor):
+                            img = torch.as_tensor(img)
+                        img = img.float()
+                    else:
+                        img = torch.from_numpy(d['image_numpy']).float()
+                    if train_augment_transform is not None:
+                        img = normalize(img)
+                    lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                    return img, lbl
+
+                def _to_train_cached(d):
+                    if 'image_tensor' in d:
+                        img = d['image_tensor']
+                        if not isinstance(img, torch.Tensor):
+                            img = torch.as_tensor(img)
+                        img = img.float()
+                    else:
+                        img = torch.from_numpy(d['image_numpy']).float()
+
+                    if train_augment_transform is not None:
+                        img_pil = to_pil_image(torch.clamp(img, 0., 1.))
+                        lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                        return img_pil, lbl
+                    else:
+                        lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                        return img, lbl
+
+                train_cache_ds = MONAI_CacheDataset(data=train_list, transform=_to_train_cached, cache_rate=float(cache_rate))
+                val_cache_ds = MONAI_CacheDataset(data=val_list, transform=_to_tensor_tuple, cache_rate=float(cache_rate))
+
+                # runtime augment wrapper if requested
+                if train_augment_transform is not None:
+                    class AugmentCachedDataset(torch.utils.data.Dataset):
+                        def __init__(self, cache_ds, augment):
+                            self.cache_ds = cache_ds
+                            self.augment = augment
+
+                        def __len__(self):
+                            return len(self.cache_ds)
+
+                        def __getitem__(self, idx):
+                            x, y = self.cache_ds[idx]
+                            if train_augment_transform is not None and isinstance(x, Image.Image):
+                                aug = self.augment(x)
+                                x_aug = aug if torch.is_tensor(aug) else T.ToTensor()(aug)
+                            else:
+                                x = x.detach().cpu().float()
+                                try:
+                                    x_aug = self.augment(x)
+                                    if not torch.is_tensor(x_aug):
+                                        x_aug = T.ToTensor()(x_aug)
+                                except Exception:
+                                    x_aug = self.augment(to_pil_image(torch.clamp(x, 0., 1.)))
+                                    if not torch.is_tensor(x_aug):
+                                        x_aug = T.ToTensor()(x_aug)
+                            if train_augment_transform is not None:
+                                x_aug = x_aug.float()
+                            return x_aug, y
+                    train_ds_wrapped = AugmentCachedDataset(train_cache_ds, train_augment_transform)
+                else:
+                    train_ds_wrapped = train_cache_ds
+
+                val_ds_wrapped = val_cache_ds
+                persistent = True if (num_workers and num_workers > 0) else False
+                train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
+                                          num_workers=num_workers, pin_memory=pin_memory,
+                                          persistent_workers=persistent, prefetch_factor=2, drop_last=True)
+                val_loader = DataLoader(dataset=val_ds_wrapped, batch_size=batch_size, shuffle=False,
+                                        num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent, prefetch_factor=3)
+
+                if prewarm_cache:
+                    try:
+                        for _ in train_loader:
+                            pass
+                    except Exception:
+                        pass
+
+            except Exception:
+                # fallback to plain DataLoader
+                persistent = True if (num_workers and num_workers > 0) else False
+                train_loader = DataLoader(dataset=train_subset, batch_size=batch_size, shuffle=True,
+                                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
+                val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
+                                        num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
+        else:
+            if train_augment_transform is not None:
+                class AugmentDataset(torch.utils.data.Dataset):
+                    def __init__(self, ds, augment):
+                        self.ds = ds
+                        self.augment = augment
+                    def __len__(self):
+                        return len(self.ds)
+                    def __getitem__(self, idx):
+                        item = self.ds[idx]
+                        if isinstance(item, dict) and 'image' in item and 'label' in item:
+                            x, y = item['image'], item['label']
+                        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                            x, y = item[0], item[1]
+                        else:
+                            raise RuntimeError("Unsupported dataset item format in AugmentDataset.")
+                        try:
+                            x_aug = self.augment(x)
+                        except Exception:
+                            from torchvision.transforms.functional import to_pil_image, to_tensor
+                            if torch.is_tensor(x):
+                                x_pil = to_pil_image(x)
+                            else:
+                                x_pil = x
+                            x_aug = self.augment(x_pil)
+                            if not torch.is_tensor(x_aug):
+                                x_aug = to_tensor(x_aug)
+                        return x_aug, y
+                train_ds_wrapped = AugmentDataset(train_subset, train_augment_transform)
+            else:
+                train_ds_wrapped = train_subset
+
+            persistent = True if (num_workers and num_workers > 0) else False
+            train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
+                                      num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
+            val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
+                                    num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
+
+        yield fold_idx, train_loader, val_loader
