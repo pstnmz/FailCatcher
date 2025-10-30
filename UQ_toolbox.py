@@ -33,6 +33,15 @@ class AddBatchDimension:
         if isinstance(image, torch.Tensor):
             return image.unsqueeze(0).float()
         raise TypeError("Input should be a torch Tensor")
+    
+# add helper to ensure PIL input
+class EnsurePIL:
+    def __call__(self, img):
+        if isinstance(img, torch.Tensor):
+            return transforms.ToPILImage()(img.detach().cpu())
+        if isinstance(img, np.ndarray):
+            return Image.fromarray(img)
+        return img
 
 class _CachedRandAugDataset(Dataset):
     def __init__(self, cache_dataset, augmentation):
@@ -244,10 +253,36 @@ def apply_randaugment_and_store_results(
             averaged_predictions = [average_predictions(pred, output_activation) for pred in batch_predictions.permute(1, 0, 2)]
             all_preds.extend(averaged_predictions)
         averaged_predictions = torch.stack(all_preds)
-        # Save predictions
-        policy_key = str(augmentations[0].transforms[3].get_transform())
-        filename = f'{folder_name}/N{N}_M{M}_{policy_key}.npz'
-        np.savez_compressed(filename, predictions=averaged_predictions.numpy())
+        # Robustly locate the randaugment transform inside the Compose pipeline
+        rand_transform = None
+        for t in augmentations[0].transforms:
+            if isinstance(t, BetterRandAugment) or hasattr(t, 'get_transform') or hasattr(t, 'get_transform_str'):
+                rand_transform = t
+                break
+        if rand_transform is None:
+            # fallback: search by class name
+            for t in augmentations[0].transforms:
+                if t.__class__.__name__ == 'BetterRandAugment':
+                    rand_transform = t
+                    break
+
+        if rand_transform is not None:
+            if hasattr(rand_transform, 'get_transform_str'):
+                policy_key = rand_transform.get_transform_str()
+            elif hasattr(rand_transform, 'get_transform'):
+                try:
+                    policy_key = str(rand_transform.get_transform())
+                except Exception:
+                    policy_key = repr(rand_transform)
+            else:
+                policy_key = rand_transform.__class__.__name__
+        else:
+            # Last resort: join the class names of pipeline transforms
+            policy_key = "_".join([t.__class__.__name__ for t in augmentations[0].transforms])
+
+        # sanitize filename
+        safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
+        filename = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
 
 
 def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None, cached_dataset=None, dataloader_workers=None):
@@ -305,15 +340,15 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         elif transformations is False:
             rand_aug_policies = [BetterRandAugment(n, m, True, False, randomize_sign=False, image_size=image_size) for _ in range(nb_augmentations)] 
 
+        # Ensure input is PIL, run randaugment (expects PIL), then convert to tensor and normalize.
         augmentations = [transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.ToPILImage(),
-                    transforms.Lambda(lambda img: img.convert("RGB")),  # Ensure image is in RGB format
-                    *([to_3_channels] if nb_channels == 1 else []),  # Conditionally add to_3_channels
-                    rand_aug,
-                    *([to_1_channel] if nb_channels == 1 else []),  # Conditionally add to_1_channel
-                    transforms.PILToTensor(),
-                    transforms.Lambda(lambda x: x.float()) if nb_channels == 1 else transforms.ConvertImageDtype(torch.float),
+                    EnsurePIL(),                                 # convert tensor/ndarray -> PIL if needed
+                    transforms.Lambda(lambda img: img.convert("RGB")),  # ensure RGB for randaug
+                    *([to_3_channels] if nb_channels == 1 else []),      # if needed expand channels (no-op for RGB)
+                    rand_aug,                                            # BetterRandAugment expects PIL Image
+                    *([to_1_channel] if nb_channels == 1 else []),       # convert back to single channel if needed
+                    transforms.PILToTensor(),                            # PIL -> Tensor (uint8 -> [0,255] -> Tensor)
+                    transforms.ConvertImageDtype(torch.float),          # ensure float Tensor
                     *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
                 ]) for rand_aug in rand_aug_policies]
         
