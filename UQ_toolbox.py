@@ -44,33 +44,44 @@ class EnsurePIL:
         return img
 
 class _CachedRandAugDataset(Dataset):
-    def __init__(self, cache_dataset, augmentation):
+    """
+    Wrap a MONAI CacheDataset and apply a list of torchvision augmentation pipelines
+    to each cached image, returning a stacked tensor of shape (K, C, H, W).
+    """
+    def __init__(self, cache_dataset, augmentations):
         self.cache_dataset = cache_dataset
-        self.augmentation = augmentation
+        # allow either a single augmentation or a list
+        self.augmentations = augmentations if isinstance(augmentations, (list, tuple)) else [augmentations]
 
     def __len__(self):
         return len(self.cache_dataset)
 
     def __getitem__(self, index):
         sample = self.cache_dataset[index]
-        img = sample["image"]
-        label = sample.get("label")
-        # If the cache stores a tensor/ndarray, convert to PIL Image before running
-        # the torchvision augmentation pipeline (which expects PIL or ndarray for ToTensor).
+        if isinstance(sample, dict):
+            img = sample.get("image")
+            label = sample.get("label", None)
+        else:
+            img, label = sample
+
+        # normalize input type -> PIL Image expected by augmentation pipeline
         if isinstance(img, torch.Tensor):
             img = img.detach().cpu()
-            try:
-                pil_img = transforms.ToPILImage()(img)
-            except Exception:
-                pil_img = Image.fromarray((img.numpy() * 255).astype('uint8')) if img.dtype == torch.float32 else Image.fromarray(img.numpy())
-            augmented_img = self.augmentation(pil_img)
+            img = transforms.ToPILImage()(img)
         elif isinstance(img, np.ndarray):
-            pil_img = Image.fromarray(img)
-            augmented_img = self.augmentation(pil_img)
-        else:
-            # already a PIL Image or other acceptable type
-            augmented_img = self.augmentation(img)
-        return augmented_img, label
+            img = Image.fromarray(img)
+
+        outs = []
+        for aug in self.augmentations:
+            out = aug(img)  # augmentation pipeline should output a Tensor (C,H,W) or PIL
+            if not isinstance(out, torch.Tensor):
+                out = transforms.PILToTensor()(out)
+            out = out.float()
+            outs.append(out)
+
+        # stacked: K x C x H x W
+        stacked = torch.stack(outs, dim=0)
+        return stacked, label
     
 
 def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
@@ -236,53 +247,155 @@ def apply_randaugment_and_store_results(
     if use_monai_cache:
         cached_dataset = build_monai_cache_dataset(dataset, cache_rate=cache_rate, num_workers=cache_num_workers)
 
-    for i in range(num_policies):
-    
-        print(f"Applying augmentation policy {i+1}/{num_policies}")
-        # Apply augmentation and get augmented images
-        augmented_inputs, augmentations = apply_augmentations(
-            dataset, 1, True, N, M, image_normalization, nb_channels, mean, std, image_size, batch_size=batch_size, cached_dataset=cached_dataset, dataloader_workers=dataloader_workers
-        )
-        # augmented_inputs shape: [1, batch_size, C, H, W]
-        augmented_input = augmented_inputs[0]  # shape: [batch_size, C, H, W]
-        dataset_aug = TensorDataset(augmented_input)
-        loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
-        all_preds = []
-        for batch in loader:
-            batch_predictions = get_batch_predictions(models, batch[0], device)
-            averaged_predictions = [average_predictions(pred, output_activation) for pred in batch_predictions.permute(1, 0, 2)]
-            all_preds.extend(averaged_predictions)
-        averaged_predictions = torch.stack(all_preds)
-        # Robustly locate the randaugment transform inside the Compose pipeline
-        rand_transform = None
-        for t in augmentations[0].transforms:
-            if isinstance(t, BetterRandAugment) or hasattr(t, 'get_transform') or hasattr(t, 'get_transform_str'):
-                rand_transform = t
-                break
-        if rand_transform is None:
-            # fallback: search by class name
+    # If we have a cached dataset, stream per-batch and write per-policy predictions incrementally.
+    if cached_dataset is not None:
+        print(f"Streaming {num_policies} policies in chunks to avoid RAM blowup")
+        policy_chunk_size = 50  # tune: number of policies processed in one pass (reduce RAM & open files)
+        num_samples = len(cached_dataset)
+
+        # Helper to build a list of torchvision pipelines for a chunk of BetterRandAug transforms
+        def build_augmentations_chunk(k_chunk):
+            rand_aug_policies = [BetterRandAugment(N, M, True, False, randomize_sign=False, image_size=image_size) for _ in range(k_chunk)]
+            return [transforms.Compose([
+                        EnsurePIL(),
+                        transforms.Lambda(lambda img: img.convert("RGB")),
+                        *([to_3_channels] if nb_channels == 1 else []),
+                        rand_aug,
+                        *([to_1_channel] if nb_channels == 1 else []),
+                        transforms.PILToTensor(),
+                        transforms.ConvertImageDtype(torch.float),
+                        *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
+                    ]) for rand_aug in rand_aug_policies]
+
+        # Process policies in chunks
+        for start in range(0, num_policies, policy_chunk_size):
+            end = min(start + policy_chunk_size, num_policies)
+            K_chunk = end - start
+            print(f"Processing policy chunk {start}-{end-1} (K_chunk={K_chunk})")
+            augmentations = build_augmentations_chunk(K_chunk)
+
+            # build cached dataset for this chunk (Dataset yields (K_chunk, C, H, W) per sample)
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            loader = DataLoader(dataset=aug_dataset, batch_size=batch_size, shuffle=False, num_workers=dataloader_workers or 0, pin_memory=True)
+
+            # infer num_classes by running a dummy forward if models are available
+            with torch.no_grad():
+                # run one forward to get number of classes
+                # pick a small dummy input with nb_channels and image_size
+                dummy = torch.zeros(1, nb_channels, image_size, image_size)
+                try:
+                    dp = get_batch_predictions(models, dummy, device)  # [num_models, 1, num_classes]
+                    nc = average_predictions(dp, output_activation).shape[1]
+                except Exception:
+                    # fallback guess
+                    nc = 1
+
+            # create memmaps (one per policy in chunk)
+            memmaps = []
+            memmap_paths = []
+            for idx in range(K_chunk):
+                mmap_path = os.path.join(folder_name, f"tmp_policy_{start+idx}.mmap")
+                mem = np.memmap(mmap_path, dtype='float32', mode='w+', shape=(num_samples, nc))
+                memmaps.append(mem)
+                memmap_paths.append(mmap_path)
+
+            # stream batches and fill memmaps
+            sample_ptr = 0
+            for batch in loader:
+                imgs_stacked = batch[0]  # shape: [B, K_chunk, C, H, W]
+                B = imgs_stacked.shape[0]
+                for local_k in range(K_chunk):
+                    imgs_k = imgs_stacked[:, local_k].float()  # [B, C, H, W]
+                    batch_predictions = get_batch_predictions(models, imgs_k, device)  # [num_models, B, nc]
+                    avg_preds = average_predictions(batch_predictions, output_activation)  # [B, nc], torch
+                    memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds.cpu().numpy()
+                sample_ptr += B
+
+            if sample_ptr != num_samples:
+                raise RuntimeError(f"Expected {num_samples} samples but wrote {sample_ptr}")
+
+            # flush + compress each memmap to final .npz and remove memmap file
+            for local_k, (mem, mempath) in enumerate(zip(memmaps, memmap_paths)):
+                # determine a policy_key for naming (best effort using augmentations list)
+                rand_transform = None
+                try:
+                    for t in augmentations[local_k].transforms:
+                        if isinstance(t, BetterRandAugment) or hasattr(t, 'get_transform') or hasattr(t, 'get_transform_str'):
+                            rand_transform = t
+                            break
+                except Exception:
+                    rand_transform = None
+
+                if rand_transform is not None:
+                    if hasattr(rand_transform, 'get_transform_str'):
+                        policy_key = rand_transform.get_transform_str()
+                    elif hasattr(rand_transform, 'get_transform'):
+                        try:
+                            policy_key = str(rand_transform.get_transform())
+                        except Exception:
+                            policy_key = repr(rand_transform)
+                    else:
+                        policy_key = rand_transform.__class__.__name__
+                else:
+                    policy_key = f"policy_{start + local_k}"
+
+                safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
+                out_fname = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
+                # read memmap into numpy array (memmap is backed by file, this will stream)
+                arr = np.asarray(mem)
+                np.savez_compressed(out_fname, predictions=arr)
+                print(f"Saved compressed predictions for policy {start + local_k} -> {out_fname}")
+
+            # cleanup memmap files and free references
+            try:
+                for mempath in memmap_paths:
+                    os.remove(mempath)
+            except Exception:
+                pass
+            del memmaps
+    else:
+        # fallback: no cache — keep previous per-policy behaviour (iterate dataset per policy)
+        for i in range(num_policies):
+            print(f"Applying augmentation policy {i+1}/{num_policies}")
+            augmented_inputs, augmentations = apply_augmentations(
+                dataset, 1, True, N, M, image_normalization, nb_channels, mean, std, image_size, batch_size=batch_size
+            )
+            augmented_input = augmented_inputs[0]  # shape: [batch_size, C, H, W]
+            dataset_aug = TensorDataset(augmented_input)
+            loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+            all_preds = []
+            for batch in loader:
+                batch_predictions = get_batch_predictions(models, batch[0], device)
+                avg_preds = average_predictions(batch_predictions, output_activation)
+                all_preds.append(avg_preds)
+            averaged_predictions = torch.cat(all_preds, dim=0)
+            # same policy key extraction / saving as above
+            rand_transform = None
             for t in augmentations[0].transforms:
-                if t.__class__.__name__ == 'BetterRandAugment':
+                if isinstance(t, BetterRandAugment) or hasattr(t, 'get_transform') or hasattr(t, 'get_transform_str'):
                     rand_transform = t
                     break
-
-        if rand_transform is not None:
-            if hasattr(rand_transform, 'get_transform_str'):
-                policy_key = rand_transform.get_transform_str()
-            elif hasattr(rand_transform, 'get_transform'):
-                try:
-                    policy_key = str(rand_transform.get_transform())
-                except Exception:
-                    policy_key = repr(rand_transform)
+            if rand_transform is None:
+                for t in augmentations[0].transforms:
+                    if t.__class__.__name__ == 'BetterRandAugment':
+                        rand_transform = t
+                        break
+            if rand_transform is not None:
+                if hasattr(rand_transform, 'get_transform_str'):
+                    policy_key = rand_transform.get_transform_str()
+                elif hasattr(rand_transform, 'get_transform'):
+                    try:
+                        policy_key = str(rand_transform.get_transform())
+                    except Exception:
+                        policy_key = repr(rand_transform)
+                else:
+                    policy_key = rand_transform.__class__.__name__
             else:
-                policy_key = rand_transform.__class__.__name__
-        else:
-            # Last resort: join the class names of pipeline transforms
-            policy_key = "_".join([t.__class__.__name__ for t in augmentations[0].transforms])
-
-        # sanitize filename
-        safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
-        filename = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
+                policy_key = "_".join([t.__class__.__name__ for t in augmentations[0].transforms])
+            safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
+            filename = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
+            np.savez_compressed(filename, predictions=averaged_predictions.numpy())
+            print(f"Saved predictions to {filename}")
 
 
 def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None, cached_dataset=None, dataloader_workers=None):
@@ -352,15 +465,31 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                     *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
                 ]) for rand_aug in rand_aug_policies]
         
-        for i, augmentation in enumerate(augmentations):
-            augmented_inputs_batch = []
-            print(f"Applying augmentation n : {i}")
-            data_loader = _get_loader(augmentation)
-            for batch in data_loader:
-                augmented_images = batch[0]
-                augmented_inputs_batch.append(augmented_images)
-            augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
-        augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
+        # If we have a cached_dataset, apply all augmentations in a single pass:
+        if cached_dataset is not None:
+            # _CachedRandAugDataset will return stacked KxC xH xW per sample, DataLoader -> B x K x C x H x W
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            loader = DataLoader(dataset=aug_dataset, batch_size=batch_size, shuffle=False, num_workers=worker_count, pin_memory=True)
+            batches = []
+            for batch in loader:
+                imgs_stacked = batch[0]  # shape: [B, K, C, H, W]
+                batches.append(imgs_stacked)
+            if len(batches) == 0:
+                raise RuntimeError("cached loader returned no data")
+            all_imgs = torch.cat(batches, dim=0)  # [total_B, K, C, H, W]
+            # permute to [K, B, C, H, W] so callers that expect per-augmentation stack keep working
+            augmented_inputs = all_imgs.permute(1, 0, 2, 3, 4)
+        else:
+            # fallback: previous behaviour (iterate once per augmentation)
+            for i, augmentation in enumerate(augmentations):
+                augmented_inputs_batch = []
+                print(f"Applying augmentation n : {i}")
+                data_loader = _get_loader(augmentation)
+                for batch in data_loader:
+                    augmented_images = batch[0]
+                    augmented_inputs_batch.append(augmented_images)
+                augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+            augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
 
     else:
         for i in range(nb_augmentations):
