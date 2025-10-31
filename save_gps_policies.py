@@ -16,6 +16,17 @@ try:
     _NVML_AVAILABLE = True
 except Exception:
     _NVML_AVAILABLE = False
+    
+# Limit thread oversubscription globally
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+try:
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
 
 # -------------------- Resource profiling helpers --------------------
 def _get_cuda_index(device):
@@ -104,7 +115,7 @@ model_augmentations = [False, True, True, True, True]
 model_augmentations = [False]
 #color = True # True for color, False for grayscale
 #activation = 'softmax'  # 'sigmoid' for binary-class, 'softmax' for multi-class
-batch_size = 4000
+batch_size = 128
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 size = 224  # Image size for the models
 #model_augmentation = False  # Whether the models were trained with data augmentation
@@ -151,6 +162,14 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
     [_, calibration_dataset_tta, _], [_, _, _], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
 
     cache_workers = max(os.cpu_count() - 1, 0) if os.cpu_count() else 0
+       # Prefer the actually available CPU affinity (inside containers this can be < os.cpu_count())
+    try:
+        avail_cores = len(os.sched_getaffinity(0))
+        print(f"Detected available CPU cores via sched_getaffinity: {avail_cores}")
+    except AttributeError:
+        avail_cores = os.cpu_count() or 8
+       # With 96 cores, start with 48; you can try 64 if CPU remains underutilized
+    dataloader_workers = min(64, max(16, avail_cores // 2))
 
     with ResourceProfiler(device=device, label="GPS_calibration_randaugment") as rp:
         uq.apply_randaugment_and_store_results(
@@ -170,7 +189,7 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
             batch_size=batch_size,
             use_monai_cache=True,
             cache_num_workers=cache_workers,
-            dataloader_workers=0
+            dataloader_workers=dataloader_workers
         )
 
     # Save JSON log
