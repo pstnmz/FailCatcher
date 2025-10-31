@@ -27,6 +27,19 @@ from scipy.spatial.distance import squareform
 from sklearn.preprocessing import StandardScaler
 from PIL import Image
 
+
+def _dl_worker_init(_):
+    # prevent oversubscription per worker process
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+    
 class AddBatchDimension:
     def __call__(self, image):
         # Ensure the image is a tensor and add batch dimension
@@ -82,6 +95,10 @@ class _CachedRandAugDataset(Dataset):
         # stacked: K x C x H x W
         stacked = torch.stack(outs, dim=0)
         return stacked, label
+
+    # New: allow swapping the augmentation list without recreating the DataLoader
+    def set_augmentations(self, augmentations):
+        self.augmentations = augmentations if isinstance(augmentations, (list, tuple)) else [augmentations]
     
 
 def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
@@ -95,15 +112,19 @@ def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
             label = sample.get("label")
         else:
             img, label = sample
+        # Convert once to PIL to avoid doing it per-augmentation in workers
         if isinstance(img, torch.Tensor):
-            img = img.detach().cpu()
+            img = transforms.ToPILImage()(img.detach().cpu())
+        elif isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
+        # keep label as small tensor/py type
         if isinstance(label, torch.Tensor):
             label = label.detach().cpu()
         data.append({"image": img, "label": label})
     return CacheDataset(data=data, transform=None, cache_rate=cache_rate, num_workers=num_workers)
 
 
-def get_prediction(model, image, device):
+def get_prediction(model, image, device, use_amp=True):
     """
     Generates a prediction from a given model and image.
 
@@ -111,7 +132,7 @@ def get_prediction(model, image, device):
         model (torch.nn.Module): The model used for prediction.
         image (torch.Tensor): The input image tensor.
         device (torch.device): The device to run the model on (e.g., 'cpu' or 'cuda').
-        softmax_application (bool, optional): If True, applies softmax to the prediction. Defaults to False.
+        use_amp (bool, optional): If True and running on CUDA, use automatic mixed precision (AMP). Defaults to True.
 
     Returns:
         torch.Tensor: The prediction output from the model.
@@ -119,12 +140,87 @@ def get_prediction(model, image, device):
     model.to(device)
     image = image.to(device, non_blocking=True)
     model.eval()  # Ensure the model is in evaluation mode
-    with torch.no_grad():  # Disable gradient computation
-        prediction = model(image).detach().cpu()
-
+    with torch.no_grad():
+        if use_amp and getattr(device, "type", None) == "cuda":
+            with torch.amp.autocast(device_type="cuda"):
+                prediction = model(image)
+        else:
+            prediction = model(image)
+        prediction = prediction.detach().cpu()
     return prediction
 
+def get_batch_predictions(models, augmented_inputs, device, use_amp=True):
+    """
+    Get predictions for the augmented inputs.
 
+    Args:
+        models (torch.nn.Module or list): Model or list of models to use for predictions.
+        augmented_inputs (torch.Tensor): Augmented images.
+        device (torch.device): Device to run the models on.
+        softmax_application (bool): If True, applies softmax to the prediction.
+
+    Returns:
+        torch.Tensor: Batch predictions.
+    """
+    if isinstance(models, list):
+        batch_predictions = []
+        for model in models:
+            prediction = get_prediction(model, augmented_inputs, device, use_amp=use_amp)
+            batch_predictions.append(prediction)
+    else:
+        prediction = get_prediction(models, augmented_inputs, device, use_amp=use_amp)
+        batch_predictions = [prediction]
+    
+    batch_predictions = torch.stack(batch_predictions, dim=0)  # Shape: [num_models, batch_size * num_augmentations, num_classes]
+    return batch_predictions
+
+
+def average_predictions(batch_predictions, output_activation=None):
+    """
+    Average predictions across models and group augmentations back with their respective images.
+
+    Args:
+        batch_predictions (torch.Tensor): Batch predictions. Shape: [num_models, batch_size * num_augmentations, num_classes].
+        output_activation (str, optional): Activation function to apply to the predictions. 
+                                           Options: 'softmax', 'sigmoid', or None. Defaults to None.
+
+    Returns:
+        torch.Tensor: Averaged predictions. Shape: [batch_size * num_augmentations, num_classes].
+    """
+    # Average predictions across models
+    averaged_predictions = torch.mean(batch_predictions, dim=0)  # Shape: [batch_size * num_augmentations, num_classes]
+
+    # Apply the specified activation function
+    if output_activation == 'softmax':
+        averaged_predictions = torch.nn.functional.softmax(averaged_predictions, dim=-1)
+    elif output_activation == 'sigmoid':
+        averaged_predictions = torch.sigmoid(averaged_predictions)
+
+    return averaged_predictions
+
+
+def compute_stds(averaged_predictions):
+    """
+    Compute standard deviations for the predictions.
+
+    Args:
+        averaged_predictions (torch.Tensor): Averaged predictions.
+
+    Returns:
+        list: List of standard deviations for each sample.
+    """
+    if averaged_predictions.ndim == 2 or averaged_predictions.shape[2] == 1:
+        stds = torch.std(averaged_predictions, dim=1).squeeze().tolist()  # Binary classification: shape (num_models, num_samples)
+    elif averaged_predictions.ndim == 3:
+        stds_per_class = torch.std(averaged_predictions, dim=1).squeeze()  # Multiclass classification: shape (num_models, num_samples, num_classes)
+        stds = torch.mean(stds_per_class, dim=1).tolist()
+    return stds
+
+
+def ensembling_predictions(models, image):
+    ensembling_predictions = [get_prediction(model, image) for model in models]
+    
+    return ensembling_predictions
 
 def extract_gps_augmentations_info(policies):
     """
@@ -250,7 +346,7 @@ def apply_randaugment_and_store_results(
     # If we have a cached dataset, stream per-batch and write per-policy predictions incrementally.
     if cached_dataset is not None:
         print(f"Streaming {num_policies} policies in chunks to avoid RAM blowup")
-        policy_chunk_size = 50  # tune: number of policies processed in one pass (reduce RAM & open files)
+        policy_chunk_size = min(16, num_policies)  # smaller K reduces per-sample CPU load
         num_samples = len(cached_dataset)
 
         # Helper to build a list of torchvision pipelines for a chunk of BetterRandAug transforms
@@ -262,33 +358,44 @@ def apply_randaugment_and_store_results(
                         *([to_3_channels] if nb_channels == 1 else []),
                         rand_aug,
                         *([to_1_channel] if nb_channels == 1 else []),
-                        transforms.PILToTensor(),
-                        transforms.ConvertImageDtype(torch.float),
+                        transforms.ToTensor(),
                         *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
                     ]) for rand_aug in rand_aug_policies]
 
-        # Process policies in chunks
+        # Infer num_classes once
+        with torch.no_grad():
+            dummy = torch.zeros(1, nb_channels, image_size, image_size)
+            try:
+                dp = get_batch_predictions(models, dummy, device)  # [num_models, 1, num_classes]
+                nc = average_predictions(dp, output_activation).shape[1]
+            except Exception:
+                nc = 1
+
+        # Build one dataset/loader and reuse workers across all chunks
+        worker_count = dataloader_workers or 0
+        aug_dataset = _CachedRandAugDataset(cached_dataset, [])  # empty; set per chunk
+        loader_kwargs = dict(
+            dataset=aug_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=worker_count,
+            pin_memory=True,
+            worker_init_fn=_dl_worker_init,
+        )
+        if worker_count > 0:
+            loader_kwargs["persistent_workers"] = (dataloader_workers or 0) > 0
+            loader_kwargs["prefetch_factor"] = 8 if (dataloader_workers or 0) > 0 else None
+        loader = DataLoader(**loader_kwargs)
+
+        # Process policies in chunks; reuse the same DataLoader
         for start in range(0, num_policies, policy_chunk_size):
             end = min(start + policy_chunk_size, num_policies)
             K_chunk = end - start
             print(f"Processing policy chunk {start}-{end-1} (K_chunk={K_chunk})")
+
+            # Swap augmentations for this chunk (workers persist)
             augmentations = build_augmentations_chunk(K_chunk)
-
-            # build cached dataset for this chunk (Dataset yields (K_chunk, C, H, W) per sample)
-            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
-            loader = DataLoader(dataset=aug_dataset, batch_size=batch_size, shuffle=False, num_workers=dataloader_workers or 0, pin_memory=True)
-
-            # infer num_classes by running a dummy forward if models are available
-            with torch.no_grad():
-                # run one forward to get number of classes
-                # pick a small dummy input with nb_channels and image_size
-                dummy = torch.zeros(1, nb_channels, image_size, image_size)
-                try:
-                    dp = get_batch_predictions(models, dummy, device)  # [num_models, 1, num_classes]
-                    nc = average_predictions(dp, output_activation).shape[1]
-                except Exception:
-                    # fallback guess
-                    nc = 1
+            aug_dataset.set_augmentations(augmentations)
 
             # create memmaps (one per policy in chunk)
             memmaps = []
@@ -302,14 +409,15 @@ def apply_randaugment_and_store_results(
             # stream batches and fill memmaps
             sample_ptr = 0
             for batch in loader:
-                imgs_stacked = batch[0]  # shape: [B, K_chunk, C, H, W]
-                B = imgs_stacked.shape[0]
-                for local_k in range(K_chunk):
-                    imgs_k = imgs_stacked[:, local_k].float()  # [B, C, H, W]
-                    batch_predictions = get_batch_predictions(models, imgs_k, device)  # [num_models, B, nc]
-                    avg_preds = average_predictions(batch_predictions, output_activation)  # [B, nc], torch
-                    memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds.cpu().numpy()
-                sample_ptr += B
+               imgs_stacked = batch[0]  # [B, K_chunk, C, H, W]
+               B, K, C, H, W = imgs_stacked.shape
+               imgs_flat = imgs_stacked.reshape(B * K, C, H, W).float()  # [B*K, C, H, W]
+               batch_predictions = get_batch_predictions(models, imgs_flat, device)  # [M, B*K, nc]
+               avg_preds = average_predictions(batch_predictions, output_activation)  # [B*K, nc] (CPU)
+               avg_preds = avg_preds.view(B, K, -1).cpu().numpy()  # [B, K_chunk, nc]
+               for local_k in range(K):
+                   memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
+               sample_ptr += B
 
             if sample_ptr != num_samples:
                 raise RuntimeError(f"Expected {num_samples} samples but wrote {sample_ptr}")
@@ -341,7 +449,6 @@ def apply_randaugment_and_store_results(
 
                 safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
                 out_fname = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
-                # read memmap into numpy array (memmap is backed by file, this will stream)
                 arr = np.asarray(mem)
                 np.savez_compressed(out_fname, predictions=arr)
                 print(f"Saved compressed predictions for policy {start + local_k} -> {out_fname}")
@@ -507,79 +614,6 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
     else:
         return augmented_inputs
 
-
-def get_batch_predictions(models, augmented_inputs, device):
-    """
-    Get predictions for the augmented inputs.
-
-    Args:
-        models (torch.nn.Module or list): Model or list of models to use for predictions.
-        augmented_inputs (torch.Tensor): Augmented images.
-        device (torch.device): Device to run the models on.
-        softmax_application (bool): If True, applies softmax to the prediction.
-
-    Returns:
-        torch.Tensor: Batch predictions.
-    """
-    if isinstance(models, list):
-        batch_predictions = []
-        for model in models:
-            prediction = get_prediction(model, augmented_inputs, device)
-            batch_predictions.append(prediction)
-    else:
-        prediction = get_prediction(models, augmented_inputs, device)
-        batch_predictions = [prediction]
-    
-    batch_predictions = torch.stack(batch_predictions, dim=0)  # Shape: [num_models, batch_size * num_augmentations, num_classes]
-    return batch_predictions
-
-
-def average_predictions(batch_predictions, output_activation=None):
-    """
-    Average predictions across models and group augmentations back with their respective images.
-
-    Args:
-        batch_predictions (torch.Tensor): Batch predictions. Shape: [num_models, batch_size * num_augmentations, num_classes].
-        output_activation (str, optional): Activation function to apply to the predictions. 
-                                           Options: 'softmax', 'sigmoid', or None. Defaults to None.
-
-    Returns:
-        torch.Tensor: Averaged predictions. Shape: [batch_size * num_augmentations, num_classes].
-    """
-    # Average predictions across models
-    averaged_predictions = torch.mean(batch_predictions, dim=0)  # Shape: [batch_size * num_augmentations, num_classes]
-
-    # Apply the specified activation function
-    if output_activation == 'softmax':
-        averaged_predictions = torch.nn.functional.softmax(averaged_predictions, dim=-1)
-    elif output_activation == 'sigmoid':
-        averaged_predictions = torch.sigmoid(averaged_predictions)
-
-    return averaged_predictions
-
-
-def compute_stds(averaged_predictions):
-    """
-    Compute standard deviations for the predictions.
-
-    Args:
-        averaged_predictions (torch.Tensor): Averaged predictions.
-
-    Returns:
-        list: List of standard deviations for each sample.
-    """
-    if averaged_predictions.ndim == 2 or averaged_predictions.shape[2] == 1:
-        stds = torch.std(averaged_predictions, dim=1).squeeze().tolist()  # Binary classification: shape (num_models, num_samples)
-    elif averaged_predictions.ndim == 3:
-        stds_per_class = torch.std(averaged_predictions, dim=1).squeeze()  # Multiclass classification: shape (num_models, num_samples, num_classes)
-        stds = torch.mean(stds_per_class, dim=1).tolist()
-    return stds
-
-
-def ensembling_predictions(models, image):
-    ensembling_predictions = [get_prediction(model, image) for model in models]
-    
-    return ensembling_predictions
     
 def distance_to_hard_labels_computation(predictions):
     """
