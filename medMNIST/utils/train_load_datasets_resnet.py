@@ -41,6 +41,45 @@ def _clear_cache_dataset(ds):
         if hasattr(ds, attr):
             setattr(ds, attr, None)
 
+def _append_log(path, text):
+    with open(path, 'a') as f:
+        f.write(text.rstrip() + '\n')
+
+# --- New: simple patience-based early stopper ---
+class EarlyStopper:
+    def __init__(self, mode='min', patience=10, min_delta=0.0):
+        """
+        mode: 'min' for loss, 'max' for accuracy
+        patience: epochs to wait without improvement before stopping
+        min_delta: minimum change to qualify as improvement
+        """
+        assert mode in ('min', 'max')
+        self.mode = mode
+        self.patience = int(patience)
+        self.min_delta = float(min_delta)
+        self.best = None
+        self.bad_epochs = 0
+
+    def _improved(self, current):
+        if self.best is None:
+            return True
+        if self.mode == 'min':
+            return current < (self.best - self.min_delta)
+        else:
+            return current > (self.best + self.min_delta)
+
+    def step(self, current):
+        improved = self._improved(current)
+        if improved:
+            self.best = current
+            self.bad_epochs = 0
+        else:
+            self.bad_epochs += 1
+        return improved
+
+    def should_stop(self):
+        return self.bad_epochs >= self.patience
+    
 # Prefetcher: moves batches to device asynchronously to overlap CPU/GPU work
 class PrefetchLoader:
     def __init__(self, loader, device):
@@ -255,8 +294,9 @@ def train(model, device, train_loader, optimizer, criterion, epoch):
 
 def validate(model, device, val_loader, criterion):
     model.eval()
-    val_loss = 0
+    val_loss = 0.0
     correct = 0
+    n_samples = len(val_loader.dataset)
     with torch.no_grad():
         for data, target in val_loader:
             data, target = data.to(device, non_blocking=True), target.to(device, non_blocking=True)
@@ -272,14 +312,43 @@ def validate(model, device, val_loader, criterion):
                 pred = output.argmax(dim=1)
                 correct += (pred == target_t).sum().item()
 
-    val_loss /= len(val_loader)  # Average loss per batch instead of per dataset
-    print(f'\nValidation set: Average loss: {val_loss:.4f}, Accuracy: {correct}/{len(val_loader.dataset)} ({100. * correct / len(val_loader.dataset):.0f}%)\n')
-    return val_loss
+    val_loss /= len(val_loader)  # average per batch
+    val_acc = correct / float(n_samples)
+    print(f'\nValidation set: Average loss: {val_loss:.4f}, Accuracy: {correct}/{n_samples} ({100. * val_acc:.0f}%)\n')
+    return val_loss, val_acc
 
+def _compute_class_weights_from_loader(train_loader, num_classes):
+    """
+    Returns:
+      class_weight (torch.Tensor or None) for CE
+      pos_weight (torch.Tensor or None) for BCEWithLogits
+    """
+    counts = np.zeros(int(num_classes), dtype=np.int64)
+    with torch.no_grad():
+        for _, target in train_loader:
+            t = target.detach().cpu().numpy().reshape(-1)
+            # targets come as ints [0..C-1] (binary: 0/1)
+            for c in t:
+                counts[int(c)] += 1
 
-def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=0.001, device=None,
-                   train_loader=None, val_loader=None, test_loader=None, color=False, im_size=224,
-                   transform=None, random_seed=None, output_dir=None, run_name="run", scheduler=False):
+    total = counts.sum()
+    # Avoid div-by-zero
+    counts = np.clip(counts, 1, None)
+
+    if num_classes == 2:
+        neg, pos = counts[0], counts[1]
+        # pos_weight = neg/pos
+        pos_weight = torch.tensor([float(neg) / float(pos)], dtype=torch.float32)
+        return None, pos_weight
+    else:
+        # CE class weights: inverse frequency, normalized to mean 1.0
+        w = 1.0 / counts.astype(np.float64)
+        w = w / (w.mean() + 1e-12)
+        class_weight = torch.tensor(w, dtype=torch.float32)
+        return class_weight, None
+
+def train_resnet18(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
+                   train_loader=None, val_loader=None, test_loader=None, random_seed=None, output_dir=None, run_name="run", scheduler=False, early_stop=True, monitor='val_loss', patience=10, min_delta=0.001, restore_best=True, checkpoint_best=False, class_weighting=True):
         # Optional seeding
     if random_seed is not None:
         import random
@@ -293,6 +362,19 @@ def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=
 
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
     num_classes = len(info['label'])
+    
+    # Compute weights BEFORE wrapping loaders for CUDA prefetch
+    ce_weight_cpu, bce_pos_weight_cpu = (None, None)
+    if class_weighting:
+        try:
+            ce_weight_cpu, bce_pos_weight_cpu = _compute_class_weights_from_loader(train_loader, num_classes)
+            if ce_weight_cpu is not None:
+                print(f"Using CE class weights (mean=1): {ce_weight_cpu.tolist()}")
+            if bce_pos_weight_cpu is not None:
+                print(f"Using BCE pos_weight: {bce_pos_weight_cpu.item():.4f}")
+        except Exception as e:
+            print("Warning: failed to compute class weights, continuing unweighted:", e)
+
     
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -308,10 +390,18 @@ def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=
 
     if num_classes == 2:
             model.fc = torch.nn.Linear(in_features, 1)
-            criterion = BCEWithLogitsLoss()
+                    # Move pos_weight to device if available
+            if bce_pos_weight_cpu is not None:
+                criterion = BCEWithLogitsLoss(pos_weight=bce_pos_weight_cpu.to(device))
+            else:
+                criterion = BCEWithLogitsLoss()
     else:
         model.fc = torch.nn.Linear(in_features, num_classes)
-        criterion = CrossEntropyLoss()
+        # Move CE weights to device if available
+        if ce_weight_cpu is not None:
+            criterion = CrossEntropyLoss(weight=ce_weight_cpu.to(device))
+        else:
+            criterion = CrossEntropyLoss()
     model = model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -321,6 +411,7 @@ def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=
 
     train_losses = []
     val_losses = []
+    val_accs = []  # new: keep val_acc history
     epoch_times = []
     if output_dir:
         figs_dir = os.path.join(output_dir, "figs")
@@ -328,12 +419,21 @@ def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=
         log_path = os.path.join(output_dir, "metrics.log")
         _append_log(log_path, f"=== {run_name} start: epochs={num_epochs}, lr={learning_rate} ===")
 
+    # New: setup early stopper
+    stopper = None
+    best_state = None
+    best_epoch = -1
+    best_metric_val = None
+    metric_mode = 'min' if monitor == 'val_loss' else 'max'
+    if early_stop:
+        stopper = EarlyStopper(mode=metric_mode, patience=patience, min_delta=min_delta)
+    best_ckpt_path = os.path.join(output_dir, f"best_{run_name}.pt") if (output_dir and checkpoint_best) else None
+
     run_t0 = time.time()
     for epoch in range(num_epochs):
         ep_t0 = time.time()
         t0_train = time.perf_counter()
         train_loss = train(model, device, train_loader, optimizer, criterion, epoch)
-        # ensure GPU work finished before taking the post-train timestamp
         if torch.cuda.is_available() and ('cuda' in str(device).lower()):
             torch.cuda.synchronize()
         t1_train = time.perf_counter()
@@ -342,44 +442,90 @@ def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=
             torch.cuda.synchronize()
         t_before_val = time.perf_counter()
 
-        val_loss = validate(model, device, val_loader, criterion)
+        val_loss, val_acc = validate(model, device, val_loader, criterion)
         if torch.cuda.is_available() and ('cuda' in str(device).lower()):
             torch.cuda.synchronize()
         t_after_val = time.perf_counter()
 
-        # print timing diagnostics per epoch
         print(f"[timing] epoch={epoch} train_exec_s={(t1_train - t0_train):.3f} transition_s={(t_before_val - t1_train):.3f} val_exec_s={(t_after_val - t_before_val):.3f}")
-        # (optional) current LR logging
         current_lr = optimizer.param_groups[0]["lr"]
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        val_accs.append(val_acc)
         
         ep_dur = time.time() - ep_t0
         epoch_times.append(ep_dur)
         if output_dir:
-            _append_log(log_path, f"{run_name} epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f} lr={current_lr:.6e} epoch_time_s={ep_dur:.2f}")
+            _append_log(log_path, f"{run_name} epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f} val_acc={val_acc:.4f} lr={current_lr:.6e} epoch_time_s={ep_dur:.2f}")
         
         if scheduler is not None:
             scheduler.step()
 
-        print(f"{run_name} | epoch {epoch}/{num_epochs} | train {train_loss:.4f} | val {val_loss:.4f}")
+        print(f"{run_name} | epoch {epoch}/{num_epochs} | train {train_loss:.4f} | val {val_loss:.4f} | val_acc {val_acc:.4f}")
+
+        # --- Early stopping check ---
+        if stopper is not None:
+            metric_value = val_loss if monitor == 'val_loss' else val_acc
+            improved = stopper.step(metric_value)
+            if improved:
+                best_metric_val = metric_value
+                best_epoch = epoch
+                # keep an in-memory copy and optionally checkpoint
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                if best_ckpt_path is not None:
+                    torch.save(model.state_dict(), best_ckpt_path)
+            if stopper.should_stop():
+                print(f"Early stopping at epoch {epoch} (best {monitor}={best_metric_val:.4f} at epoch {best_epoch})")
+                if output_dir:
+                    _append_log(log_path, f"{run_name} early_stop epoch={epoch} best_epoch={best_epoch} best_{monitor}={best_metric_val:.6f}")
+                break
     
+    # Restore best weights if requested
+    if restore_best and best_state is not None:
+        try:
+            model.load_state_dict(best_state)
+        except Exception:
+            # fallback to disk if needed
+            if best_ckpt_path and os.path.isfile(best_ckpt_path):
+                model.load_state_dict(torch.load(best_ckpt_path, map_location='cpu'))
+        print(f"Restored best model from epoch {best_epoch} ({monitor}={best_metric_val:.4f})")
+
     total_train_time = time.time() - run_t0
     # Save loss curve + history
     if output_dir:
         plt.figure(figsize=(8, 5))
-        plt.plot(range(1, num_epochs + 1), train_losses, label='Train Loss')
-        plt.plot(range(1, num_epochs + 1), val_losses, label='Val Loss')
+        plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
+        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Val Loss')
         plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title(f'Losses - {run_name}')
         plt.legend(); plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "figs", f"loss_curve_{run_name}.png"), dpi=200)
         plt.close()
 
-        history = {"run_name": run_name, "train_losses": train_losses, "val_losses": val_losses, "epoch_times_sec": epoch_times, "total_train_sec": total_train_time}
+        # also save val_acc curve
+        plt.figure(figsize=(8, 5))
+        plt.plot(range(1, len(val_accs) + 1), val_accs, label='Val Acc')
+        plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title(f'Val Acc - {run_name}')
+        plt.legend(); plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "figs", f"val_acc_{run_name}.png"), dpi=200)
+        plt.close()
+
+        history = {
+            "run_name": run_name,
+            "train_losses": train_losses,
+            "val_losses": val_losses,
+            "val_accs": val_accs,
+            "epoch_times_sec": epoch_times,
+            "total_train_sec": total_train_time,
+            "early_stop": {
+                "enabled": bool(early_stop),
+                "monitor": monitor,
+                "best_epoch": int(best_epoch),
+                "best_value": float(best_metric_val) if best_metric_val is not None else None
+            }
+        }
         _save_json(history, os.path.join(output_dir, f"history_{run_name}.json"))
         _append_log(log_path, f"{run_name} total_train_sec={total_train_time:.2f}")
-
 
     # Final test evaluation
     eval_result = evaluate_model(model, test_loader, data_flag, device=device,
@@ -387,10 +533,16 @@ def train_resnet18(data_flag, info, num_epochs=10, batch_size=32, learning_rate=
 
     return model, {
         "run_name": run_name,
-        "history": {"train_losses": train_losses, "val_losses": val_losses, "epoch_times_sec": epoch_times},
+        "history": {"train_losses": train_losses, "val_losses": val_losses, "val_accs": val_accs, "epoch_times_sec": epoch_times},
         "timing": {"total_train_sec": total_train_time},
         "test": eval_result["metrics"],
-        "confusion_matrix": eval_result["confusion_matrix"]
+        "confusion_matrix": eval_result["confusion_matrix"],
+        "early_stop": {
+            "enabled": bool(early_stop),
+            "monitor": monitor,
+            "best_epoch": int(best_epoch),
+            "best_value": float(best_metric_val) if best_metric_val is not None else None
+        }
     }
 
 
