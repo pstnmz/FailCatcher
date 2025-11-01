@@ -100,25 +100,14 @@ class ResourceProfiler:
             })
         self.records = rec
 # -------------------- end profiling helpers --------------------
-        
-#flags = ['bloodmnist', 'bloodmnist', 'octmnist', 'octmnist']#
-flags=['pathmnist', 'pathmnist', 'dermamnist-e', 'organamnist', 'tissuemnist']
-flags=['breastmnist']
-#colors = [True, True, False, False]
-colors = [True, True, True, False, False]
-colors = [False]
-#activations = ['softmax', 'softmax', 'softmax', 'softmax']
-activations=['softmax', 'softmax', 'softmax', 'softmax', 'softmax']
-activations=['sigmoid']
-#model_augmentations = [False, True, False, True]#, 
-model_augmentations = [False, True, True, True, True]
-model_augmentations = [False]
-#color = True # True for color, False for grayscale
-#activation = 'softmax'  # 'sigmoid' for binary-class, 'softmax' for multi-class
+
+flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
+colors = [False, False, False, True, False, True, True, False, True]
+activations=['sigmoid', 'softmax', 'sigmoid', 'softmax', 'softmax', 'softmax', 'sigmoid', 'softmax', 'softmax']
+model_augmentations = [False, False, False, False, False, False, False, False, False]
 batch_size = 128
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 size = 224  # Image size for the models
-#model_augmentation = False  # Whether the models were trained with data augmentation
 randaugment_ops = 2
 randaugment_mag = 45
 max_iterations = 500
