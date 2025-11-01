@@ -115,9 +115,9 @@ nb_channels = 3
 for model_augmentation, dataflag, color, activation in zip(model_augmentations, flags, colors, activations):
     # Loop over different datasets and settings
     if model_augmentation:
-        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_wdataaug_calibration_set_test'
+        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_wdataaug_calibration_set'
     else:
-        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_calibration_set_test'
+        output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_calibration_set'
     os.makedirs(output_dir, exist_ok=True)
 
 
@@ -178,7 +178,8 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
             batch_size=batch_size,
             use_monai_cache=True,
             cache_num_workers=cache_workers,
-            dataloader_workers=dataloader_workers
+            dataloader_workers=dataloader_workers,
+            dataloader_prefetch=16  # try 12–16; increase if RAM is still comfortable
         )
 
     # Save JSON log
