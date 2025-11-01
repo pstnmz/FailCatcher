@@ -160,6 +160,8 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
 
     train_dataset = DataClass(split='train', transform=transform, size=im_size, download=download)
     val_dataset = DataClass(split='val', transform=transform, size=im_size, download=download)
+    if transform_test is None:
+        transform_test = transform
     test_dataset = DataClass(split='test', transform=transform_test, size=im_size, download=download)
 
     return [train_dataset, val_dataset, test_dataset], info
@@ -690,7 +692,7 @@ def load_models(flag, device, waugmentation=False, size=224):
         
         # Load the state dictionary
         if waugmentation:
-            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_augmented{i}.pt')
+            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}_augmented.pt')
         else:
             # Load the state dictionary
             state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}.pt')
