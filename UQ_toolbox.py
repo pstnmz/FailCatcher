@@ -332,7 +332,8 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
 def apply_randaugment_and_store_results(
     dataset, models, N, M, num_policies, device, folder_name='savedpolicies',
     image_normalization=False, mean=False, std=False, nb_channels=1, image_size=51,
-    output_activation=None, batch_size=None, use_monai_cache=False, cache_rate=1.0, cache_num_workers=0, dataloader_workers=None
+    output_activation=None, batch_size=None, use_monai_cache=False, cache_rate=1.0,
+    cache_num_workers=0, dataloader_workers=None, dataloader_prefetch=8
 ):
     """
     Apply RandAugment transformations to the data and store the results, one augmentation at a time.
@@ -346,7 +347,7 @@ def apply_randaugment_and_store_results(
     # If we have a cached dataset, stream per-batch and write per-policy predictions incrementally.
     if cached_dataset is not None:
         print(f"Streaming {num_policies} policies in chunks to avoid RAM blowup")
-        policy_chunk_size = min(16, num_policies)  # smaller K reduces per-sample CPU load
+        policy_chunk_size = min(25, num_policies)  # smaller K reduces per-sample CPU load
         num_samples = len(cached_dataset)
 
         # Helper to build a list of torchvision pipelines for a chunk of BetterRandAug transforms
@@ -371,36 +372,40 @@ def apply_randaugment_and_store_results(
             except Exception:
                 nc = 1
 
-        # Build one dataset/loader and reuse workers across all chunks
-        worker_count = dataloader_workers or 0
-        aug_dataset = _CachedRandAugDataset(cached_dataset, [])  # empty; set per chunk
-        loader_kwargs = dict(
-            dataset=aug_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=worker_count,
-            pin_memory=True,
-            worker_init_fn=_dl_worker_init,
-        )
-        if worker_count > 0:
-            loader_kwargs["persistent_workers"] = (dataloader_workers or 0) > 0
-            loader_kwargs["prefetch_factor"] = 8 if (dataloader_workers or 0) > 0 else None
-        loader = DataLoader(**loader_kwargs)
-
         # Process policies in chunks; reuse the same DataLoader
         for start in range(0, num_policies, policy_chunk_size):
             end = min(start + policy_chunk_size, num_policies)
             K_chunk = end - start
             print(f"Processing policy chunk {start}-{end-1} (K_chunk={K_chunk})")
-
-            # Swap augmentations for this chunk (workers persist)
+            # Build augmentations and a fresh loader per chunk to avoid stale-prefetched batches
             augmentations = build_augmentations_chunk(K_chunk)
-            aug_dataset.set_augmentations(augmentations)
+            worker_count = dataloader_workers or 0
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            loader = DataLoader(
+                dataset=aug_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=worker_count,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                persistent_workers=False,
+                prefetch_factor=(int(dataloader_prefetch) if worker_count > 0 else None),
+            )
 
-            # create memmaps (one per policy in chunk)
-            memmaps = []
-            memmap_paths = []
-            for idx in range(K_chunk):
+            # Peek first batch to know actual K and size memmaps accordingly
+            it = iter(loader)
+            try:
+                first_batch = next(it)
+            except StopIteration:
+                raise RuntimeError("Augmentation loader yielded no data")
+            imgs_stacked = first_batch[0]  # [B0, K_actual, C, H, W]
+            B0, K_actual, C, H, W = imgs_stacked.shape
+            if K_actual != K_chunk:
+                print(f"Warning: K_actual ({K_actual}) != requested K_chunk ({K_chunk}); proceeding with K_actual.")
+ 
+            # create memmaps (one per policy actually produced)
+            memmaps, memmap_paths = [], []
+            for idx in range(K_actual):
                 mmap_path = os.path.join(folder_name, f"tmp_policy_{start+idx}.mmap")
                 mem = np.memmap(mmap_path, dtype='float32', mode='w+', shape=(num_samples, nc))
                 memmaps.append(mem)
@@ -408,16 +413,25 @@ def apply_randaugment_and_store_results(
 
             # stream batches and fill memmaps
             sample_ptr = 0
-            for batch in loader:
-               imgs_stacked = batch[0]  # [B, K_chunk, C, H, W]
-               B, K, C, H, W = imgs_stacked.shape
-               imgs_flat = imgs_stacked.reshape(B * K, C, H, W).float()  # [B*K, C, H, W]
-               batch_predictions = get_batch_predictions(models, imgs_flat, device)  # [M, B*K, nc]
-               avg_preds = average_predictions(batch_predictions, output_activation)  # [B*K, nc] (CPU)
-               avg_preds = avg_preds.view(B, K, -1).cpu().numpy()  # [B, K_chunk, nc]
-               for local_k in range(K):
-                   memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
-               sample_ptr += B
+            def _process(imgs_stacked_local):
+                B, K, C, H, W = imgs_stacked_local.shape
+                imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float()
+                batch_predictions = get_batch_predictions(models, imgs_flat, device, use_amp=True)
+                avg_preds = average_predictions(batch_predictions, output_activation).view(B, K, -1).cpu().numpy()
+                return B, K, avg_preds
+
+            # process first batch we already fetched
+            B, K, avg_preds = _process(imgs_stacked)
+            for local_k in range(K):
+                memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
+            sample_ptr += B
+            # process the remaining
+            for batch in it:
+                imgs_stacked = batch[0]
+                B, K, avg_preds = _process(imgs_stacked)
+                for local_k in range(K):
+                    memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
+                sample_ptr += B
 
             if sample_ptr != num_samples:
                 raise RuntimeError(f"Expected {num_samples} samples but wrote {sample_ptr}")
