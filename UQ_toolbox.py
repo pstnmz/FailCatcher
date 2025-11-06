@@ -101,6 +101,114 @@ class _CachedRandAugDataset(Dataset):
         self.augmentations = augmentations if isinstance(augmentations, (list, tuple)) else [augmentations]
     
 
+def evaluate_models_on_loader(models, data_loader, device, use_amp=True):
+    """
+    Evaluate a single model or an ensemble on a DataLoader and collect:
+      - y_true: ground-truth labels (N,)
+      - y_scores: probabilities (N,) for binary or (N, C) for multiclass
+      - digits: raw logits (N,) for binary or (N, C) for multiclass
+      - correct_idx: indices of correct predictions (relative to concatenated order)
+      - incorrect_idx: indices of incorrect predictions
+    If `models` is a list/tuple, also returns:
+      - indiv_scores: list of length num_models with per-model probabilities
+                      (each np.ndarray of shape (N,) for binary or (N, C) for multiclass)
+
+    Args:
+        models: torch.nn.Module or list/tuple of modules
+        data_loader: DataLoader yielding (images, labels) or dicts with keys 'image' and 'label'
+        device: torch.device
+        use_amp: bool, enable CUDA AMP
+
+    Returns:
+        If single model:
+            y_true, y_scores, digits, correct_idx, incorrect_idx
+        If ensemble:
+            y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores
+    """
+    is_ensemble = isinstance(models, (list, tuple))
+    model_list = list(models) if is_ensemble else [models]
+
+    # Eval mode
+    for m in model_list:
+        m.eval()
+
+    y_true_list = []
+    avg_prob_batches = []
+    avg_logit_batches = []
+    indiv_scores = [[] for _ in range(len(model_list))] if is_ensemble else None
+
+    def _to_probs(logits_t):
+        # logits_t: [B, C] with C==1 for binary or >1 for multiclass
+        if logits_t.shape[1] == 1:
+            return torch.sigmoid(logits_t)  # [B,1]
+        return torch.softmax(logits_t, dim=1)  # [B,C]
+
+    with torch.no_grad():
+        for batch in data_loader:
+            if isinstance(batch, dict):
+                images = batch.get('image')
+                labels = batch.get('label')
+            else:
+                images, labels = batch[0], batch[1]
+
+            images = images.to(device, non_blocking=True)
+            labels = labels.view(-1).to(device, non_blocking=True).long()
+
+            # Collect per-model logits
+            logits_list = []
+            for m in model_list:
+                if use_amp and getattr(device, "type", None) == "cuda":
+                    with torch.amp.autocast(device_type="cuda"):
+                        logits = m(images)
+                else:
+                    logits = m(images)
+                logits_list.append(logits)
+
+            # Per-model probs for indiv_scores
+            if is_ensemble:
+                for i, logits in enumerate(logits_list):
+                    probs_i = _to_probs(logits).detach().cpu().numpy()
+                    indiv_scores[i].append(probs_i)
+
+            # Average logits and probs
+            logits_stack = torch.stack(logits_list, dim=0)  # [M, B, C]
+            avg_logits = logits_stack.mean(dim=0)           # [B, C]
+            avg_probs = _to_probs(avg_logits)               # [B, C]
+
+            y_true_list.append(labels.detach().cpu().numpy())
+            avg_logit_batches.append(avg_logits.detach().cpu().numpy())
+            avg_prob_batches.append(avg_probs.detach().cpu().numpy())
+
+    # Concatenate across batches
+    y_true = np.concatenate(y_true_list, axis=0)
+    digits = np.concatenate(avg_logit_batches, axis=0)  # logits
+    y_scores = np.concatenate(avg_prob_batches, axis=0) # probs
+
+    # Flatten binary to (N,)
+    if y_scores.shape[1] == 1:
+        y_scores = y_scores.ravel()
+        digits = digits.ravel()
+
+    # Predictions and correctness
+    if y_scores.ndim == 1:
+        y_pred = (y_scores >= 0.5).astype(np.int64)
+    else:
+        y_pred = np.argmax(y_scores, axis=1).astype(np.int64)
+
+    correct_idx = np.where(y_pred == y_true)[0]
+    incorrect_idx = np.where(y_pred != y_true)[0]
+
+    # Finalize indiv_scores
+    if is_ensemble:
+        indiv_scores = [np.concatenate(slices, axis=0) for slices in indiv_scores]
+        # Flatten binary indiv scores to (N,)
+        if indiv_scores and indiv_scores[0].ndim == 2 and indiv_scores[0].shape[1] == 1:
+            indiv_scores = [arr.ravel() for arr in indiv_scores]
+        return y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores
+
+    return y_true, y_scores, digits, correct_idx, incorrect_idx
+
+
 def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
     if CacheDataset is None:
         raise ImportError("MONAI is required to build a cache dataset. Please install monai.")

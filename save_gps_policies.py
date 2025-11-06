@@ -104,7 +104,7 @@ class ResourceProfiler:
 flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
 colors = [False, False, False, True, False, True, True, False, True]
 activations=['sigmoid', 'softmax', 'sigmoid', 'softmax', 'softmax', 'softmax', 'sigmoid', 'softmax', 'softmax']
-model_augmentations = [False, False, False, False, False, False, False, False, False]
+model_augmentations = [True, True, True, True, True, True, True, True, True]
 batch_size = 128
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 size = 224  # Image size for the models
