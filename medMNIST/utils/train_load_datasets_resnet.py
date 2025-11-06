@@ -16,7 +16,7 @@ from PIL import Image
 from torchvision import transforms as T
 from torchvision.models import ResNet18_Weights
 import numpy as np
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_score
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, roc_auc_score, accuracy_score, recall_score
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 import seaborn as sns
@@ -125,7 +125,6 @@ def _save_json(obj, path):
 def _append_log(path, text):
     with open(path, 'a') as f:
         f.write(text.rstrip() + '\n')
-
 
 def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=False, transform=None, transform_test=None):
     if random_seed is not None:
@@ -548,7 +547,7 @@ def train_resnet18(data_flag, info, num_epochs=10, learning_rate=0.001, device=N
     }
 
 
-def evaluate_model(model, test_loader, data_flag, device=None, output_dir=None, prefix="test"):
+def evaluate_model(model, test_loader, data_flag, device=None, output_dir=None, prefix="test", display_cm=True):
     if data_flag == 'dermamnist-e':
         info = DERMAMNIST_E_INFO
     else:
@@ -641,7 +640,7 @@ def evaluate_model(model, test_loader, data_flag, device=None, output_dir=None, 
     }
 
     # Save confusion matrix figure
-    if output_dir:
+    if output_dir and display_cm:
         plt.figure(figsize=(6, 5))
         sns.heatmap(cm, annot=True, fmt="d", cbar=False,
                     xticklabels=class_names, yticklabels=class_names)
@@ -657,6 +656,15 @@ def evaluate_model(model, test_loader, data_flag, device=None, output_dir=None, 
         _save_json(result, os.path.join(output_dir, f"metrics_{prefix}.json"))
         _append_log(log_path, f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {prefix} "
                               f"acc={acc:.4f} bal_acc={bal_acc:.4f} auc={auc:.4f}")
+    
+    elif output_dir is None and display_cm:
+        plt.figure(figsize=(6, 5))
+        sns.heatmap(cm, annot=True, fmt="d", cbar=False,
+                    xticklabels=class_names, yticklabels=class_names)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.title(f"Confusion Matrix ({prefix})")
+        plt.tight_layout()
 
     # Minimal print
     print(f"[{prefix}] acc={acc:.3f} bal_acc={bal_acc:.3f} auc={auc:.3f}")
