@@ -231,55 +231,51 @@ def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
         data.append({"image": img, "label": label})
     return CacheDataset(data=data, transform=None, cache_rate=cache_rate, num_workers=num_workers)
 
-
 def get_prediction(model, image, device, use_amp=True):
     """
     Generates a prediction from a given model and image.
-
-    Args:
-        model (torch.nn.Module): The model used for prediction.
-        image (torch.Tensor): The input image tensor.
-        device (torch.device): The device to run the model on (e.g., 'cpu' or 'cuda').
-        use_amp (bool, optional): If True and running on CUDA, use automatic mixed precision (AMP). Defaults to True.
-
-    Returns:
-        torch.Tensor: The prediction output from the model.
+    NOTE: model should already be moved to `device` and set to eval() by the caller.
     """
-    model.to(device)
+    # Do NOT call model.to(device) here — caller should handle device placement.
     image = image.to(device, non_blocking=True)
-    model.eval()  # Ensure the model is in evaluation mode
+    model.eval()  # ensure eval, cheap
     with torch.no_grad():
         if use_amp and getattr(device, "type", None) == "cuda":
             with torch.amp.autocast(device_type="cuda"):
                 prediction = model(image)
         else:
             prediction = model(image)
-        prediction = prediction.detach().cpu()
+    # keep predictions on device; caller can .detach().cpu() as needed
     return prediction
 
 def get_batch_predictions(models, augmented_inputs, device, use_amp=True):
     """
-    Get predictions for the augmented inputs.
-
-    Args:
-        models (torch.nn.Module or list): Model or list of models to use for predictions.
-        augmented_inputs (torch.Tensor): Augmented images.
-        device (torch.device): Device to run the models on.
-        softmax_application (bool): If True, applies softmax to the prediction.
-
+    Get predictions for a flattened augmented_inputs tensor.
+    - models: single model or list of models (already moved to device and eval())
+    - augmented_inputs: Tensor on CPU (N, C, H, W) or (B*K, C, H, W)
     Returns:
-        torch.Tensor: Batch predictions.
+      tensor shape [num_models, batch_len, num_classes] on CPU (detached)
     """
-    if isinstance(models, list):
-        batch_predictions = []
-        for model in models:
-            prediction = get_prediction(model, augmented_inputs, device, use_amp=use_amp)
-            batch_predictions.append(prediction)
-    else:
-        prediction = get_prediction(models, augmented_inputs, device, use_amp=use_amp)
-        batch_predictions = [prediction]
-    
-    batch_predictions = torch.stack(batch_predictions, dim=0)  # Shape: [num_models, batch_size * num_augmentations, num_classes]
+    # Ensure list
+    model_list = models if isinstance(models, (list, tuple)) else [models]
+
+    # Move input once to device
+    inputs = augmented_inputs.to(device, non_blocking=True)
+
+    preds = []
+    # run each model (already on device) producing logits on device
+    with torch.no_grad():
+        for m in model_list:
+            m.eval()
+            if use_amp and getattr(device, "type", None) == "cuda":
+                with torch.amp.autocast(device_type="cuda"):
+                    out = m(inputs)
+            else:
+                out = m(inputs)
+            preds.append(out.detach().cpu())  # detach and move to CPU to free GPU memory early
+
+    # Stack: [num_models, batch_len, num_classes]
+    batch_predictions = torch.stack(preds, dim=0)
     return batch_predictions
 
 
@@ -1225,13 +1221,15 @@ def plot_auc_curves(results):
     
 def select_greedily_on_ens(
     all_preds, good_idx, bad_idx, keys, search_set_len, select_only=50,
-    num_workers=1, num_searches=10, top_k=5, method='top_policies'
+    num_workers=1, num_searches=10, top_k=5, method='top_policies', seed=None
 ):
     val_preds = np.copy(all_preds[:, :search_set_len, :])
 
     # Prepare random starts
-    initial_augmentations = [int(np.random.choice(range(val_preds.shape[0]))) for _ in range(num_searches)]
-
+    # deterministic initial starts when `seed` is provided
+    rng = np.random.RandomState(seed) if seed is not None else np.random
+    initial_augmentations = [int(rng.choice(range(val_preds.shape[0]))) for _ in range(num_searches)]
+ 
     def _run_sequential():
         out = []
         for init_aug in initial_augmentations:
@@ -1302,7 +1300,7 @@ def load_npz_files_for_greedy_search(npz_dir):
     return all_preds, all_keys
 
 def perform_greedy_policy_search(
-    npz_dir, good_idx, bad_idx, max_iterations=50, num_workers=1, num_searches=10, top_k=5, plot=True, method='top_k_policies'
+    npz_dir, good_idx, bad_idx, max_iterations=50, num_workers=1, num_searches=10, top_k=5, plot=True, method='top_k_policies', seed=None
 ):
     print('Loading predictions...')
     all_preds, all_keys = load_npz_files_for_greedy_search(npz_dir)
@@ -1328,7 +1326,8 @@ def perform_greedy_policy_search(
         num_workers=num_workers,
         num_searches=num_searches,
         top_k=top_k,
-        method=method
+        method=method,
+        seed=seed
     )
 
     if isinstance(selected_policies, list) and all(isinstance(policy, list) for policy in selected_policies):
