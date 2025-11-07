@@ -112,6 +112,11 @@ randaugment_ops = 2
 randaugment_mag = 45
 max_iterations = 500
 nb_channels = 3
+flags=['breastmnist']  # TEMPORARY LIMIT TO SINGLE DATASET FOR TESTING
+colors=[False]
+activations=['sigmoid']
+model_augmentations=[False]
+
 for model_augmentation, dataflag, color, activation in zip(model_augmentations, flags, colors, activations):
     # Loop over different datasets and settings
     if model_augmentation:
@@ -174,7 +179,6 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
             std=[.5],
             image_size=size,
             nb_channels=nb_channels,
-            output_activation=activation,
             batch_size=batch_size,
             use_monai_cache=True,
             cache_num_workers=cache_workers,
