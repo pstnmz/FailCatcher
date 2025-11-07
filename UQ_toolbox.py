@@ -283,28 +283,36 @@ def get_batch_predictions(models, augmented_inputs, device, use_amp=True):
     return batch_predictions
 
 
-def average_predictions(batch_predictions, output_activation=None):
+def average_predictions(batch_predictions):
     """
-    Average predictions across models and group augmentations back with their respective images.
+    Average predictions across models by first converting per-model logits to
+    probabilities (sigmoid for binary, softmax for multiclass) then averaging
+    the probabilities. Simpler API: activation is inferred automatically.
 
     Args:
-        batch_predictions (torch.Tensor): Batch predictions. Shape: [num_models, batch_size * num_augmentations, num_classes].
-        output_activation (str, optional): Activation function to apply to the predictions. 
-                                           Options: 'softmax', 'sigmoid', or None. Defaults to None.
+        batch_predictions (torch.Tensor or array-like): shape [M, N, C] or [M, N]
+            where M = number of models, N = number of samples, C = num classes
 
     Returns:
-        torch.Tensor: Averaged predictions. Shape: [batch_size * num_augmentations, num_classes].
+        torch.Tensor: Averaged probabilities, shape [N, C] (or [N,1] for binary).
     """
-    # Average predictions across models
-    averaged_predictions = torch.mean(batch_predictions, dim=0)  # Shape: [batch_size * num_augmentations, num_classes]
+    if not torch.is_tensor(batch_predictions):
+        batch_predictions = torch.as_tensor(batch_predictions)
 
-    # Apply the specified activation function
-    if output_activation == 'softmax':
-        averaged_predictions = torch.nn.functional.softmax(averaged_predictions, dim=-1)
-    elif output_activation == 'sigmoid':
-        averaged_predictions = torch.sigmoid(averaged_predictions)
+    # normalize shape -> [M, N, C]
+    if batch_predictions.dim() == 2:
+        batch_predictions = batch_predictions.unsqueeze(-1)
+    if batch_predictions.dim() != 3:
+        raise ValueError(f"Expected batch_predictions to be 3D [M,N,C], got {tuple(batch_predictions.shape)}")
 
-    return averaged_predictions
+    M, N, C = batch_predictions.shape
+    # infer activation: binary -> sigmoid, multiclass -> softmax
+    if C == 1:
+        probs = torch.sigmoid(batch_predictions)
+    else:
+        probs = torch.softmax(batch_predictions, dim=-1)
+    averaged = probs.mean(dim=0)  # [N, C]
+    return averaged
 
 
 def compute_stds(averaged_predictions):
@@ -332,39 +340,74 @@ def ensembling_predictions(models, image):
 
 def extract_gps_augmentations_info(policies):
     """
-    Extracts N, M values and the list of policies from a list of policy filenames.
-
-    Args:
-    - policies (list of str): List of filenames in the format 'N2_M45_[(op, magnitude), (op, magnitude)].npz'.
-
-    Returns:
-    - N (int): The value of N (same for all policies).
-    - M (int): The value of M (same for all policies).
-    - formatted_policies (list of str): List of policies as strings.
+    Parse N, M and policy ops from filenames of form:
+      N{N}M{M}__{A}_np.float64_{magA}__{B}_np.float64_{magB}__.npz
+    Returns: N (int), M (int), [ [ (op_index, magnitude), ... ], ... ]
     """
-    # Extract N and M from the first policy string
     if not policies:
         return None, None, []
+    if isinstance(policies, str):
+        policies = [policies]
 
-    first_policy = policies[0]
-    match = re.search(r'N(\d+)_M(\d+)', first_policy)
-    if match:
-        N = int(match.group(1))
-        M = int(match.group(2))
-    
+    # Determine valid op index range from BetterRandAugment
+    try:
+        _probe = BetterRandAugment(n=2, m=45, rand_m=True, resample=False, image_size=51)
+        max_valid_index = len(_probe.augment_list) - 1
+    except Exception:
+        max_valid_index = None  # fall back to accepting provided indices
+
+    # Regex components for both styles (with or without underscore between N and M)
+    nm_regex = re.compile(r'N(?P<N>\d+)_?M(?P<M>\d+)')
+    pair_regex = re.compile(r'__(?P<idx>\d+)_np\.float64_(?P<mag>-?\d+(?:\.\d+)?)')
+
     formatted_policies = []
+    N_global = None
+    M_global = None
 
-    # Extract the policy part from each filename and keep it as a string
-    for policy in policies:
-        policy_match = re.search(r'\[(.*?)\]', policy)
-        if policy_match:
-            policy_str = f"[{policy_match.group(1)}]"  # Add brackets back around the tuple
-            formatted_policies.append(policy_str)
+    for fname in policies:
+        base = os.path.basename(fname)
+        stem = base[:-4] if base.endswith('.npz') else base
 
-    return N, M, formatted_policies
+        # Extract N and M
+        nm_match = nm_regex.search(stem)
+        if nm_match:
+            N_val = int(nm_match.group('N'))
+            M_val = int(nm_match.group('M'))
+            if N_global is None:  # record from first file
+                N_global, M_global = N_val, M_val
+        else:
+            # Default if missing
+            if N_global is None:
+                N_global, M_global = 2, 45
+
+        # Extract all (idx, magnitude) pairs
+        pairs = []
+        for m in pair_regex.finditer(stem):
+            idx_raw = int(m.group('idx'))
+            mag_raw = float(m.group('mag'))
+            mag_cast = int(mag_raw) if abs(mag_raw - int(mag_raw)) < 1e-6 else mag_raw
+
+            if max_valid_index is not None and (idx_raw < 0 or idx_raw > max_valid_index):
+                # Strict: raise or clamp. Here we clamp and warn.
+                idx_clamped = idx_raw % (max_valid_index + 1)
+                print(f"Policy index {idx_raw} out of range [0,{max_valid_index}]; remapped to {idx_clamped}")
+                idx_raw = idx_clamped
+
+            pairs.append((idx_raw, mag_cast))
+
+        if not pairs:
+            print(f"Warning: could not parse policy ops from '{base}'. Expected pattern N*M*__A_np.float64_mag__B_np.float64_mag__")
+        formatted_policies.append(pairs)
+
+    # Ensure global N/M defaults
+    if N_global is None:
+        N_global = 2
+    if M_global is None:
+        M_global = 45
+    return N_global, M_global, formatted_policies
 
 
-def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, output_activation=None, batch_size=None):
+def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, batch_size=None):
     """
     Perform Test-Time Augmentation (TTA) on a batch of images using specified transformations and models.
 
@@ -408,7 +451,7 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
                 all_preds = []
                 for batch in loader:
                     batch_predictions = get_batch_predictions(models, batch[0], device)
-                    avg_preds = average_predictions(batch_predictions, output_activation)
+                    avg_preds = average_predictions(batch_predictions)
                     all_preds.append(avg_preds)
                 predictions.append(torch.cat(all_preds, dim=0))
             # Stack predictions: [num_policies, batch_size, num_classes]
@@ -427,7 +470,7 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
                 all_preds = []
                 for batch in loader:
                     batch_predictions = get_batch_predictions(models, batch[0], device)
-                    avg_preds = average_predictions(batch_predictions, output_activation)
+                    avg_preds = average_predictions(batch_predictions)
                     all_preds.append(avg_preds)
                 predictions.append(torch.cat(all_preds, dim=0))
             # Stack predictions: [nb_augmentations, batch_size, num_classes]
@@ -439,8 +482,7 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
 
 def apply_randaugment_and_store_results(
     dataset, models, N, M, num_policies, device, folder_name='savedpolicies',
-    image_normalization=False, mean=False, std=False, nb_channels=1, image_size=51,
-    output_activation=None, batch_size=None, use_monai_cache=False, cache_rate=1.0,
+    image_normalization=False, mean=False, std=False, nb_channels=1, image_size=51, batch_size=None, use_monai_cache=False, cache_rate=1.0,
     cache_num_workers=0, dataloader_workers=None, dataloader_prefetch=8
 ):
     """
@@ -476,7 +518,7 @@ def apply_randaugment_and_store_results(
             dummy = torch.zeros(1, nb_channels, image_size, image_size)
             try:
                 dp = get_batch_predictions(models, dummy, device)  # [num_models, 1, num_classes]
-                nc = average_predictions(dp, output_activation).shape[1]
+                nc = average_predictions(dp).shape[1]
             except Exception:
                 nc = 1
 
@@ -525,7 +567,7 @@ def apply_randaugment_and_store_results(
                 B, K, C, H, W = imgs_stacked_local.shape
                 imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float()
                 batch_predictions = get_batch_predictions(models, imgs_flat, device, use_amp=True)
-                avg_preds = average_predictions(batch_predictions, output_activation).view(B, K, -1).cpu().numpy()
+                avg_preds = average_predictions(batch_predictions).view(B, K, -1).cpu().numpy()
                 return B, K, avg_preds
 
             # process first batch we already fetched
@@ -595,7 +637,7 @@ def apply_randaugment_and_store_results(
             all_preds = []
             for batch in loader:
                 batch_predictions = get_batch_predictions(models, batch[0], device)
-                avg_preds = average_predictions(batch_predictions, output_activation)
+                avg_preds = average_predictions(batch_predictions)
                 all_preds.append(avg_preds)
             averaged_predictions = torch.cat(all_preds, dim=0)
             # same policy key extraction / saving as above
@@ -973,7 +1015,7 @@ def UQ_method_plot(correct_predictions, incorrect_predictions, y_title, title, f
     plt.xticks(fontsize=14)
     plt.yticks(fontsize=14)
     plt.show()
-    plt.savefig(f"/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/medMNIST_UQ_results/medMNIST_augmented{flag}_{title}.png")  # or any filename you want
+    #plt.savefig(f"/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/medMNIST_UQ_results/medMNIST_augmented{flag}_{title}.png")  # or any filename you want
     plt.close()
 
 def roc_curve_UQ_method_computation(correct_predictions, incorrect_predictions):
@@ -1186,40 +1228,42 @@ def select_greedily_on_ens(
     num_workers=1, num_searches=10, top_k=5, method='top_policies'
 ):
     val_preds = np.copy(all_preds[:, :search_set_len, :])
-    with mp.Pool(processes=num_workers) as pool:
-        initial_augmentations = [
-            int(np.random.choice(range(val_preds.shape[0]))) for _ in range(num_searches)
-        ]
+
+    # Prepare random starts
+    initial_augmentations = [int(np.random.choice(range(val_preds.shape[0]))) for _ in range(num_searches)]
+
+    def _run_sequential():
+        out = []
+        for init_aug in initial_augmentations:
+            out.append(greedy_search(init_aug, val_preds, good_idx, bad_idx, select_only))
+        return out
+
+    results = []
+    if num_workers and num_workers > 1:
         try:
-            results = pool.starmap(
-                greedy_search,
-                [(initial_aug, val_preds, good_idx, bad_idx, select_only) for initial_aug in initial_augmentations]
-            )
-        except IndexError as e:
-            print("Debugging IndexError...")
-            print(f"val_preds shape: {val_preds.shape}")
-            pool.close()
-            pool.join()
-            
-        finally:
-            pool.close()
-            pool.join()
+            with mp.Pool(processes=min(num_workers, mp.cpu_count() or num_workers)) as pool:
+                results = pool.starmap(
+                    greedy_search,
+                    [(init_aug, val_preds, good_idx, bad_idx, select_only) for init_aug in initial_augmentations]
+                )
+        except Exception as e:
+            print(f"Parallel greedy_search failed: {repr(e)}; falling back to sequential.")
+            results = _run_sequential()
+    else:
+        results = _run_sequential()
+
+    if not results:
+        raise RuntimeError("No greedy_search results produced. Check input shapes and indices.")
 
     # Select the best result based on the ROC AUC metric
     best_result = max(results, key=lambda x: x[0])
     best_metric, best_group_indices, _ = best_result
 
-    print("\nParallel greedy search complete. Best metric:", best_metric)
+    print("\nGreedy search complete. Best metric:", best_metric)
 
     if method == 'top_k_policies':
-        # Get the top_k results by ROC AUC
         sorted_results = sorted(results, key=lambda x: x[0], reverse=True)
-        print(results)
-        top_k_group_indices = []
-        for i in range(top_k):
-            top_k_group_indices.append(sorted_results[i][1])
-        
-        policies = top_k_group_indices
+        policies = [sorted_results[i][1] for i in range(min(top_k, len(sorted_results)))]
     else:
         policies = np.array(best_group_indices)
 
@@ -1228,24 +1272,33 @@ def select_greedily_on_ens(
 def load_npz_files_for_greedy_search(npz_dir):
     """
     Load all .npz files from the specified directory.
-    Return the predictions stacked for each policy and corresponding filenames.
+    Return stacked predictions [num_policies, num_samples, num_classes] and filenames.
     """
-    npz_files = [f for f in os.listdir(npz_dir) if f.endswith('.npz')]
-    all_preds = []
-    all_keys = []
-
-    # Load the predictions from each .npz file
+    npz_files = sorted([f for f in os.listdir(npz_dir) if f.endswith('.npz')])
+    all_preds_list, all_keys = [], []
     for npz_file in npz_files:
         file_path = os.path.join(npz_dir, npz_file)
         try:
             data = np.load(file_path)
-            preds = data['predictions']
-            all_preds.append(preds)
-            all_keys.append(npz_file)  # Use the filename (or another key) as the identifier for the policy
+            preds = np.asarray(data['predictions'])
+            # normalize to (N, C)
+            if preds.ndim == 1:
+                preds = preds.reshape(-1, 1)
+            if preds.ndim != 2:
+                print(f"Skipping {npz_file}: expected 2D array, got {preds.shape}")
+                continue
+            all_preds_list.append(preds.astype(np.float32, copy=False))
+            all_keys.append(npz_file)
         except Exception as e:
             print(f"Error loading {npz_file}: {e}")
+    if not all_preds_list:
+        raise RuntimeError(f"No valid .npz predictions found in {npz_dir}")
 
-    all_preds = np.array(all_preds)  # Shape: [num_policies, num_samples, num_classes]
+    # Ensure equal sample count; trim to min if needed
+    min_len = min(arr.shape[0] for arr in all_preds_list)
+    if any(arr.shape[0] != min_len for arr in all_preds_list):
+        print(f"Warning: differing sample counts; trimming to {min_len}")
+    all_preds = np.stack([arr[:min_len] for arr in all_preds_list], axis=0)  # [P, N, C]
     return all_preds, all_keys
 
 def perform_greedy_policy_search(
@@ -1253,17 +1306,31 @@ def perform_greedy_policy_search(
 ):
     print('Loading predictions...')
     all_preds, all_keys = load_npz_files_for_greedy_search(npz_dir)
-    search_set_len = all_preds[0].size
+    # shapes: [num_policies, num_samples, num_classes]
+    num_samples = all_preds.shape[1]
+    num_classes = all_preds.shape[2]
+
+    # Clip indices if they exceed available samples
+    if len(good_idx) or len(bad_idx):
+        max_idx = max(int(max(good_idx)) if len(good_idx) else -1,
+                      int(max(bad_idx)) if len(bad_idx) else -1)
+        if max_idx >= num_samples:
+            print(f"Warning: indices exceed predictions length ({max_idx} >= {num_samples}). Clipping.")
+            good_idx = [i for i in good_idx if i < num_samples]
+            bad_idx = [i for i in bad_idx if i < num_samples]
+            if not good_idx or not bad_idx:
+                raise ValueError("After clipping, good_idx or bad_idx is empty. Ensure .npz match the dataset/ordering.")
 
     selected_policies, results = select_greedily_on_ens(
         all_preds, good_idx, bad_idx, all_keys,
-        search_set_len=search_set_len,
+        search_set_len=num_samples,          # FIX: use sample count, not .size
         select_only=max_iterations,
         num_workers=num_workers,
         num_searches=num_searches,
         top_k=top_k,
         method=method
     )
+
     if isinstance(selected_policies, list) and all(isinstance(policy, list) for policy in selected_policies):
         selected_policy_names = [[all_keys[i] for i in selected_policy] for selected_policy in selected_policies]
     else:
@@ -1272,6 +1339,7 @@ def perform_greedy_policy_search(
     if plot:
         plot_auc_curves(results)
 
+    print(f"Loaded predictions shape: {all_preds.shape} (policies, samples, classes={num_classes})")
     return selected_policy_names
 
 
