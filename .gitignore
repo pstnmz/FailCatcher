@@ -2,7 +2,6 @@
 **/savedpolicies_testset/
 **/gps_augment_breastmnist/
 **/gps_augment_breastmnist_testset/
-**/shap*
 **/medMNIST/gps_augment/
 **/medMNIST/ISIC_2018/
 **/runs/
