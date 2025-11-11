@@ -248,6 +248,6 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
 
     # Save models
     for i, model in enumerate(models):
-        path = os.path.join(exp_dir, f'resnet18_{flag}_224_augmented{i}.pt')
+        path = os.path.join(exp_dir, f'resnet18_{flag}_224_{i}.pt')
         tr.save_model(model, path=path)
         print(f"Saved: {path}")

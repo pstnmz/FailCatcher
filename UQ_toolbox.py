@@ -13,7 +13,8 @@ import re
 from torchvision import transforms
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset
+from monai.data import CacheDataset
 from gps_augment.utils.randaugment import BetterRandAugment
 import shap
 import torch.multiprocessing as mp
@@ -24,73 +25,385 @@ from sklearn.isotonic import IsotonicRegression
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 from sklearn.preprocessing import StandardScaler
+from PIL import Image
 
+
+def _dl_worker_init(_):
+    # prevent oversubscription per worker process
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+    
 class AddBatchDimension:
     def __call__(self, image):
         # Ensure the image is a tensor and add batch dimension
         if isinstance(image, torch.Tensor):
             return image.unsqueeze(0).float()
         raise TypeError("Input should be a torch Tensor")
+    
+# add helper to ensure PIL input
+class EnsurePIL:
+    def __call__(self, img):
+        if isinstance(img, torch.Tensor):
+            return transforms.ToPILImage()(img.detach().cpu())
+        if isinstance(img, np.ndarray):
+            return Image.fromarray(img)
+        return img
 
-
-def get_prediction(model, image, device):
+class _CachedRandAugDataset(Dataset):
     """
-    Generates a prediction from a given model and image.
+    Wrap a MONAI CacheDataset and apply a list of torchvision augmentation pipelines
+    to each cached image, returning a stacked tensor of shape (K, C, H, W).
+    """
+    def __init__(self, cache_dataset, augmentations):
+        self.cache_dataset = cache_dataset
+        # allow either a single augmentation or a list
+        self.augmentations = augmentations if isinstance(augmentations, (list, tuple)) else [augmentations]
+
+    def __len__(self):
+        return len(self.cache_dataset)
+
+    def __getitem__(self, index):
+        sample = self.cache_dataset[index]
+        if isinstance(sample, dict):
+            img = sample.get("image")
+            label = sample.get("label", None)
+        else:
+            img, label = sample
+
+        # normalize input type -> PIL Image expected by augmentation pipeline
+        if isinstance(img, torch.Tensor):
+            img = img.detach().cpu()
+            img = transforms.ToPILImage()(img)
+        elif isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
+
+        outs = []
+        for aug in self.augmentations:
+            out = aug(img)  # augmentation pipeline should output a Tensor (C,H,W) or PIL
+            if not isinstance(out, torch.Tensor):
+                out = transforms.PILToTensor()(out)
+            out = out.float()
+            outs.append(out)
+
+        # stacked: K x C x H x W
+        stacked = torch.stack(outs, dim=0)
+        return stacked, label
+
+    # New: allow swapping the augmentation list without recreating the DataLoader
+    def set_augmentations(self, augmentations):
+        self.augmentations = augmentations if isinstance(augmentations, (list, tuple)) else [augmentations]
+    
+
+def evaluate_models_on_loader(models, data_loader, device, use_amp=True):
+    """
+    Evaluate a single model or an ensemble on a DataLoader and collect:
+      - y_true: ground-truth labels (N,)
+      - y_scores: probabilities (N,) for binary or (N, C) for multiclass
+      - digits: raw logits (N,) for binary or (N, C) for multiclass
+      - correct_idx: indices of correct predictions (relative to concatenated order)
+      - incorrect_idx: indices of incorrect predictions
+    If `models` is a list/tuple, also returns:
+      - indiv_scores: list of length num_models with per-model probabilities
+                      (each np.ndarray of shape (N,) for binary or (N, C) for multiclass)
 
     Args:
-        model (torch.nn.Module): The model used for prediction.
-        image (torch.Tensor): The input image tensor.
-        device (torch.device): The device to run the model on (e.g., 'cpu' or 'cuda').
-        softmax_application (bool, optional): If True, applies softmax to the prediction. Defaults to False.
+        models: torch.nn.Module or list/tuple of modules
+        data_loader: DataLoader yielding (images, labels) or dicts with keys 'image' and 'label'
+        device: torch.device
+        use_amp: bool, enable CUDA AMP
 
     Returns:
-        torch.Tensor: The prediction output from the model.
+        If single model:
+            y_true, y_scores, digits, correct_idx, incorrect_idx
+        If ensemble:
+            y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores
     """
-    model.to(device)
-    image = image.to(device, non_blocking=True)
-    model.eval()  # Ensure the model is in evaluation mode
-    with torch.no_grad():  # Disable gradient computation
-        prediction = model(image).detach().cpu()
+    is_ensemble = isinstance(models, (list, tuple))
+    model_list = list(models) if is_ensemble else [models]
 
+    # Eval mode
+    for m in model_list:
+        m.eval()
+
+    y_true_list = []
+    avg_prob_batches = []
+    avg_logit_batches = []
+    indiv_scores = [[] for _ in range(len(model_list))] if is_ensemble else None
+
+    def _to_probs(logits_t):
+        # logits_t: [B, C] with C==1 for binary or >1 for multiclass
+        if logits_t.shape[1] == 1:
+            return torch.sigmoid(logits_t)  # [B,1]
+        return torch.softmax(logits_t, dim=1)  # [B,C]
+
+    with torch.no_grad():
+        for batch in data_loader:
+            if isinstance(batch, dict):
+                images = batch.get('image')
+                labels = batch.get('label')
+            else:
+                images, labels = batch[0], batch[1]
+
+            images = images.to(device, non_blocking=True)
+            labels = labels.view(-1).to(device, non_blocking=True).long()
+
+            # Collect per-model logits
+            logits_list = []
+            for m in model_list:
+                if use_amp and getattr(device, "type", None) == "cuda":
+                    with torch.amp.autocast(device_type="cuda"):
+                        logits = m(images)
+                else:
+                    logits = m(images)
+                logits_list.append(logits)
+
+            # Per-model probs for indiv_scores
+            if is_ensemble:
+                for i, logits in enumerate(logits_list):
+                    probs_i = _to_probs(logits).detach().cpu().numpy()
+                    indiv_scores[i].append(probs_i)
+
+            # Average logits and probs
+            logits_stack = torch.stack(logits_list, dim=0)  # [M, B, C]
+            avg_logits = logits_stack.mean(dim=0)           # [B, C]
+            avg_probs = _to_probs(avg_logits)               # [B, C]
+
+            y_true_list.append(labels.detach().cpu().numpy())
+            avg_logit_batches.append(avg_logits.detach().cpu().numpy())
+            avg_prob_batches.append(avg_probs.detach().cpu().numpy())
+
+    # Concatenate across batches
+    y_true = np.concatenate(y_true_list, axis=0)
+    digits = np.concatenate(avg_logit_batches, axis=0)  # logits
+    y_scores = np.concatenate(avg_prob_batches, axis=0) # probs
+
+    # Flatten binary to (N,)
+    if y_scores.shape[1] == 1:
+        y_scores = y_scores.ravel()
+        digits = digits.ravel()
+
+    # Predictions and correctness
+    if y_scores.ndim == 1:
+        y_pred = (y_scores >= 0.5).astype(np.int64)
+    else:
+        y_pred = np.argmax(y_scores, axis=1).astype(np.int64)
+
+    correct_idx = np.where(y_pred == y_true)[0]
+    incorrect_idx = np.where(y_pred != y_true)[0]
+
+    # Finalize indiv_scores
+    if is_ensemble:
+        indiv_scores = [np.concatenate(slices, axis=0) for slices in indiv_scores]
+        # Flatten binary indiv scores to (N,)
+        if indiv_scores and indiv_scores[0].ndim == 2 and indiv_scores[0].shape[1] == 1:
+            indiv_scores = [arr.ravel() for arr in indiv_scores]
+        return y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores
+
+    return y_true, y_scores, digits, correct_idx, incorrect_idx
+
+
+def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
+    if CacheDataset is None:
+        raise ImportError("MONAI is required to build a cache dataset. Please install monai.")
+    data = []
+    for idx in range(len(dataset)):
+        sample = dataset[idx]
+        if isinstance(sample, dict):
+            img = sample.get("image")
+            label = sample.get("label")
+        else:
+            img, label = sample
+        # Convert once to PIL to avoid doing it per-augmentation in workers
+        if isinstance(img, torch.Tensor):
+            img = transforms.ToPILImage()(img.detach().cpu())
+        elif isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
+        # keep label as small tensor/py type
+        if isinstance(label, torch.Tensor):
+            label = label.detach().cpu()
+        data.append({"image": img, "label": label})
+    return CacheDataset(data=data, transform=None, cache_rate=cache_rate, num_workers=num_workers)
+
+def get_prediction(model, image, device, use_amp=True):
+    """
+    Generates a prediction from a given model and image.
+    NOTE: model should already be moved to `device` and set to eval() by the caller.
+    """
+    # Do NOT call model.to(device) here — caller should handle device placement.
+    image = image.to(device, non_blocking=True)
+    model.eval()  # ensure eval, cheap
+    with torch.no_grad():
+        if use_amp and getattr(device, "type", None) == "cuda":
+            with torch.amp.autocast(device_type="cuda"):
+                prediction = model(image)
+        else:
+            prediction = model(image)
+    # keep predictions on device; caller can .detach().cpu() as needed
     return prediction
 
+def get_batch_predictions(models, augmented_inputs, device, use_amp=True):
+    """
+    Get predictions for a flattened augmented_inputs tensor.
+    - models: single model or list of models (already moved to device and eval())
+    - augmented_inputs: Tensor on CPU (N, C, H, W) or (B*K, C, H, W)
+    Returns:
+      tensor shape [num_models, batch_len, num_classes] on CPU (detached)
+    """
+    # Ensure list
+    model_list = models if isinstance(models, (list, tuple)) else [models]
 
+    # Move input once to device
+    inputs = augmented_inputs.to(device, non_blocking=True)
+
+    preds = []
+    # run each model (already on device) producing logits on device
+    with torch.no_grad():
+        for m in model_list:
+            m.eval()
+            if use_amp and getattr(device, "type", None) == "cuda":
+                with torch.amp.autocast(device_type="cuda"):
+                    out = m(inputs)
+            else:
+                out = m(inputs)
+            preds.append(out.detach().cpu())  # detach and move to CPU to free GPU memory early
+
+    # Stack: [num_models, batch_len, num_classes]
+    batch_predictions = torch.stack(preds, dim=0)
+    return batch_predictions
+
+
+def average_predictions(batch_predictions):
+    """
+    Average predictions across models by first converting per-model logits to
+    probabilities (sigmoid for binary, softmax for multiclass) then averaging
+    the probabilities. Simpler API: activation is inferred automatically.
+
+    Args:
+        batch_predictions (torch.Tensor or array-like): shape [M, N, C] or [M, N]
+            where M = number of models, N = number of samples, C = num classes
+
+    Returns:
+        torch.Tensor: Averaged probabilities, shape [N, C] (or [N,1] for binary).
+    """
+    if not torch.is_tensor(batch_predictions):
+        batch_predictions = torch.as_tensor(batch_predictions)
+
+    # normalize shape -> [M, N, C]
+    if batch_predictions.dim() == 2:
+        batch_predictions = batch_predictions.unsqueeze(-1)
+    if batch_predictions.dim() != 3:
+        raise ValueError(f"Expected batch_predictions to be 3D [M,N,C], got {tuple(batch_predictions.shape)}")
+
+    M, N, C = batch_predictions.shape
+    # infer activation: binary -> sigmoid, multiclass -> softmax
+    if C == 1:
+        probs = torch.sigmoid(batch_predictions)
+    else:
+        probs = torch.softmax(batch_predictions, dim=-1)
+    averaged = probs.mean(dim=0)  # [N, C]
+    return averaged
+
+
+def compute_stds(averaged_predictions):
+    """
+    Compute standard deviations for the predictions.
+
+    Args:
+        averaged_predictions (torch.Tensor): Averaged predictions.
+
+    Returns:
+        list: List of standard deviations for each sample.
+    """
+    if averaged_predictions.ndim == 2 or averaged_predictions.shape[2] == 1:
+        stds = torch.std(averaged_predictions, dim=1).squeeze().tolist()  # Binary classification: shape (num_models, num_samples)
+    elif averaged_predictions.ndim == 3:
+        stds_per_class = torch.std(averaged_predictions, dim=1).squeeze()  # Multiclass classification: shape (num_models, num_samples, num_classes)
+        stds = torch.mean(stds_per_class, dim=1).tolist()
+    return stds
+
+
+def ensembling_predictions(models, image):
+    ensembling_predictions = [get_prediction(model, image) for model in models]
+    
+    return ensembling_predictions
 
 def extract_gps_augmentations_info(policies):
     """
-    Extracts N, M values and the list of policies from a list of policy filenames.
-
-    Args:
-    - policies (list of str): List of filenames in the format 'N2_M45_[(op, magnitude), (op, magnitude)].npz'.
-
-    Returns:
-    - N (int): The value of N (same for all policies).
-    - M (int): The value of M (same for all policies).
-    - formatted_policies (list of str): List of policies as strings.
+    Parse N, M and policy ops from filenames of form:
+      N{N}M{M}__{A}_np.float64_{magA}__{B}_np.float64_{magB}__.npz
+    Returns: N (int), M (int), [ [ (op_index, magnitude), ... ], ... ]
     """
-    # Extract N and M from the first policy string
     if not policies:
         return None, None, []
+    if isinstance(policies, str):
+        policies = [policies]
 
-    first_policy = policies[0]
-    match = re.search(r'N(\d+)_M(\d+)', first_policy)
-    if match:
-        N = int(match.group(1))
-        M = int(match.group(2))
-    
+    # Determine valid op index range from BetterRandAugment
+    try:
+        _probe = BetterRandAugment(n=2, m=45, rand_m=True, resample=False, image_size=51)
+        max_valid_index = len(_probe.augment_list) - 1
+    except Exception:
+        max_valid_index = None  # fall back to accepting provided indices
+
+    # Regex components for both styles (with or without underscore between N and M)
+    nm_regex = re.compile(r'N(?P<N>\d+)_?M(?P<M>\d+)')
+    pair_regex = re.compile(r'__(?P<idx>\d+)_np\.float64_(?P<mag>-?\d+(?:\.\d+)?)')
+
     formatted_policies = []
+    N_global = None
+    M_global = None
 
-    # Extract the policy part from each filename and keep it as a string
-    for policy in policies:
-        policy_match = re.search(r'\[(.*?)\]', policy)
-        if policy_match:
-            policy_str = f"[{policy_match.group(1)}]"  # Add brackets back around the tuple
-            formatted_policies.append(policy_str)
+    for fname in policies:
+        base = os.path.basename(fname)
+        stem = base[:-4] if base.endswith('.npz') else base
 
-    return N, M, formatted_policies
+        # Extract N and M
+        nm_match = nm_regex.search(stem)
+        if nm_match:
+            N_val = int(nm_match.group('N'))
+            M_val = int(nm_match.group('M'))
+            if N_global is None:  # record from first file
+                N_global, M_global = N_val, M_val
+        else:
+            # Default if missing
+            if N_global is None:
+                N_global, M_global = 2, 45
+
+        # Extract all (idx, magnitude) pairs
+        pairs = []
+        for m in pair_regex.finditer(stem):
+            idx_raw = int(m.group('idx'))
+            mag_raw = float(m.group('mag'))
+            mag_cast = int(mag_raw) if abs(mag_raw - int(mag_raw)) < 1e-6 else mag_raw
+
+            if max_valid_index is not None and (idx_raw < 0 or idx_raw > max_valid_index):
+                # Strict: raise or clamp. Here we clamp and warn.
+                idx_clamped = idx_raw % (max_valid_index + 1)
+                print(f"Policy index {idx_raw} out of range [0,{max_valid_index}]; remapped to {idx_clamped}")
+                idx_raw = idx_clamped
+
+            pairs.append((idx_raw, mag_cast))
+
+        if not pairs:
+            print(f"Warning: could not parse policy ops from '{base}'. Expected pattern N*M*__A_np.float64_mag__B_np.float64_mag__")
+        formatted_policies.append(pairs)
+
+    # Ensure global N/M defaults
+    if N_global is None:
+        N_global = 2
+    if M_global is None:
+        M_global = 45
+    return N_global, M_global, formatted_policies
 
 
-def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, output_activation=None, batch_size=None):
+def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, batch_size=None):
     """
     Perform Test-Time Augmentation (TTA) on a batch of images using specified transformations and models.
 
@@ -134,7 +447,7 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
                 all_preds = []
                 for batch in loader:
                     batch_predictions = get_batch_predictions(models, batch[0], device)
-                    avg_preds = average_predictions(batch_predictions, output_activation)
+                    avg_preds = average_predictions(batch_predictions)
                     all_preds.append(avg_preds)
                 predictions.append(torch.cat(all_preds, dim=0))
             # Stack predictions: [num_policies, batch_size, num_classes]
@@ -153,7 +466,7 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
                 all_preds = []
                 for batch in loader:
                     batch_predictions = get_batch_predictions(models, batch[0], device)
-                    avg_preds = average_predictions(batch_predictions, output_activation)
+                    avg_preds = average_predictions(batch_predictions)
                     all_preds.append(avg_preds)
                 predictions.append(torch.cat(all_preds, dim=0))
             # Stack predictions: [nb_augmentations, batch_size, num_classes]
@@ -165,39 +478,194 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
 
 def apply_randaugment_and_store_results(
     dataset, models, N, M, num_policies, device, folder_name='savedpolicies',
-    image_normalization=False, mean=False, std=False, nb_channels=1, image_size=51,
-    output_activation=None, batch_size=None
+    image_normalization=False, mean=False, std=False, nb_channels=1, image_size=51, batch_size=None, use_monai_cache=False, cache_rate=1.0,
+    cache_num_workers=0, dataloader_workers=None, dataloader_prefetch=8
 ):
     """
     Apply RandAugment transformations to the data and store the results, one augmentation at a time.
     """
     
     os.makedirs(folder_name, exist_ok=True)
+    cached_dataset = None
+    if use_monai_cache:
+        cached_dataset = build_monai_cache_dataset(dataset, cache_rate=cache_rate, num_workers=cache_num_workers)
 
-    for i in range(num_policies):
-    
-        print(f"Applying augmentation policy {i+1}/{num_policies}")
-        # Apply augmentation and get augmented images
-        augmented_inputs, augmentations = apply_augmentations(
-            dataset, 1, True, N, M, image_normalization, nb_channels, mean, std, image_size, batch_size=batch_size
-        )
-        # augmented_inputs shape: [1, batch_size, C, H, W]
-        augmented_input = augmented_inputs[0]  # shape: [batch_size, C, H, W]
-        dataset_aug = TensorDataset(augmented_input)
-        loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
-        all_preds = []
-        for batch in loader:
-            batch_predictions = get_batch_predictions(models, batch[0], device)
-            averaged_predictions = [average_predictions(pred, output_activation) for pred in batch_predictions.permute(1, 0, 2)]
-            all_preds.extend(averaged_predictions)
-        averaged_predictions = torch.stack(all_preds)
-        # Save predictions
-        policy_key = str(augmentations[0].transforms[3].get_transform())
-        filename = f'{folder_name}/N{N}_M{M}_{policy_key}.npz'
-        np.savez_compressed(filename, predictions=averaged_predictions.numpy())
+    # If we have a cached dataset, stream per-batch and write per-policy predictions incrementally.
+    if cached_dataset is not None:
+        print(f"Streaming {num_policies} policies in chunks to avoid RAM blowup")
+        policy_chunk_size = min(25, num_policies)  # smaller K reduces per-sample CPU load
+        num_samples = len(cached_dataset)
+
+        # Helper to build a list of torchvision pipelines for a chunk of BetterRandAug transforms
+        def build_augmentations_chunk(k_chunk):
+            rand_aug_policies = [BetterRandAugment(N, M, True, False, randomize_sign=False, image_size=image_size) for _ in range(k_chunk)]
+            return [transforms.Compose([
+                        EnsurePIL(),
+                        transforms.Lambda(lambda img: img.convert("RGB")),
+                        *([to_3_channels] if nb_channels == 1 else []),
+                        rand_aug,
+                        *([to_1_channel] if nb_channels == 1 else []),
+                        transforms.ToTensor(),
+                        *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
+                    ]) for rand_aug in rand_aug_policies]
+
+        # Infer num_classes once
+        with torch.no_grad():
+            dummy = torch.zeros(1, nb_channels, image_size, image_size)
+            try:
+                dp = get_batch_predictions(models, dummy, device)  # [num_models, 1, num_classes]
+                nc = average_predictions(dp).shape[1]
+            except Exception:
+                nc = 1
+
+        # Process policies in chunks; reuse the same DataLoader
+        for start in range(0, num_policies, policy_chunk_size):
+            end = min(start + policy_chunk_size, num_policies)
+            K_chunk = end - start
+            print(f"Processing policy chunk {start}-{end-1} (K_chunk={K_chunk})")
+            # Build augmentations and a fresh loader per chunk to avoid stale-prefetched batches
+            augmentations = build_augmentations_chunk(K_chunk)
+            worker_count = dataloader_workers or 0
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            loader = DataLoader(
+                dataset=aug_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=worker_count,
+                pin_memory=True,
+                worker_init_fn=_dl_worker_init,
+                persistent_workers=False,
+                prefetch_factor=(int(dataloader_prefetch) if worker_count > 0 else None),
+            )
+
+            # Peek first batch to know actual K and size memmaps accordingly
+            it = iter(loader)
+            try:
+                first_batch = next(it)
+            except StopIteration:
+                raise RuntimeError("Augmentation loader yielded no data")
+            imgs_stacked = first_batch[0]  # [B0, K_actual, C, H, W]
+            B0, K_actual, C, H, W = imgs_stacked.shape
+            if K_actual != K_chunk:
+                print(f"Warning: K_actual ({K_actual}) != requested K_chunk ({K_chunk}); proceeding with K_actual.")
+ 
+            # create memmaps (one per policy actually produced)
+            memmaps, memmap_paths = [], []
+            for idx in range(K_actual):
+                mmap_path = os.path.join(folder_name, f"tmp_policy_{start+idx}.mmap")
+                mem = np.memmap(mmap_path, dtype='float32', mode='w+', shape=(num_samples, nc))
+                memmaps.append(mem)
+                memmap_paths.append(mmap_path)
+
+            # stream batches and fill memmaps
+            sample_ptr = 0
+            def _process(imgs_stacked_local):
+                B, K, C, H, W = imgs_stacked_local.shape
+                imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float()
+                batch_predictions = get_batch_predictions(models, imgs_flat, device, use_amp=True)
+                avg_preds = average_predictions(batch_predictions).view(B, K, -1).cpu().numpy()
+                return B, K, avg_preds
+
+            # process first batch we already fetched
+            B, K, avg_preds = _process(imgs_stacked)
+            for local_k in range(K):
+                memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
+            sample_ptr += B
+            # process the remaining
+            for batch in it:
+                imgs_stacked = batch[0]
+                B, K, avg_preds = _process(imgs_stacked)
+                for local_k in range(K):
+                    memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
+                sample_ptr += B
+
+            if sample_ptr != num_samples:
+                raise RuntimeError(f"Expected {num_samples} samples but wrote {sample_ptr}")
+
+            # flush + compress each memmap to final .npz and remove memmap file
+            for local_k, (mem, mempath) in enumerate(zip(memmaps, memmap_paths)):
+                # determine a policy_key for naming (best effort using augmentations list)
+                rand_transform = None
+                try:
+                    for t in augmentations[local_k].transforms:
+                        if isinstance(t, BetterRandAugment) or hasattr(t, 'get_transform') or hasattr(t, 'get_transform_str'):
+                            rand_transform = t
+                            break
+                except Exception:
+                    rand_transform = None
+
+                if rand_transform is not None:
+                    if hasattr(rand_transform, 'get_transform_str'):
+                        policy_key = rand_transform.get_transform_str()
+                    elif hasattr(rand_transform, 'get_transform'):
+                        try:
+                            policy_key = str(rand_transform.get_transform())
+                        except Exception:
+                            policy_key = repr(rand_transform)
+                    else:
+                        policy_key = rand_transform.__class__.__name__
+                else:
+                    policy_key = f"policy_{start + local_k}"
+
+                safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
+                out_fname = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
+                arr = np.asarray(mem)
+                np.savez_compressed(out_fname, predictions=arr)
+                print(f"Saved compressed predictions for policy {start + local_k} -> {out_fname}")
+
+            # cleanup memmap files and free references
+            try:
+                for mempath in memmap_paths:
+                    os.remove(mempath)
+            except Exception:
+                pass
+            del memmaps
+    else:
+        # fallback: no cache — keep previous per-policy behaviour (iterate dataset per policy)
+        for i in range(num_policies):
+            print(f"Applying augmentation policy {i+1}/{num_policies}")
+            augmented_inputs, augmentations = apply_augmentations(
+                dataset, 1, True, N, M, image_normalization, nb_channels, mean, std, image_size, batch_size=batch_size
+            )
+            augmented_input = augmented_inputs[0]  # shape: [batch_size, C, H, W]
+            dataset_aug = TensorDataset(augmented_input)
+            loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+            all_preds = []
+            for batch in loader:
+                batch_predictions = get_batch_predictions(models, batch[0], device)
+                avg_preds = average_predictions(batch_predictions)
+                all_preds.append(avg_preds)
+            averaged_predictions = torch.cat(all_preds, dim=0)
+            # same policy key extraction / saving as above
+            rand_transform = None
+            for t in augmentations[0].transforms:
+                if isinstance(t, BetterRandAugment) or hasattr(t, 'get_transform') or hasattr(t, 'get_transform_str'):
+                    rand_transform = t
+                    break
+            if rand_transform is None:
+                for t in augmentations[0].transforms:
+                    if t.__class__.__name__ == 'BetterRandAugment':
+                        rand_transform = t
+                        break
+            if rand_transform is not None:
+                if hasattr(rand_transform, 'get_transform_str'):
+                    policy_key = rand_transform.get_transform_str()
+                elif hasattr(rand_transform, 'get_transform'):
+                    try:
+                        policy_key = str(rand_transform.get_transform())
+                    except Exception:
+                        policy_key = repr(rand_transform)
+                else:
+                    policy_key = rand_transform.__class__.__name__
+            else:
+                policy_key = "_".join([t.__class__.__name__ for t in augmentations[0].transforms])
+            safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
+            filename = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
+            np.savez_compressed(filename, predictions=averaged_predictions.numpy())
+            print(f"Saved predictions to {filename}")
 
 
-def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None):
+def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None, cached_dataset=None, dataloader_workers=None):
     """
     Apply augmentations to the images.
 
@@ -213,11 +681,38 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         mean (list or None): Mean for normalization.
         std (list or None): Standard deviation for normalization.
         image_size (int): Size of the input images.
+        cached_dataset (CacheDataset or None): Pre-cached dataset to speed up augmentation.
+        dataloader_workers (int or None): Number of workers for the augmentation DataLoader.
 
     Returns:
         torch.Tensor: Augmented images.
     """
     augmented_inputs = []
+    worker_count = 4 if dataloader_workers is None else dataloader_workers
+
+    def _get_loader(augmentation):
+        if cached_dataset is not None:
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentation)
+            return DataLoader(
+                dataset=aug_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=worker_count,
+                pin_memory=True,
+            )
+        if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
+            for subds in dataset.dataset.datasets:
+                subds.transform = augmentation
+        else:
+            dataset.transform = augmentation
+        return DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=worker_count,
+            pin_memory=True,
+        )
+    
     if usingBetterRandAugment:
         if isinstance(transformations, list):
             rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=True, randomize_sign=False, image_size=image_size) for policy in transformations]
@@ -225,47 +720,49 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         elif transformations is False:
             rand_aug_policies = [BetterRandAugment(n, m, True, False, randomize_sign=False, image_size=image_size) for _ in range(nb_augmentations)] 
 
+        # Ensure input is PIL, run randaugment (expects PIL), then convert to tensor and normalize.
         augmentations = [transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.ToPILImage(),
-                    transforms.Lambda(lambda img: img.convert("RGB")),  # Ensure image is in RGB format
-                    *([to_3_channels] if nb_channels == 1 else []),  # Conditionally add to_3_channels
-                    rand_aug,
-                    *([to_1_channel] if nb_channels == 1 else []),  # Conditionally add to_1_channel
-                    transforms.PILToTensor(),
-                    transforms.Lambda(lambda x: x.float()) if nb_channels == 1 else transforms.ConvertImageDtype(torch.float),
+                    EnsurePIL(),                                 # convert tensor/ndarray -> PIL if needed
+                    transforms.Lambda(lambda img: img.convert("RGB")),  # ensure RGB for randaug
+                    *([to_3_channels] if nb_channels == 1 else []),      # if needed expand channels (no-op for RGB)
+                    rand_aug,                                            # BetterRandAugment expects PIL Image
+                    *([to_1_channel] if nb_channels == 1 else []),       # convert back to single channel if needed
+                    transforms.PILToTensor(),                            # PIL -> Tensor (uint8 -> [0,255] -> Tensor)
+                    transforms.ConvertImageDtype(torch.float),          # ensure float Tensor
                     *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
                 ]) for rand_aug in rand_aug_policies]
         
-        for i, augmentation in enumerate(augmentations):
-            augmented_inputs_batch = []
-            print(f"Applying augmentation n : {i}")
-            if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
-                for subds in dataset.dataset.datasets:
-                    subds.transform = augmentation
-            else:
-                dataset.transform = augmentation
-            
-            data_loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False, num_workers=72, pin_memory=True)
-
-            for batch in data_loader:
-                augmented_images = batch[0]
-                augmented_inputs_batch.append(augmented_images)
-                
-            augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
-        augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
+        # If we have a cached_dataset, apply all augmentations in a single pass:
+        if cached_dataset is not None:
+            # _CachedRandAugDataset will return stacked KxC xH xW per sample, DataLoader -> B x K x C x H x W
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            loader = DataLoader(dataset=aug_dataset, batch_size=batch_size, shuffle=False, num_workers=worker_count, pin_memory=True)
+            batches = []
+            for batch in loader:
+                imgs_stacked = batch[0]  # shape: [B, K, C, H, W]
+                batches.append(imgs_stacked)
+            if len(batches) == 0:
+                raise RuntimeError("cached loader returned no data")
+            all_imgs = torch.cat(batches, dim=0)  # [total_B, K, C, H, W]
+            # permute to [K, B, C, H, W] so callers that expect per-augmentation stack keep working
+            augmented_inputs = all_imgs.permute(1, 0, 2, 3, 4)
+        else:
+            # fallback: previous behaviour (iterate once per augmentation)
+            for i, augmentation in enumerate(augmentations):
+                augmented_inputs_batch = []
+                print(f"Applying augmentation n : {i}")
+                data_loader = _get_loader(augmentation)
+                for batch in data_loader:
+                    augmented_images = batch[0]
+                    augmented_inputs_batch.append(augmented_images)
+                augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+            augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
 
     else:
         for i in range(nb_augmentations):
             augmented_inputs_batch = []
             print(f"Applying augmentation n : {i}")
-            if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
-                for subds in dataset.dataset.datasets:
-                    subds.transform = transformations
-            else:
-                dataset.transform = transformations
-            data_loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False, num_workers=72, pin_memory=True)
-
+            data_loader = _get_loader(transformations)
             for batch in data_loader:
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
@@ -277,79 +774,6 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
     else:
         return augmented_inputs
 
-
-def get_batch_predictions(models, augmented_inputs, device):
-    """
-    Get predictions for the augmented inputs.
-
-    Args:
-        models (torch.nn.Module or list): Model or list of models to use for predictions.
-        augmented_inputs (torch.Tensor): Augmented images.
-        device (torch.device): Device to run the models on.
-        softmax_application (bool): If True, applies softmax to the prediction.
-
-    Returns:
-        torch.Tensor: Batch predictions.
-    """
-    if isinstance(models, list):
-        batch_predictions = []
-        for model in models:
-            prediction = get_prediction(model, augmented_inputs, device)
-            batch_predictions.append(prediction)
-    else:
-        prediction = get_prediction(models, augmented_inputs, device)
-        batch_predictions = [prediction]
-    
-    batch_predictions = torch.stack(batch_predictions, dim=0)  # Shape: [num_models, batch_size * num_augmentations, num_classes]
-    return batch_predictions
-
-
-def average_predictions(batch_predictions, output_activation=None):
-    """
-    Average predictions across models and group augmentations back with their respective images.
-
-    Args:
-        batch_predictions (torch.Tensor): Batch predictions. Shape: [num_models, batch_size * num_augmentations, num_classes].
-        output_activation (str, optional): Activation function to apply to the predictions. 
-                                           Options: 'softmax', 'sigmoid', or None. Defaults to None.
-
-    Returns:
-        torch.Tensor: Averaged predictions. Shape: [batch_size * num_augmentations, num_classes].
-    """
-    # Average predictions across models
-    averaged_predictions = torch.mean(batch_predictions, dim=0)  # Shape: [batch_size * num_augmentations, num_classes]
-
-    # Apply the specified activation function
-    if output_activation == 'softmax':
-        averaged_predictions = torch.nn.functional.softmax(averaged_predictions, dim=-1)
-    elif output_activation == 'sigmoid':
-        averaged_predictions = torch.sigmoid(averaged_predictions)
-
-    return averaged_predictions
-
-
-def compute_stds(averaged_predictions):
-    """
-    Compute standard deviations for the predictions.
-
-    Args:
-        averaged_predictions (torch.Tensor): Averaged predictions.
-
-    Returns:
-        list: List of standard deviations for each sample.
-    """
-    if averaged_predictions.ndim == 2 or averaged_predictions.shape[2] == 1:
-        stds = torch.std(averaged_predictions, dim=1).squeeze().tolist()  # Binary classification: shape (num_models, num_samples)
-    elif averaged_predictions.ndim == 3:
-        stds_per_class = torch.std(averaged_predictions, dim=1).squeeze()  # Multiclass classification: shape (num_models, num_samples, num_classes)
-        stds = torch.mean(stds_per_class, dim=1).tolist()
-    return stds
-
-
-def ensembling_predictions(models, image):
-    ensembling_predictions = [get_prediction(model, image) for model in models]
-    
-    return ensembling_predictions
     
 def distance_to_hard_labels_computation(predictions):
     """
@@ -587,7 +1011,7 @@ def UQ_method_plot(correct_predictions, incorrect_predictions, y_title, title, f
     plt.xticks(fontsize=14)
     plt.yticks(fontsize=14)
     plt.show()
-    plt.savefig(f"/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/medMNIST_UQ_results/medMNIST_augmented{flag}_{title}.png")  # or any filename you want
+    #plt.savefig(f"/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/medMNIST_UQ_results/medMNIST_augmented{flag}_{title}.png")  # or any filename you want
     plt.close()
 
 def roc_curve_UQ_method_computation(correct_predictions, incorrect_predictions):
@@ -797,43 +1221,47 @@ def plot_auc_curves(results):
     
 def select_greedily_on_ens(
     all_preds, good_idx, bad_idx, keys, search_set_len, select_only=50,
-    num_workers=1, num_searches=10, top_k=5, method='top_policies'
+    num_workers=1, num_searches=10, top_k=5, method='top_policies', seed=None
 ):
     val_preds = np.copy(all_preds[:, :search_set_len, :])
-    with mp.Pool(processes=num_workers) as pool:
-        initial_augmentations = [
-            int(np.random.choice(range(val_preds.shape[0]))) for _ in range(num_searches)
-        ]
+
+    # Prepare random starts
+    # deterministic initial starts when `seed` is provided
+    rng = np.random.RandomState(seed) if seed is not None else np.random
+    initial_augmentations = [int(rng.choice(range(val_preds.shape[0]))) for _ in range(num_searches)]
+ 
+    def _run_sequential():
+        out = []
+        for init_aug in initial_augmentations:
+            out.append(greedy_search(init_aug, val_preds, good_idx, bad_idx, select_only))
+        return out
+
+    results = []
+    if num_workers and num_workers > 1:
         try:
-            results = pool.starmap(
-                greedy_search,
-                [(initial_aug, val_preds, good_idx, bad_idx, select_only) for initial_aug in initial_augmentations]
-            )
-        except IndexError as e:
-            print("Debugging IndexError...")
-            print(f"val_preds shape: {val_preds.shape}")
-            pool.close()
-            pool.join()
-            
-        finally:
-            pool.close()
-            pool.join()
+            with mp.Pool(processes=min(num_workers, mp.cpu_count() or num_workers)) as pool:
+                results = pool.starmap(
+                    greedy_search,
+                    [(init_aug, val_preds, good_idx, bad_idx, select_only) for init_aug in initial_augmentations]
+                )
+        except Exception as e:
+            print(f"Parallel greedy_search failed: {repr(e)}; falling back to sequential.")
+            results = _run_sequential()
+    else:
+        results = _run_sequential()
+
+    if not results:
+        raise RuntimeError("No greedy_search results produced. Check input shapes and indices.")
 
     # Select the best result based on the ROC AUC metric
     best_result = max(results, key=lambda x: x[0])
     best_metric, best_group_indices, _ = best_result
 
-    print("\nParallel greedy search complete. Best metric:", best_metric)
+    print("\nGreedy search complete. Best metric:", best_metric)
 
     if method == 'top_k_policies':
-        # Get the top_k results by ROC AUC
         sorted_results = sorted(results, key=lambda x: x[0], reverse=True)
-        print(results)
-        top_k_group_indices = []
-        for i in range(top_k):
-            top_k_group_indices.append(sorted_results[i][1])
-        
-        policies = top_k_group_indices
+        policies = [sorted_results[i][1] for i in range(min(top_k, len(sorted_results)))]
     else:
         policies = np.array(best_group_indices)
 
@@ -842,42 +1270,66 @@ def select_greedily_on_ens(
 def load_npz_files_for_greedy_search(npz_dir):
     """
     Load all .npz files from the specified directory.
-    Return the predictions stacked for each policy and corresponding filenames.
+    Return stacked predictions [num_policies, num_samples, num_classes] and filenames.
     """
-    npz_files = [f for f in os.listdir(npz_dir) if f.endswith('.npz')]
-    all_preds = []
-    all_keys = []
-
-    # Load the predictions from each .npz file
+    npz_files = sorted([f for f in os.listdir(npz_dir) if f.endswith('.npz')])
+    all_preds_list, all_keys = [], []
     for npz_file in npz_files:
         file_path = os.path.join(npz_dir, npz_file)
         try:
             data = np.load(file_path)
-            preds = data['predictions']
-            all_preds.append(preds)
-            all_keys.append(npz_file)  # Use the filename (or another key) as the identifier for the policy
+            preds = np.asarray(data['predictions'])
+            # normalize to (N, C)
+            if preds.ndim == 1:
+                preds = preds.reshape(-1, 1)
+            if preds.ndim != 2:
+                print(f"Skipping {npz_file}: expected 2D array, got {preds.shape}")
+                continue
+            all_preds_list.append(preds.astype(np.float32, copy=False))
+            all_keys.append(npz_file)
         except Exception as e:
             print(f"Error loading {npz_file}: {e}")
+    if not all_preds_list:
+        raise RuntimeError(f"No valid .npz predictions found in {npz_dir}")
 
-    all_preds = np.array(all_preds)  # Shape: [num_policies, num_samples, num_classes]
+    # Ensure equal sample count; trim to min if needed
+    min_len = min(arr.shape[0] for arr in all_preds_list)
+    if any(arr.shape[0] != min_len for arr in all_preds_list):
+        print(f"Warning: differing sample counts; trimming to {min_len}")
+    all_preds = np.stack([arr[:min_len] for arr in all_preds_list], axis=0)  # [P, N, C]
     return all_preds, all_keys
 
 def perform_greedy_policy_search(
-    npz_dir, good_idx, bad_idx, max_iterations=50, num_workers=1, num_searches=10, top_k=5, plot=True, method='top_k_policies'
+    npz_dir, good_idx, bad_idx, max_iterations=50, num_workers=1, num_searches=10, top_k=5, plot=True, method='top_k_policies', seed=None
 ):
     print('Loading predictions...')
     all_preds, all_keys = load_npz_files_for_greedy_search(npz_dir)
-    search_set_len = all_preds[0].size
+    # shapes: [num_policies, num_samples, num_classes]
+    num_samples = all_preds.shape[1]
+    num_classes = all_preds.shape[2]
+
+    # Clip indices if they exceed available samples
+    if len(good_idx) or len(bad_idx):
+        max_idx = max(int(max(good_idx)) if len(good_idx) else -1,
+                      int(max(bad_idx)) if len(bad_idx) else -1)
+        if max_idx >= num_samples:
+            print(f"Warning: indices exceed predictions length ({max_idx} >= {num_samples}). Clipping.")
+            good_idx = [i for i in good_idx if i < num_samples]
+            bad_idx = [i for i in bad_idx if i < num_samples]
+            if not good_idx or not bad_idx:
+                raise ValueError("After clipping, good_idx or bad_idx is empty. Ensure .npz match the dataset/ordering.")
 
     selected_policies, results = select_greedily_on_ens(
         all_preds, good_idx, bad_idx, all_keys,
-        search_set_len=search_set_len,
+        search_set_len=num_samples,          # FIX: use sample count, not .size
         select_only=max_iterations,
         num_workers=num_workers,
         num_searches=num_searches,
         top_k=top_k,
-        method=method
+        method=method,
+        seed=seed
     )
+
     if isinstance(selected_policies, list) and all(isinstance(policy, list) for policy in selected_policies):
         selected_policy_names = [[all_keys[i] for i in selected_policy] for selected_policy in selected_policies]
     else:
@@ -886,6 +1338,7 @@ def perform_greedy_policy_search(
     if plot:
         plot_auc_curves(results)
 
+    print(f"Loaded predictions shape: {all_preds.shape} (policies, samples, classes={num_classes})")
     return selected_policy_names
 
 
