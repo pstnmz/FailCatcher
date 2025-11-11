@@ -101,10 +101,9 @@ class ResourceProfiler:
         self.records = rec
 # -------------------- end profiling helpers --------------------
 
-flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
-colors = [False, False, False, True, False, True, True, False, True]
-activations=['sigmoid', 'softmax', 'sigmoid', 'softmax', 'softmax', 'softmax', 'sigmoid', 'softmax', 'softmax']
-model_augmentations = [True, True, True, True, True, True, True, True, True]
+flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e', 'breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
+colors = [False, False, False, True, False, True, True, False, True, False, False, False, True, False, True, True, False, True]
+model_augmentations = [True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False]
 batch_size = 128
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 size = 224  # Image size for the models
@@ -112,12 +111,8 @@ randaugment_ops = 2
 randaugment_mag = 45
 max_iterations = 500
 nb_channels = 3
-flags=['breastmnist']  # TEMPORARY LIMIT TO SINGLE DATASET FOR TESTING
-colors=[False]
-activations=['sigmoid']
-model_augmentations=[False]
 
-for model_augmentation, dataflag, color, activation in zip(model_augmentations, flags, colors, activations):
+for model_augmentation, dataflag, color in zip(model_augmentations, flags, colors):
     # Loop over different datasets and settings
     if model_augmentation:
         output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_wdataaug_calibration_set'
@@ -126,7 +121,7 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
     os.makedirs(output_dir, exist_ok=True)
 
 
-    print(f"Processing {dataflag} with color={color} and activation={activation}")
+    print(f"Processing {dataflag} with color={color}")
     if color is True:
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -196,7 +191,6 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
         "device": str(device),
         "im_size": size,
         "batch_size": batch_size,
-        "activation": activation,
         "randaugment_ops": randaugment_ops,
         "randaugment_mag": randaugment_mag,
         "max_iterations": max_iterations,
