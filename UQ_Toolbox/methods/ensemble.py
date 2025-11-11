@@ -45,104 +45,75 @@ class EnsembleSTDMethod(UQMethod):
 # FUNCTIONAL API (existing, for backward compatibility)
 # ============================================================================
 
-def ensembling_predictions(models, image, device=None):
+def ensembling_stds_computation(individual_scores):
     """
-    Get predictions from all models in an ensemble for a single image.
+    Compute standard deviation across ensemble predictions.
     
     Args:
-        models: List of PyTorch models
-        image: Input image tensor or PIL image
-        device: torch.device (optional, inferred from image if not provided)
+        individual_scores: numpy array of shape [N, K, C] where:
+            N = number of samples
+            K = number of models
+            C = number of classes
     
     Returns:
-        list: Predictions from each model
+        list: Per-sample standard deviations (length N)
     
     Example:
-        >>> preds = ensembling_predictions(models, image, device)
-        >>> # preds: [tensor([0.8]), tensor([0.75]), tensor([0.82])]
+        >>> # 100 samples, 5 models, 2 classes
+        >>> scores = np.random.rand(100, 5, 2)
+        >>> stds = ensembling_stds_computation(scores)
+        >>> len(stds)  # 100
     """
-    if device is None and isinstance(image, torch.Tensor):
-        device = image.device
+    if not isinstance(individual_scores, np.ndarray):
+        individual_scores = np.array(individual_scores)
     
-    ensemble_preds = [get_prediction(model, image, device) for model in models]
-    return ensemble_preds
-
-
-def ensembling_stds_computation(models_predictions):
-    """
-    Compute standard deviation of model predictions for ensembling.
-    
-    Args:
-        models_predictions: Array of predictions with shape:
-            - (num_models, num_samples) for binary classification
-            - (num_models, num_samples, num_classes) for multiclass
-    
-    Returns:
-        np.ndarray: Per-sample uncertainty scores
-            - Binary: std across models (N,)
-            - Multiclass: mean std across classes (N,)
-    
-    Raises:
-        ValueError: If array is not 2D or 3D
-    
-    Example:
-        >>> # Binary case: 5 models, 100 samples
-        >>> preds = np.random.rand(5, 100)
-        >>> stds = ensembling_stds_computation(preds)
-        >>> stds.shape  # (100,)
-        
-        >>> # Multiclass case: 5 models, 100 samples, 10 classes
-        >>> preds = np.random.rand(5, 100, 10)
-        >>> stds = ensembling_stds_computation(preds)
-        >>> stds.shape  # (100,)
-    """
-    models_predictions = np.asarray(models_predictions)
-    
-    if models_predictions.ndim == 2:
-        # Binary classification: (num_models, num_samples)
-        stds = np.std(models_predictions, axis=0)
-    
-    elif models_predictions.ndim == 3:
-        # Multiclass: (num_models, num_samples, num_classes)
-        # Compute std per class, then average across classes
-        class_wise_stds = np.std(models_predictions, axis=0)  # (num_samples, num_classes)
-        stds = np.mean(class_wise_stds, axis=1)  # (num_samples,)
-    
-    else:
+    # Ensure shape is [N, K, C]
+    if individual_scores.ndim != 3:
         raise ValueError(
-            f"Unexpected shape {models_predictions.shape}. "
-            "Expected 2D (binary) or 3D (multiclass) array."
+            f"individual_scores must be 3D [N, K, C], got shape {individual_scores.shape}"
         )
     
-    return stds
+    N, K, C = individual_scores.shape
+    
+    # Compute std across models (axis=1), then average across classes (axis=1 after reduction)
+    stds_per_class = np.std(individual_scores, axis=1)  # [N, C]
+    stds = np.mean(stds_per_class, axis=1)  # [N]
+    
+    return stds.tolist()
 
 
-def ensembling_variance_computation(models_predictions):
+def ensembling_predictions(individual_scores):
     """
-    Compute variance of model predictions (alternative to std).
+    Average predictions across ensemble models.
     
     Args:
-        models_predictions: Same format as ensembling_stds_computation
+        individual_scores: numpy array of shape [N, K, C]
     
     Returns:
-        np.ndarray: Per-sample variance scores
-    
-    Note:
-        Variance = std², more sensitive to outliers.
+        numpy.ndarray: Averaged predictions of shape [N, C]
     """
-    models_predictions = np.asarray(models_predictions)
+    if not isinstance(individual_scores, np.ndarray):
+        individual_scores = np.array(individual_scores)
     
-    if models_predictions.ndim == 2:
-        variances = np.var(models_predictions, axis=0)
+    # Average across models (axis=1)
+    return np.mean(individual_scores, axis=1)  # [N, C]
+
+
+def ensembling_variance_computation(individual_scores):
+    """
+    Compute variance across ensemble predictions.
     
-    elif models_predictions.ndim == 3:
-        class_wise_vars = np.var(models_predictions, axis=0)
-        variances = np.mean(class_wise_vars, axis=1)
+    Args:
+        individual_scores: numpy array of shape [N, K, C]
     
-    else:
-        raise ValueError(
-            f"Unexpected shape {models_predictions.shape}. "
-            "Expected 2D (binary) or 3D (multiclass) array."
-        )
+    Returns:
+        list: Per-sample variances (length N)
+    """
+    if not isinstance(individual_scores, np.ndarray):
+        individual_scores = np.array(individual_scores)
     
-    return variances
+    # Compute variance across models (axis=1), then average across classes
+    vars_per_class = np.var(individual_scores, axis=1)  # [N, C]
+    vars = np.mean(vars_per_class, axis=1)  # [N]
+    
+    return vars.tolist()

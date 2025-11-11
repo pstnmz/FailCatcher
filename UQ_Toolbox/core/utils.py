@@ -67,112 +67,72 @@ class _CachedRandAugDataset(Dataset):
         self.augmentations = augmentations if isinstance(augmentations, (list, tuple)) else [augmentations]
     
 
-def evaluate_models_on_loader(models, data_loader, device, use_amp=True):
+def evaluate_models_on_loader(models, data_loader, device, numpy_av=True):
     """
-    Evaluate a single model or an ensemble on a DataLoader and collect:
-      - y_true: ground-truth labels (N,)
-      - y_scores: probabilities (N,) for binary or (N, C) for multiclass
-      - digits: raw logits (N,) for binary or (N, C) for multiclass
-      - correct_idx: indices of correct predictions (relative to concatenated order)
-      - incorrect_idx: indices of incorrect predictions
-    If `models` is a list/tuple, also returns:
-      - indiv_scores: list of length num_models with per-model probabilities
-                      (each np.ndarray of shape (N,) for binary or (N, C) for multiclass)
-
+    Evaluate ensemble of models on a DataLoader.
+    
     Args:
-        models: torch.nn.Module or list/tuple of modules
-        data_loader: DataLoader yielding (images, labels) or dicts with keys 'image' and 'label'
+        models: List of PyTorch models
+        data_loader: DataLoader for evaluation
         device: torch.device
-        use_amp: bool, enable CUDA AMP
-
+        numpy_av: If True, use numpy for final averaging (matches tr.evaluate_model exactly)
+    
     Returns:
-        If single model:
-            y_true, y_scores, digits, correct_idx, incorrect_idx
-        If ensemble:
-            y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores
+        tuple: (y_true, y_scores, predicted_classes, correct_idx, incorrect_idx, individual_scores)
+    
+    Example:
+        >>> y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores = \
+        ...     evaluate_models_on_loader(models, test_loader, device)
+        >>> print(f"Accuracy: {len(correct_idx) / len(y_true):.3f}")
     """
-    is_ensemble = isinstance(models, (list, tuple))
-    model_list = list(models) if is_ensemble else [models]
-
-    # Eval mode
-    for m in model_list:
-        m.eval()
-
-    y_true_list = []
-    avg_prob_batches = []
-    avg_logit_batches = []
-    indiv_scores = [[] for _ in range(len(model_list))] if is_ensemble else None
-
-    def _to_probs(logits_t):
-        # logits_t: [B, C] with C==1 for binary or >1 for multiclass
-        if logits_t.shape[1] == 1:
-            return torch.sigmoid(logits_t)  # [B,1]
-        return torch.softmax(logits_t, dim=1)  # [B,C]
-
+    for model in models:
+        model.eval()
+    
+    all_labels = []
+    all_predictions = []  # List of [B, K, C] tensors
+    
     with torch.no_grad():
         for batch in data_loader:
+            # Handle different batch formats
             if isinstance(batch, dict):
-                images = batch.get('image')
-                labels = batch.get('label')
+                images = batch["image"].to(device)
+                labels = batch.get("label", batch.get("shape"))
             else:
-                images, labels = batch[0], batch[1]
-
-            images = images.to(device, non_blocking=True)
-            labels = labels.view(-1).to(device, non_blocking=True).long()
-
-            # Collect per-model logits
-            logits_list = []
-            for m in model_list:
-                if use_amp and getattr(device, "type", None) == "cuda":
-                    with torch.amp.autocast(device_type="cuda"):
-                        logits = m(images)
-                else:
-                    logits = m(images)
-                logits_list.append(logits)
-
-            # Per-model probs for indiv_scores
-            if is_ensemble:
-                for i, logits in enumerate(logits_list):
-                    probs_i = _to_probs(logits).detach().cpu().numpy()
-                    indiv_scores[i].append(probs_i)
-
-            # Average logits and probs
-            logits_stack = torch.stack(logits_list, dim=0)  # [M, B, C]
-            avg_logits = logits_stack.mean(dim=0)           # [B, C]
-            avg_probs = _to_probs(avg_logits)               # [B, C]
-
-            y_true_list.append(labels.detach().cpu().numpy())
-            avg_logit_batches.append(avg_logits.detach().cpu().numpy())
-            avg_prob_batches.append(avg_probs.detach().cpu().numpy())
-
-    # Concatenate across batches
-    y_true = np.concatenate(y_true_list, axis=0)
-    digits = np.concatenate(avg_logit_batches, axis=0)  # logits
-    y_scores = np.concatenate(avg_prob_batches, axis=0) # probs
-
-    # Flatten binary to (N,)
-    if y_scores.shape[1] == 1:
-        y_scores = y_scores.ravel()
-        digits = digits.ravel()
-
-    # Predictions and correctness
-    if y_scores.ndim == 1:
-        y_pred = (y_scores >= 0.5).astype(np.int64)
+                images, labels = batch[0].to(device), batch[1]
+            
+            # Get predictions from all models for this batch
+            batch_preds = get_batch_predictions(models, images, device)  # [B, K, C]
+            all_predictions.append(batch_preds)
+            all_labels.append(labels)
+    
+    # Concatenate along batch dimension (dimension 0)
+    all_predictions = torch.cat(all_predictions, dim=0)  # [N, K, C]
+    all_labels = torch.cat(all_labels, dim=0)  # [N]
+    
+    if numpy_av:
+        # Exact match with tr.evaluate_model: use numpy for averaging
+        all_predictions_np = all_predictions.cpu().numpy()  # [N, K, C]
+        avg_probs_np = np.mean(all_predictions_np, axis=1)  # [N, C] - average over models
+        predicted_classes_np = np.argmax(avg_probs_np, axis=1)  # [N]
+        
+        y_true = all_labels.cpu().numpy().ravel()
+        y_scores = avg_probs_np
+        predicted_classes = predicted_classes_np
+        individual_scores = all_predictions_np
     else:
-        y_pred = np.argmax(y_scores, axis=1).astype(np.int64)
-
-    correct_idx = np.where(y_pred == y_true)[0]
-    incorrect_idx = np.where(y_pred != y_true)[0]
-
-    # Finalize indiv_scores
-    if is_ensemble:
-        indiv_scores = [np.concatenate(slices, axis=0) for slices in indiv_scores]
-        # Flatten binary indiv scores to (N,)
-        if indiv_scores and indiv_scores[0].ndim == 2 and indiv_scores[0].shape[1] == 1:
-            indiv_scores = [arr.ravel() for arr in indiv_scores]
-        return y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores
-
-    return y_true, y_scores, digits, correct_idx, incorrect_idx
+        # Original torch-based method
+        avg_probs = average_predictions(all_predictions)  # [N, C]
+        predicted_classes = torch.argmax(avg_probs, dim=1)
+        
+        y_true = all_labels.cpu().numpy().ravel()
+        y_scores = avg_probs.cpu().numpy()
+        predicted_classes = predicted_classes.cpu().numpy().ravel()
+        individual_scores = all_predictions.cpu().numpy()
+    
+    correct_idx = np.where(predicted_classes == y_true)[0].tolist()
+    incorrect_idx = np.where(predicted_classes != y_true)[0].tolist()
+    
+    return y_true, y_scores, predicted_classes, correct_idx, incorrect_idx, individual_scores
 
 
 def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
@@ -214,36 +174,56 @@ def get_prediction(model, image, device, use_amp=True):
     # keep predictions on device; caller can .detach().cpu() as needed
     return prediction
 
-def get_batch_predictions(models, augmented_inputs, device, use_amp=True):
+def get_batch_predictions(models, images, device):
     """
-    Get predictions for a flattened augmented_inputs tensor.
-    - models: single model or list of models (already moved to device and eval())
-    - augmented_inputs: Tensor on CPU (N, C, H, W) or (B*K, C, H, W)
+    Get predictions from multiple models for a batch of images.
+    
+    Args:
+        models: List of PyTorch models or single model
+        images: Batch of images [B, C, H, W]
+        device: torch.device
+    
     Returns:
-      tensor shape [num_models, batch_len, num_classes] on CPU (detached)
+        torch.Tensor: Predictions of shape [B, K, C] where:
+            B = batch size
+            K = number of models
+            C = number of classes
+    
+    Example:
+        >>> models = [model1, model2, model3]
+        >>> images = torch.randn(32, 3, 224, 224)
+        >>> preds = get_batch_predictions(models, images, device)
+        >>> preds.shape  # torch.Size([32, 3, num_classes])
     """
-    # Ensure list
-    model_list = models if isinstance(models, (list, tuple)) else [models]
-
-    # Move input once to device
-    inputs = augmented_inputs.to(device, non_blocking=True)
-
-    preds = []
-    # run each model (already on device) producing logits on device
-    with torch.no_grad():
-        for m in model_list:
-            m.eval()
-            if use_amp and getattr(device, "type", None) == "cuda":
-                with torch.amp.autocast(device_type="cuda"):
-                    out = m(inputs)
+    # Handle single model case
+    if not isinstance(models, list):
+        models = [models]
+    
+    batch_predictions = []
+    
+    for model in models:
+        model.eval()
+        with torch.no_grad():
+            images = images.to(device)
+            logits = model(images)
+            
+            # Convert logits to probabilities
+            if logits.shape[1] == 1:
+                # Binary classification with single output
+                probs = torch.sigmoid(logits)  # [B, 1]
+                # Convert to 2-class format: [B, 2]
+                probs = torch.cat([1 - probs, probs], dim=1)
             else:
-                out = m(inputs)
-            preds.append(out.detach().cpu())  # detach and move to CPU to free GPU memory early
-
-    # Stack: [num_models, batch_len, num_classes]
-    batch_predictions = torch.stack(preds, dim=0)
+                # Multi-class
+                probs = torch.softmax(logits, dim=1)  # [B, C]
+            
+            batch_predictions.append(probs)
+    
+    # Stack predictions: [K, B, C] -> [B, K, C]
+    batch_predictions = torch.stack(batch_predictions, dim=0)  # [K, B, C]
+    batch_predictions = batch_predictions.permute(1, 0, 2)  # [B, K, C]
+    
     return batch_predictions
-
 
 def average_predictions(batch_predictions):
     """
