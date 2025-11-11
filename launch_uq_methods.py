@@ -17,7 +17,7 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 import seaborn as sns
 import matplotlib.pyplot as plt
-import UQ_toolbox as uq
+import UQ_Toolbox.UQ_toolbox as uq
 import pickle as pkl
 import pandas as pd
 from PIL import Image
