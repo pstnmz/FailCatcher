@@ -16,6 +16,17 @@ try:
     _NVML_AVAILABLE = True
 except Exception:
     _NVML_AVAILABLE = False
+    
+# Limit thread oversubscription globally
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+try:
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
 
 # -------------------- Resource profiling helpers --------------------
 def _get_cuda_index(device):
@@ -89,26 +100,19 @@ class ResourceProfiler:
             })
         self.records = rec
 # -------------------- end profiling helpers --------------------
-        
-#flags = ['bloodmnist', 'bloodmnist', 'octmnist', 'octmnist']#
-flags=['pathmnist', 'pathmnist', 'dermamnist-e', 'organamnist', 'tissuemnist']
-#colors = [True, True, False, False]
-colors = [True, True, True, False, False]
-#activations = ['softmax', 'softmax', 'softmax', 'softmax']
-activations=['softmax', 'softmax', 'softmax', 'softmax', 'softmax']
-#model_augmentations = [False, True, False, True]#, 
-model_augmentations = [False, True, True, True, True]
-#color = True # True for color, False for grayscale
-#activation = 'softmax'  # 'sigmoid' for binary-class, 'softmax' for multi-class
-batch_size = 4000
+
+flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e', 'breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
+colors = [False, False, False, True, False, True, True, False, True, False, False, False, True, False, True, True, False, True]
+model_augmentations = [True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False]
+batch_size = 128
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 size = 224  # Image size for the models
-#model_augmentation = False  # Whether the models were trained with data augmentation
 randaugment_ops = 2
 randaugment_mag = 45
 max_iterations = 500
 nb_channels = 3
-for model_augmentation, dataflag, color, activation in zip(model_augmentations, flags, colors, activations):
+
+for model_augmentation, dataflag, color in zip(model_augmentations, flags, colors):
     # Loop over different datasets and settings
     if model_augmentation:
         output_dir = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{size}*{size}/{dataflag}_wdataaug_calibration_set'
@@ -117,7 +121,7 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
     os.makedirs(output_dir, exist_ok=True)
 
 
-    print(f"Processing {dataflag} with color={color} and activation={activation}")
+    print(f"Processing {dataflag} with color={color}")
     if color is True:
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -144,7 +148,17 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
     _, _, info = tr.load_datasets(dataflag, color, size, transform, batch_size)
     task_type = info['task']  # Determine the task type (binary-class or multi-class)
     num_classes = len(info['label'])  # Number of classes
-    [_, calibration_dataset_tta, _], [_, calibration_loader_tta, _], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
+    [_, calibration_dataset_tta, _], [_, _, _], _ = tr.load_datasets(dataflag, color, size, transform_tta, batch_size)
+
+    cache_workers = max(os.cpu_count() - 1, 0) if os.cpu_count() else 0
+       # Prefer the actually available CPU affinity (inside containers this can be < os.cpu_count())
+    try:
+        avail_cores = len(os.sched_getaffinity(0))
+        print(f"Detected available CPU cores via sched_getaffinity: {avail_cores}")
+    except AttributeError:
+        avail_cores = os.cpu_count() or 8
+       # With 96 cores, start with 48; you can try 64 if CPU remains underutilized
+    dataloader_workers = min(64, max(16, avail_cores // 2))
 
     with ResourceProfiler(device=device, label="GPS_calibration_randaugment") as rp:
         uq.apply_randaugment_and_store_results(
@@ -160,8 +174,11 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
             std=[.5],
             image_size=size,
             nb_channels=nb_channels,
-            output_activation=activation,
-            batch_size=batch_size
+            batch_size=batch_size,
+            use_monai_cache=True,
+            cache_num_workers=cache_workers,
+            dataloader_workers=dataloader_workers,
+            dataloader_prefetch=16  # try 12–16; increase if RAM is still comfortable
         )
 
     # Save JSON log
@@ -174,7 +191,6 @@ for model_augmentation, dataflag, color, activation in zip(model_augmentations, 
         "device": str(device),
         "im_size": size,
         "batch_size": batch_size,
-        "activation": activation,
         "randaugment_ops": randaugment_ops,
         "randaugment_mag": randaugment_mag,
         "max_iterations": max_iterations,
