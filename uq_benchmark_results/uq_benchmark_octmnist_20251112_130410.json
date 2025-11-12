@@ -1,0 +1,36 @@
+{
+  "flag": "octmnist",
+  "timestamp": "20251112_130410",
+  "task_type": "multi-class",
+  "num_classes": 4,
+  "test_size": 1000,
+  "calib_size": 21662,
+  "test_accuracy": 0.922,
+  "calibration_method": "temperature",
+  "methods": {
+    "MSR": {
+      "time_seconds": 0.00024558487348258495,
+      "auc": 0.799613437899772,
+      "threshold": 0.06964600831270218,
+      "balanced_accuracy": 0.7682713165359587,
+      "specificity": 0.8076923076923077,
+      "sensitivity": 0.7288503253796096
+    },
+    "MSR_temperature": {
+      "time_seconds": 3.576667216839269,
+      "auc": 0.7702736525946938,
+      "threshold": 0.08460870385169983,
+      "balanced_accuracy": 0.7348851437788531,
+      "specificity": 0.7051282051282052,
+      "sensitivity": 0.764642082429501
+    },
+    "Ensembling": {
+      "time_seconds": 0.0006486428901553154,
+      "auc": 0.8047861393848378,
+      "threshold": 0.054255278664371624,
+      "balanced_accuracy": 0.7789643472940653,
+      "specificity": 0.7564102564102564,
+      "sensitivity": 0.8015184381778742
+    }
+  }
+}

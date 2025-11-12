@@ -211,22 +211,31 @@ def posthoc_calibration(y_scores, y_true, method_calibration='platt'):
 
     Args:
         y_scores: Predicted probabilities (or logits if method='temperature')
+            - Binary: (N,) or (N, 2) where [:,1] is positive class
+            - Multiclass: (N, C)
         y_true: True labels (np.ndarray)
         method_calibration: 'platt', 'isotonic', or 'temperature'
 
     Returns:
         tuple: (calibrated_probs, calibration_model)
-            - calibrated_probs: Calibrated probabilities (np.ndarray)
+            - calibrated_probs: Calibrated probabilities
+                - Binary: (N,) array of positive class probabilities
+                - Multiclass: (N, C) array of class probabilities
             - calibration_model: Fitted calibration model
-    
-    Example:
-        >>> # Platt scaling
-        >>> probs, model = posthoc_calibration(y_scores, y_true, 'platt')
-        
-        >>> # Temperature scaling (requires logits)
-        >>> logits = model.predict(X)  # raw outputs before softmax
-        >>> cal_probs, temp_model = posthoc_calibration(logits, y_true, 'temperature')
     """
+    # Ensure y_scores is numpy array
+    y_scores = np.asarray(y_scores)
+    
+    # Determine if binary or multiclass
+    num_classes = len(np.unique(y_true))
+    is_binary = num_classes == 2
+    
+    # For binary classification with shape (N, 2), extract positive class probability
+    if y_scores.ndim == 2 and y_scores.shape[1] == 2:
+        y_scores_input = y_scores[:, 1]  # Positive class probability
+    else:
+        y_scores_input = y_scores.ravel() if y_scores.ndim == 1 else y_scores
+    
     if method_calibration == 'temperature':
         model = fit_temperature_scaling(y_scores, y_true)
         logits_tensor = torch.from_numpy(y_scores).float()
@@ -236,38 +245,36 @@ def posthoc_calibration(y_scores, y_true, method_calibration='platt'):
 
         # Binary or multiclass?
         if calibrated_logits.ndim == 1 or calibrated_logits.shape[1] == 1:
-            calibrated_probs = torch.sigmoid(calibrated_logits).numpy()
-            y_prob_true = calibrated_probs.squeeze()
+            # Binary: return (N,) probabilities
+            calibrated_probs = torch.sigmoid(calibrated_logits).numpy().squeeze()
         else:
+            # Multiclass: return (N, C) probabilities
             calibrated_probs = torch.softmax(calibrated_logits, dim=1).numpy()
-            y_prob_true = calibrated_probs[np.arange(len(y_true)), y_true]
 
     elif method_calibration == 'platt':
         model = LogisticRegression(C=0.01, class_weight='balanced', max_iter=1000)
-        model.fit(y_scores.reshape(-1, 1), y_true)
-        calibrated_probs = model.predict_proba(y_scores.reshape(-1, 1))[:, 1]
-        y_prob_true = calibrated_probs
+        model.fit(y_scores_input.reshape(-1, 1), y_true)
+        calibrated_probs = model.predict_proba(y_scores_input.reshape(-1, 1))[:, 1]
 
     elif method_calibration == 'isotonic':
         model = IsotonicRegression(out_of_bounds='clip')
-        model.fit(y_scores, y_true)
-        calibrated_probs = model.predict(y_scores)
-        y_prob_true = calibrated_probs
+        model.fit(y_scores_input, y_true)
+        calibrated_probs = model.predict(y_scores_input)
 
     else:
         raise ValueError("Invalid method. Choose 'platt', 'isotonic', or 'temperature'.")
 
-    # Compute Brier score
-    if y_scores.ndim > 1 and y_scores.shape[1] > 1:
-        # Multiclass: compare true class probability
+    # Compute Brier score (only for binary classification)
+    if is_binary:
+        # For binary, calibrated_probs is (N,) - probability of positive class
+        y_prob_true = calibrated_probs
         brier = brier_score_loss(y_true, y_prob_true)
+        print(f"Brier Score Loss ({method_calibration}): {brier:.4f}")
     else:
-        # Binary
-        brier = brier_score_loss(y_true, y_prob_true)
-    
-    print(f"Brier Score Loss ({method_calibration}): {brier:.4f}")
+        # For multiclass, calibrated_probs is (N, C) - no Brier score
+        print(f"Calibration complete ({method_calibration}) - Brier score not computed for multiclass")
 
-    return y_prob_true, model
+    return calibrated_probs, model
 
 
 def distance_to_hard_labels_computation(predictions):

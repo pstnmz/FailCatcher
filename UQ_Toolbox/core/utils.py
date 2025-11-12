@@ -67,7 +67,7 @@ class _CachedRandAugDataset(Dataset):
         self.augmentations = augmentations if isinstance(augmentations, (list, tuple)) else [augmentations]
     
 
-def evaluate_models_on_loader(models, data_loader, device, numpy_av=True):
+def evaluate_models_on_loader(models, data_loader, device, numpy_av=True, return_logits=False):
     """
     Evaluate ensemble of models on a DataLoader.
     
@@ -76,20 +76,27 @@ def evaluate_models_on_loader(models, data_loader, device, numpy_av=True):
         data_loader: DataLoader for evaluation
         device: torch.device
         numpy_av: If True, use numpy for final averaging (matches tr.evaluate_model exactly)
+        return_logits: If True, also return raw logits for temperature scaling
     
     Returns:
         tuple: (y_true, y_scores, predicted_classes, correct_idx, incorrect_idx, individual_scores)
+               If return_logits=True: also includes logits as 7th element
     
     Example:
         >>> y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores = \
         ...     evaluate_models_on_loader(models, test_loader, device)
         >>> print(f"Accuracy: {len(correct_idx) / len(y_true):.3f}")
+        
+        >>> # With logits for temperature scaling
+        >>> y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores, logits = \
+        ...     evaluate_models_on_loader(models, test_loader, device, return_logits=True)
     """
     for model in models:
         model.eval()
     
     all_labels = []
-    all_predictions = []  # List of [B, K, C] tensors
+    all_predictions = []  # List of [B, K, C] tensors (probabilities)
+    all_logits = [] if return_logits else None  # List of [B, K, C] tensors (raw logits)
     
     with torch.no_grad():
         for batch in data_loader:
@@ -101,13 +108,17 @@ def evaluate_models_on_loader(models, data_loader, device, numpy_av=True):
                 images, labels = batch[0].to(device), batch[1]
             
             # Get predictions from all models for this batch
-            batch_preds = get_batch_predictions(models, images, device)  # [B, K, C]
+            batch_preds, batch_logits = get_batch_predictions(models, images, device, return_logits=True)  # [B, K, C]
             all_predictions.append(batch_preds)
+            if return_logits:
+                all_logits.append(batch_logits)
             all_labels.append(labels)
     
     # Concatenate along batch dimension (dimension 0)
     all_predictions = torch.cat(all_predictions, dim=0)  # [N, K, C]
     all_labels = torch.cat(all_labels, dim=0)  # [N]
+    if return_logits:
+        all_logits = torch.cat(all_logits, dim=0)  # [N, K, C]
     
     if numpy_av:
         # Exact match with tr.evaluate_model: use numpy for averaging
@@ -119,6 +130,10 @@ def evaluate_models_on_loader(models, data_loader, device, numpy_av=True):
         y_scores = avg_probs_np
         predicted_classes = predicted_classes_np
         individual_scores = all_predictions_np
+        
+        if return_logits:
+            logits_np = all_logits.cpu().numpy()  # [N, K, C]
+            avg_logits_np = np.mean(logits_np, axis=1)  # [N, C]
     else:
         # Original torch-based method
         avg_probs = average_predictions(all_predictions)  # [N, C]
@@ -128,11 +143,93 @@ def evaluate_models_on_loader(models, data_loader, device, numpy_av=True):
         y_scores = avg_probs.cpu().numpy()
         predicted_classes = predicted_classes.cpu().numpy().ravel()
         individual_scores = all_predictions.cpu().numpy()
+        
+        if return_logits:
+            avg_logits_np = all_logits.mean(dim=1).cpu().numpy()  # [N, C]
     
     correct_idx = np.where(predicted_classes == y_true)[0].tolist()
     incorrect_idx = np.where(predicted_classes != y_true)[0].tolist()
     
-    return y_true, y_scores, predicted_classes, correct_idx, incorrect_idx, individual_scores
+    if return_logits:
+        return y_true, y_scores, predicted_classes, correct_idx, incorrect_idx, individual_scores, avg_logits_np
+    else:
+        return y_true, y_scores, predicted_classes, correct_idx, incorrect_idx, individual_scores
+
+
+def apply_calibration(y_scores, calibration_model, method='platt', logits=None):
+    """
+    Apply fitted calibration model to new predictions.
+    
+    Args:
+        y_scores: Predicted probabilities [N, C] or [N]
+        calibration_model: Fitted calibration model (from posthoc_calibration)
+        method: 'platt', 'isotonic', or 'temperature'
+        logits: Raw logits [N, C] or [N] (required for temperature scaling)
+    
+    Returns:
+        np.ndarray: Calibrated probabilities [N] or [N, C]
+    
+    Example:
+        >>> # Fit on calibration set
+        >>> from UQ_Toolbox.methods.distance import posthoc_calibration
+        >>> _, calib_model = posthoc_calibration(y_calib, labels_calib, 'platt')
+        
+        >>> # Apply to test set
+        >>> calibrated_test = apply_calibration(y_test, calib_model, 'platt')
+        
+        >>> # Temperature scaling (requires logits)
+        >>> _, temp_model = posthoc_calibration(logits_calib, labels_calib, 'temperature')
+        >>> calibrated_test = apply_calibration(y_test, temp_model, 'temperature', logits=logits_test)
+    """
+    if method == 'temperature':
+        if logits is None:
+            raise ValueError("Temperature scaling requires raw logits. Pass logits=... argument.")
+        
+        # Temperature scaling: apply TemperatureScaler to logits
+        logits_tensor = torch.from_numpy(logits).float()
+        if logits_tensor.ndim == 1:
+            logits_tensor = logits_tensor.unsqueeze(1)
+        
+        calibrated_logits = calibration_model(logits_tensor).detach()
+        
+        # Convert to probabilities
+        if calibrated_logits.ndim == 1 or calibrated_logits.shape[1] == 1:
+            # Binary
+            calibrated_scores = torch.sigmoid(calibrated_logits).numpy().squeeze()
+        else:
+            # Multiclass
+            calibrated_scores = torch.softmax(calibrated_logits, dim=1).numpy()
+    
+    elif method == 'platt':
+        # Platt scaling: apply LogisticRegression
+        if y_scores.ndim == 1:
+            y_scores_input = y_scores.reshape(-1, 1)
+        elif y_scores.shape[1] == 2:
+            # Binary: use probability of positive class
+            y_scores_input = y_scores[:, 1].reshape(-1, 1)
+        else:
+            # Multiclass: use max probability
+            y_scores_input = np.max(y_scores, axis=1).reshape(-1, 1)
+        
+        calibrated_scores = calibration_model.predict_proba(y_scores_input)[:, 1]
+    
+    elif method == 'isotonic':
+        # Isotonic regression: apply IsotonicRegression
+        if y_scores.ndim == 1:
+            y_scores_input = y_scores
+        elif y_scores.shape[1] == 2:
+            # Binary: use probability of positive class
+            y_scores_input = y_scores[:, 1]
+        else:
+            # Multiclass: use max probability
+            y_scores_input = np.max(y_scores, axis=1)
+        
+        calibrated_scores = calibration_model.predict(y_scores_input)
+    
+    else:
+        raise ValueError(f"Unknown calibration method: {method}")
+    
+    return calibrated_scores
 
 
 def build_monai_cache_dataset(dataset, cache_rate=1.0, num_workers=0):
@@ -174,7 +271,7 @@ def get_prediction(model, image, device, use_amp=True):
     # keep predictions on device; caller can .detach().cpu() as needed
     return prediction
 
-def get_batch_predictions(models, images, device):
+def get_batch_predictions(models, images, device, return_logits=False):
     """
     Get predictions from multiple models for a batch of images.
     
@@ -182,30 +279,38 @@ def get_batch_predictions(models, images, device):
         models: List of PyTorch models or single model
         images: Batch of images [B, C, H, W]
         device: torch.device
+        return_logits: If True, also return raw logits
     
     Returns:
         torch.Tensor: Predictions of shape [B, K, C] where:
             B = batch size
             K = number of models
             C = number of classes
+        If return_logits=True: tuple of (probs, logits)
     
     Example:
         >>> models = [model1, model2, model3]
         >>> images = torch.randn(32, 3, 224, 224)
         >>> preds = get_batch_predictions(models, images, device)
         >>> preds.shape  # torch.Size([32, 3, num_classes])
+        
+        >>> preds, logits = get_batch_predictions(models, images, device, return_logits=True)
     """
     # Handle single model case
     if not isinstance(models, list):
         models = [models]
     
     batch_predictions = []
+    batch_logits = [] if return_logits else None
     
     for model in models:
         model.eval()
         with torch.no_grad():
             images = images.to(device)
             logits = model(images)
+            
+            if return_logits:
+                batch_logits.append(logits)
             
             # Convert logits to probabilities
             if logits.shape[1] == 1:
@@ -223,38 +328,37 @@ def get_batch_predictions(models, images, device):
     batch_predictions = torch.stack(batch_predictions, dim=0)  # [K, B, C]
     batch_predictions = batch_predictions.permute(1, 0, 2)  # [B, K, C]
     
-    return batch_predictions
+    if return_logits:
+        batch_logits = torch.stack(batch_logits, dim=0)  # [K, B, C]
+        batch_logits = batch_logits.permute(1, 0, 2)  # [B, K, C]
+        return batch_predictions, batch_logits
+    else:
+        return batch_predictions
 
 def average_predictions(batch_predictions):
     """
-    Average predictions across models by first converting per-model logits to
-    probabilities (sigmoid for binary, softmax for multiclass) then averaging
-    the probabilities. Simpler API: activation is inferred automatically.
+    Average predictions across models.
 
     Args:
-        batch_predictions (torch.Tensor or array-like): shape [M, N, C] or [M, N]
-            where M = number of models, N = number of samples, C = num classes
+        batch_predictions (torch.Tensor or array-like): shape [B, K, C]
+            where B = batch size, K = number of models, C = num classes
+            Should already be probabilities (from get_batch_predictions)
 
     Returns:
-        torch.Tensor: Averaged probabilities, shape [N, C] (or [N,1] for binary).
+        torch.Tensor: Averaged probabilities, shape [B, C]
     """
     if not torch.is_tensor(batch_predictions):
         batch_predictions = torch.as_tensor(batch_predictions)
 
-    # normalize shape -> [M, N, C]
     if batch_predictions.dim() == 2:
-        batch_predictions = batch_predictions.unsqueeze(-1)
-    if batch_predictions.dim() != 3:
-        raise ValueError(f"Expected batch_predictions to be 3D [M,N,C], got {tuple(batch_predictions.shape)}")
-
-    M, N, C = batch_predictions.shape
-    # infer activation: binary -> sigmoid, multiclass -> softmax
-    if C == 1:
-        probs = torch.sigmoid(batch_predictions)
+        # [B, C] - single model, return as-is
+        return batch_predictions
+    elif batch_predictions.dim() == 3:
+        # [B, K, C] - average across models (dim=1)
+        averaged = batch_predictions.mean(dim=1)  # [B, C]
+        return averaged
     else:
-        probs = torch.softmax(batch_predictions, dim=-1)
-    averaged = probs.mean(dim=0)  # [N, C]
-    return averaged
+        raise ValueError(f"Expected batch_predictions to be 2D or 3D, got {tuple(batch_predictions.shape)}")
 
 
 def compute_stds(averaged_predictions):
@@ -262,16 +366,26 @@ def compute_stds(averaged_predictions):
     Compute standard deviations for the predictions.
 
     Args:
-        averaged_predictions (torch.Tensor): Averaged predictions.
+        averaged_predictions (torch.Tensor): Predictions across augmentations.
+            Expected shape: [N, K, C] where N=samples, K=augmentations, C=classes
 
     Returns:
-        list: List of standard deviations for each sample.
+        list: List of standard deviations for each sample (length N).
     """
-    if averaged_predictions.ndim == 2 or averaged_predictions.shape[2] == 1:
-        stds = torch.std(averaged_predictions, dim=1).squeeze().tolist()  # Binary classification: shape (num_models, num_samples)
+    # averaged_predictions should be [N, K, C]
+    if not isinstance(averaged_predictions, torch.Tensor):
+        averaged_predictions = torch.as_tensor(averaged_predictions)
+    
+    if averaged_predictions.ndim == 2:
+        # [N, K] - binary or per-class already averaged
+        stds = torch.std(averaged_predictions, dim=1).tolist()
     elif averaged_predictions.ndim == 3:
-        stds_per_class = torch.std(averaged_predictions, dim=1).squeeze()  # Multiclass classification: shape (num_models, num_samples, num_classes)
-        stds = torch.mean(stds_per_class, dim=1).tolist()
+        # [N, K, C] - compute std across augmentations (dim=1), then average across classes
+        stds_per_class = torch.std(averaged_predictions, dim=1)  # [N, C]
+        stds = torch.mean(stds_per_class, dim=1).tolist()  # [N]
+    else:
+        raise ValueError(f"Expected averaged_predictions to have 2 or 3 dimensions, got {averaged_predictions.ndim}")
+    
     return stds
 
 def _dl_worker_init(_):
