@@ -154,43 +154,29 @@ class GPSMethod(UQMethod):
 
 def extract_gps_augmentations_info(policies):
     """
-    Parse N, M and policy ops from GPS augmentation filenames.
-    
-    Expected format: N{N}M{M}__{opA}_np.float64_{magA}__{opB}_np.float64_{magB}__.npz
-    
-    Args:
-        policies: Single filename (str) or list of filenames
-    
-    Returns:
-        tuple: (N, M, formatted_policies)
-            - N: Number of ops per augmentation
-            - M: Magnitude parameter
-            - formatted_policies: List of policies, each as [(op_idx, magnitude), ...]
-    
-    Example:
-        >>> n, m, policies = extract_gps_augmentations_info([
-        ...     'N2M45__7_np.float64_23__13_np.float64_-15__.npz'
-        ... ])
-        >>> # n=2, m=45, policies=[[(7, 23), (13, -15)]]
+    Parse N, M and policy ops from filenames of form:
+      N{N}M{M}__{A}_np.float64_{magA}__{B}_np.float64_{magB}__.npz
+    Returns: N (int), M (int), [ [ (op_index, magnitude), ... ], ... ]
     """
     if not policies:
         return None, None, []
     if isinstance(policies, str):
         policies = [policies]
 
-    # Get valid op index range from BetterRandAugment
+    # Determine valid op index range from BetterRandAugment
     try:
         _probe = BetterRandAugment(n=2, m=45, rand_m=True, resample=False, image_size=51)
         max_valid_index = len(_probe.augment_list) - 1
     except Exception:
-        max_valid_index = None  # accept any index if probe fails
+        max_valid_index = None  # fall back to accepting provided indices
 
-    # Regex for N{n}_?M{m} and op pairs
+    # Regex components for both styles (with or without underscore between N and M)
     nm_regex = re.compile(r'N(?P<N>\d+)_?M(?P<M>\d+)')
     pair_regex = re.compile(r'__(?P<idx>\d+)_np\.float64_(?P<mag>-?\d+(?:\.\d+)?)')
 
     formatted_policies = []
-    N_global, M_global = None, None
+    N_global = None
+    M_global = None
 
     for fname in policies:
         base = os.path.basename(fname)
@@ -201,11 +187,12 @@ def extract_gps_augmentations_info(policies):
         if nm_match:
             N_val = int(nm_match.group('N'))
             M_val = int(nm_match.group('M'))
-            if N_global is None:
+            if N_global is None:  # record from first file
                 N_global, M_global = N_val, M_val
         else:
+            # Default if missing
             if N_global is None:
-                N_global, M_global = 2, 45  # defaults
+                N_global, M_global = 2, 45
 
         # Extract all (idx, magnitude) pairs
         pairs = []
@@ -214,170 +201,125 @@ def extract_gps_augmentations_info(policies):
             mag_raw = float(m.group('mag'))
             mag_cast = int(mag_raw) if abs(mag_raw - int(mag_raw)) < 1e-6 else mag_raw
 
-            # Validate index range
             if max_valid_index is not None and (idx_raw < 0 or idx_raw > max_valid_index):
+                # Strict: raise or clamp. Here we clamp and warn.
                 idx_clamped = idx_raw % (max_valid_index + 1)
-                print(f"Warning: Policy index {idx_raw} out of range [0,{max_valid_index}]; remapped to {idx_clamped}")
+                print(f"Policy index {idx_raw} out of range [0,{max_valid_index}]; remapped to {idx_clamped}")
                 idx_raw = idx_clamped
 
             pairs.append((idx_raw, mag_cast))
 
         if not pairs:
-            print(f"Warning: Could not parse policy ops from '{base}'")
-        
+            print(f"Warning: could not parse policy ops from '{base}'. Expected pattern N*M*__A_np.float64_mag__B_np.float64_mag__")
         formatted_policies.append(pairs)
 
-    # Set defaults if not found
+    # Ensure global N/M defaults
     if N_global is None:
         N_global = 2
     if M_global is None:
         M_global = 45
-
     return N_global, M_global, formatted_policies
 
 
-def TTA(transformations, models, dataset, device, nb_augmentations=10,
-        usingBetterRandAugment=False, n=2, m=45, image_normalization=False,
-        nb_channels=1, mean=None, std=None, image_size=51, batch_size=None):
+def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, batch_size=None):
     """
-    Perform Test-Time Augmentation (TTA) to quantify prediction uncertainty.
-    
-    Computes per-sample standard deviation of predictions across multiple augmentations.
-    
-    Args:
-        transformations: Augmentation policies (list of [(op_idx, mag), ...]) or None (random)
-        models: Single model or list of models
-        dataset: PyTorch dataset
-        device: torch.device
-        nb_augmentations: Number of augmentations (used if transformations=None)
-        usingBetterRandAugment: Whether to use BetterRandAugment (vs standard transforms)
-        n: Number of ops per augmentation (BetterRandAugment)
-        m: Magnitude parameter (BetterRandAugment)
-        image_normalization: Whether to normalize images
-        nb_channels: Number of channels (1 or 3)
-        mean: Normalization mean
-        std: Normalization std
-        image_size: Input image size
-        batch_size: Batch size for DataLoader
-    
-    Returns:
-        tuple: (stds, averaged_predictions)
-            - stds: Per-sample uncertainty (N,)
-            - averaged_predictions: Mean predictions across augmentations (N, K, C)
-                where K = num_augmentations, C = num_classes
-    
-    Raises:
-        ValueError: If transformations is not a list when usingBetterRandAugment=True
-    
-    Example:
-        >>> # Random augmentations
-        >>> stds, preds = TTA(None, model, dataset, device, nb_augmentations=10)
-        
-        >>> # Fixed policies (GPS)
-        >>> policies = [[(7, 23), (13, -15)], [(2, 10), (5, 5)]]
-        >>> stds, preds = TTA(policies, model, dataset, device, 
-        ...                    usingBetterRandAugment=True, n=2, m=45)
-    """
-    if usingBetterRandAugment and transformations is not None and not isinstance(transformations, list):
-        raise ValueError("transformations must be a list when usingBetterRandAugment=True")
-    
-    if usingBetterRandAugment and transformations is not None:
-        nb_augmentations = len(transformations)
+    Perform Test-Time Augmentation (TTA) on a batch of images using specified transformations and models.
 
+    Args:
+        transformations (callable or list): Transformations to apply to each image. Must be a list when usingBetterRandAugment is True.
+        models (torch.nn.Module or list): Model or list of models to use for predictions.
+        data_loader (torch.utils.data.DataLoader): DataLoader providing the images.
+        device (torch.device): Device to run the models on (e.g., 'cpu' or 'cuda').
+        nb_augmentations (int, optional): Number of augmentations to apply per image. Defaults to 10.
+        usingBetterRandAugment (bool, optional): If True, use BetterRandAugment with provided policies. Defaults to False.
+        n (int, optional): Number of augmentation transformations to apply when using BetterRandAugment. Defaults to 2.
+        m (int, optional): Magnitude of the augmentation transformations when using BetterRandAugment. Defaults to 45.
+        batch_norm (bool, optional): Whether to use batch normalization. Defaults to False.
+        nb_channels (int, optional): Number of channels in the input images. Defaults to 1.
+        mean (list or None, optional): Mean for normalization. Defaults to None.
+        std (list or None, optional): Standard deviation for normalization. Defaults to None.
+        image_size (int, optional): Size of the input images. Defaults to 51.
+        softmax_application (bool, optional): If True, applies softmax to the prediction. Defaults to False.
+
+    Returns:
+        tuple: A tuple containing:
+            - stds (list): List of standard deviations for each sample.
+            - averaged_predictions (torch.Tensor): Averaged predictions for each sample.
+    """
+    if usingBetterRandAugment and not isinstance(transformations, list):
+        raise ValueError("Transformations must be a list when usingBetterRandAugment.")
+    if usingBetterRandAugment:
+        nb_augmentations = len(transformations)
     with torch.no_grad():
         predictions = []
-        
         if usingBetterRandAugment and isinstance(transformations, list) and all(isinstance(t, list) for t in transformations):
-            # Multiple policies: process each policy separately
+            # Multiple policies: process each policy one by one
             for transformation in transformations:
+                # Apply augmentations for this policy, get DataLoader
                 augmented_inputs, _ = apply_augmentations(
-                    dataset, 1, usingBetterRandAugment, n, m, image_normalization,
-                    nb_channels, mean, std, image_size, transformation, batch_size=batch_size
+                    dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformation, batch_size=batch_size
                 )
-                # augmented_inputs: [1, N, C, H, W]
+                # augmented_inputs shape: [1, batch_size, C, H, W]
                 dataset_aug = TensorDataset(augmented_inputs[0])
                 loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
-                
                 all_preds = []
                 for batch in loader:
                     batch_predictions = get_batch_predictions(models, batch[0], device)
                     avg_preds = average_predictions(batch_predictions)
                     all_preds.append(avg_preds)
-                
                 predictions.append(torch.cat(all_preds, dim=0))
-            
-            # Stack: [num_policies, N, num_classes] -> [N, num_policies, num_classes]
-            averaged_predictions = torch.stack(predictions, dim=0).permute(1, 0, 2)
+            # Stack predictions: [num_policies, batch_size, num_classes]
+            averaged_predictions = torch.stack(predictions, dim=0).permute(1, 0, 2)  # [batch_size, num_policies, num_classes]
             stds = compute_stds(averaged_predictions)
-        
         else:
-            # Single policy or standard TTA: process each augmentation
+            # Single policy or standard TTA: process each augmentation one by one
             for aug_idx in range(nb_augmentations):
+                # Apply augmentation for this index
                 augmented_inputs = apply_augmentations(
-                    dataset, 1, usingBetterRandAugment, n, m, image_normalization,
-                    nb_channels, mean, std, image_size, transformations, batch_size=batch_size
+                    dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations, batch_size=batch_size
                 )
-                # augmented_inputs: [1, N, C, H, W]
+                # augmented_inputs shape: [1, batch_size, C, H, W]
                 dataset_aug = TensorDataset(augmented_inputs[0])
                 loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
-                
                 all_preds = []
                 for batch in loader:
                     batch_predictions = get_batch_predictions(models, batch[0], device)
                     avg_preds = average_predictions(batch_predictions)
                     all_preds.append(avg_preds)
-                
                 predictions.append(torch.cat(all_preds, dim=0))
-            
-            # Stack: [nb_augmentations, N, num_classes] -> [N, nb_augmentations, num_classes]
-            averaged_predictions = torch.stack(predictions, dim=0).permute(1, 0, 2)
+            # Stack predictions: [nb_augmentations, batch_size, num_classes]
+            averaged_predictions = torch.stack(predictions, dim=0).permute(1, 0, 2)  # [batch_size, nb_augmentations, num_classes]
             stds = compute_stds(averaged_predictions)
     
     return stds, averaged_predictions
 
 
-def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
-                       image_normalization, nb_channels, mean, std, image_size,
-                       transformations=None, batch_size=None, cached_dataset=None,
-                       dataloader_workers=None):
+def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None, cached_dataset=None, dataloader_workers=None):
     """
-    Apply augmentations to dataset images.
-    
+    Apply augmentations to the images.
+
     Args:
-        dataset: PyTorch dataset
-        nb_augmentations: Number of augmentations to apply
-        usingBetterRandAugment: Whether to use BetterRandAugment
-        n: Number of ops per augmentation
-        m: Magnitude parameter
-        image_normalization: Whether to normalize images
-        nb_channels: Number of channels (1 or 3)
-        mean: Normalization mean
-        std: Normalization std
-        image_size: Input image size
-        transformations: List of policies [(op_idx, mag), ...] or None (random)
-        batch_size: Batch size for DataLoader
-        cached_dataset: Optional CacheDataset for faster loading
-        dataloader_workers: Number of DataLoader workers
-    
+        images (torch.Tensor): Batch of images.
+        transformations (callable or list): Transformations to apply to each image.
+        nb_augmentations (int): Number of augmentations to apply per image.
+        usingBetterRandAugment (bool): If True, use BetterRandAugment with provided policies.
+        n (int): Number of augmentation transformations to apply when using BetterRandAugment.
+        m (int): Magnitude of the augmentation transformations when using BetterRandAugment.
+        batch_norm (bool): Whether to use batch normalization.
+        nb_channels (int): Number of channels in the input images.
+        mean (list or None): Mean for normalization.
+        std (list or None): Standard deviation for normalization.
+        image_size (int): Size of the input images.
+        cached_dataset (CacheDataset or None): Pre-cached dataset to speed up augmentation.
+        dataloader_workers (int or None): Number of workers for the augmentation DataLoader.
+
     Returns:
-        If usingBetterRandAugment=True: (augmented_inputs, augmentations)
-        Otherwise: augmented_inputs
-        
-        augmented_inputs: torch.Tensor of shape [K, N, C, H, W]
-            where K = nb_augmentations, N = dataset size
-    
-    Example:
-        >>> # Random augmentations
-        >>> aug_imgs, aug_transforms = apply_augmentations(
-        ...     dataset, 5, True, 2, 45, False, 1, None, None, 224
-        ... )
-        >>> aug_imgs.shape  # [5, 1000, 1, 224, 224]
+        torch.Tensor: Augmented images.
     """
     augmented_inputs = []
     worker_count = 4 if dataloader_workers is None else dataloader_workers
 
     def _get_loader(augmentation):
-        """Helper to create DataLoader with specified augmentation."""
         if cached_dataset is not None:
             aug_dataset = _CachedRandAugDataset(cached_dataset, augmentation)
             return DataLoader(
@@ -387,15 +329,11 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                 num_workers=worker_count,
                 pin_memory=True,
             )
-        
-        # Modify dataset transform in-place
         if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
-            # Handle ConcatDataset
             for subds in dataset.dataset.datasets:
                 subds.transform = augmentation
         else:
             dataset.transform = augmentation
-        
         return DataLoader(
             dataset=dataset,
             batch_size=batch_size,
@@ -403,88 +341,66 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
             num_workers=worker_count,
             pin_memory=True,
         )
-
+    
     if usingBetterRandAugment:
-        # Build BetterRandAugment policies
-        if isinstance(transformations, list) and len(transformations) > 0:
-            # Fixed policies provided
-            rand_aug_policies = [
-                BetterRandAugment(n=n, m=m, resample=False, transform=policy,
-                                  verbose=True, randomize_sign=False, image_size=image_size)
-                for policy in transformations
-            ]
-        else:
-            # Random policies
-            rand_aug_policies = [
-                BetterRandAugment(n, m, True, False, randomize_sign=False, image_size=image_size)
-                for _ in range(nb_augmentations)
-            ]
-
-        # Build full augmentation pipelines
-        augmentations = [
-            transforms.Compose([
-                EnsurePIL(),
-                transforms.Lambda(lambda img: img.convert("RGB")),
-                *([to_3_channels] if nb_channels == 1 else []),
-                rand_aug,
-                *([to_1_channel] if nb_channels == 1 else []),
-                transforms.PILToTensor(),
-                transforms.ConvertImageDtype(torch.float),
-                *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
-            ]) for rand_aug in rand_aug_policies
-        ]
-
-        # Apply augmentations
-        if cached_dataset is not None:
-            # Batch processing: all augmentations at once
-            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
-            loader = DataLoader(
-                dataset=aug_dataset, batch_size=batch_size, shuffle=False,
-                num_workers=worker_count, pin_memory=True
-            )
+        if isinstance(transformations, list):
+            rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=True, randomize_sign=False, image_size=image_size) for policy in transformations]
             
+        elif transformations is False:
+            rand_aug_policies = [BetterRandAugment(n, m, True, False, randomize_sign=False, image_size=image_size) for _ in range(nb_augmentations)] 
+
+        # Ensure input is PIL, run randaugment (expects PIL), then convert to tensor and normalize.
+        augmentations = [transforms.Compose([
+                    EnsurePIL(),                                 # convert tensor/ndarray -> PIL if needed
+                    transforms.Lambda(lambda img: img.convert("RGB")),  # ensure RGB for randaug
+                    *([to_3_channels] if nb_channels == 1 else []),      # if needed expand channels (no-op for RGB)
+                    rand_aug,                                            # BetterRandAugment expects PIL Image
+                    *([to_1_channel] if nb_channels == 1 else []),       # convert back to single channel if needed
+                    transforms.PILToTensor(),                            # PIL -> Tensor (uint8 -> [0,255] -> Tensor)
+                    transforms.ConvertImageDtype(torch.float),          # ensure float Tensor
+                    *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
+                ]) for rand_aug in rand_aug_policies]
+        
+        # If we have a cached_dataset, apply all augmentations in a single pass:
+        if cached_dataset is not None:
+            # _CachedRandAugDataset will return stacked KxC xH xW per sample, DataLoader -> B x K x C x H x W
+            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            loader = DataLoader(dataset=aug_dataset, batch_size=batch_size, shuffle=False, num_workers=worker_count, pin_memory=True)
             batches = []
             for batch in loader:
-                imgs_stacked = batch[0]  # [B, K, C, H, W]
+                imgs_stacked = batch[0]  # shape: [B, K, C, H, W]
                 batches.append(imgs_stacked)
-            
             if len(batches) == 0:
-                raise RuntimeError("Cached loader returned no data")
-            
-            all_imgs = torch.cat(batches, dim=0)  # [N, K, C, H, W]
-            augmented_inputs = all_imgs.permute(1, 0, 2, 3, 4)  # [K, N, C, H, W]
-        
+                raise RuntimeError("cached loader returned no data")
+            all_imgs = torch.cat(batches, dim=0)  # [total_B, K, C, H, W]
+            # permute to [K, B, C, H, W] so callers that expect per-augmentation stack keep working
+            augmented_inputs = all_imgs.permute(1, 0, 2, 3, 4)
         else:
-            # Sequential processing: one augmentation at a time
+            # fallback: previous behaviour (iterate once per augmentation)
             for i, augmentation in enumerate(augmentations):
-                print(f"Applying augmentation {i+1}/{len(augmentations)}")
-                data_loader = _get_loader(augmentation)
-                
                 augmented_inputs_batch = []
+                print(f"Applying augmentation n : {i}")
+                data_loader = _get_loader(augmentation)
                 for batch in data_loader:
                     augmented_images = batch[0]
                     augmented_inputs_batch.append(augmented_images)
-                
                 augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
-            
-            augmented_inputs = torch.stack(augmented_inputs, dim=0)  # [K, N, C, H, W]
+            augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
 
-        return augmented_inputs, augmentations
-    
     else:
-        # Standard (non-RandAugment) transformations
         for i in range(nb_augmentations):
-            print(f"Applying augmentation {i+1}/{nb_augmentations}")
-            data_loader = _get_loader(transformations)
-            
             augmented_inputs_batch = []
+            print(f"Applying augmentation n : {i}")
+            data_loader = _get_loader(transformations)
             for batch in data_loader:
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
-            
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
-        
-        augmented_inputs = torch.stack(augmented_inputs, dim=0)  # [K, N, C, H, W]
+        augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
+    
+    if usingBetterRandAugment : 
+        return augmented_inputs, augmentations
+    else:
         return augmented_inputs
 
 

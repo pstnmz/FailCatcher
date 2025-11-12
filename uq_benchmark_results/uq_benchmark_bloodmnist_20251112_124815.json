@@ -1,0 +1,36 @@
+{
+  "flag": "bloodmnist",
+  "timestamp": "20251112_124815",
+  "task_type": "multi-class",
+  "num_classes": 8,
+  "test_size": 3421,
+  "calib_size": 2735,
+  "test_accuracy": 0.9900613855597779,
+  "calibration_method": "temperature",
+  "methods": {
+    "MSR": {
+      "time_seconds": 0.0004250758793205023,
+      "auc": 0.9294317372653224,
+      "threshold": 0.042088791728019714,
+      "balanced_accuracy": 0.9014658121884715,
+      "specificity": 0.8823529411764706,
+      "sensitivity": 0.9205786832004724
+    },
+    "MSR_temperature": {
+      "time_seconds": 0.9210080269258469,
+      "auc": 0.9335391375327811,
+      "threshold": 0.03897818177938461,
+      "balanced_accuracy": 0.9182948644471074,
+      "specificity": 0.8823529411764706,
+      "sensitivity": 0.9542367877177443
+    },
+    "Ensembling": {
+      "time_seconds": 0.0021546618081629276,
+      "auc": 0.9252852602511332,
+      "threshold": 0.014035658947506963,
+      "balanced_accuracy": 0.8998419562687785,
+      "specificity": 0.8823529411764706,
+      "sensitivity": 0.9173309713610865
+    }
+  }
+}
