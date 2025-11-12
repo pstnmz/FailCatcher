@@ -26,7 +26,7 @@ import seaborn as sns
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 
 # Import UQ_Toolbox
-import UQ_Toolbox.UQ_toolbox as uq
+import FailCatcher.UQ_toolbox as uq
 from medMNIST.utils import train_load_datasets_resnet as tr
 
 
@@ -83,8 +83,8 @@ def compute_msr_calibrated(y_scores_test, y_true_test, y_scores_calib, y_true_ca
     Returns:
         np.ndarray: MSR scores for calibrated predictions
     """
-    from UQ_Toolbox.methods.distance import posthoc_calibration
-    from UQ_Toolbox.core.utils import apply_calibration
+    from FailCatcher.methods.distance import posthoc_calibration
+    from FailCatcher.core.utils import apply_calibration
     
     # Step 1: Fit calibration on calibration set
     if method == 'temperature':
