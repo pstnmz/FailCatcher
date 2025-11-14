@@ -221,62 +221,74 @@ def extract_gps_augmentations_info(policies):
     return N_global, M_global, formatted_policies
 
 
-def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, batch_size=None):
+def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, batch_size=None, use_monai_cache=False, cache_rate=1.0, cache_num_workers=0, dataloader_workers=None, is_gps_mode=False):
     """
     Perform Test-Time Augmentation (TTA) on a batch of images using specified transformations and models.
-
-    Args:
-        transformations (callable or list): Transformations to apply to each image. Must be a list when usingBetterRandAugment is True.
-        models (torch.nn.Module or list): Model or list of models to use for predictions.
-        data_loader (torch.utils.data.DataLoader): DataLoader providing the images.
-        device (torch.device): Device to run the models on (e.g., 'cpu' or 'cuda').
-        nb_augmentations (int, optional): Number of augmentations to apply per image. Defaults to 10.
-        usingBetterRandAugment (bool, optional): If True, use BetterRandAugment with provided policies. Defaults to False.
-        n (int, optional): Number of augmentation transformations to apply when using BetterRandAugment. Defaults to 2.
-        m (int, optional): Magnitude of the augmentation transformations when using BetterRandAugment. Defaults to 45.
-        batch_norm (bool, optional): Whether to use batch normalization. Defaults to False.
-        nb_channels (int, optional): Number of channels in the input images. Defaults to 1.
-        mean (list or None, optional): Mean for normalization. Defaults to None.
-        std (list or None, optional): Standard deviation for normalization. Defaults to None.
-        image_size (int, optional): Size of the input images. Defaults to 51.
-        softmax_application (bool, optional): If True, applies softmax to the prediction. Defaults to False.
-
-    Returns:
-        tuple: A tuple containing:
-            - stds (list): List of standard deviations for each sample.
-            - averaged_predictions (torch.Tensor): Averaged predictions for each sample.
     """
     if usingBetterRandAugment and not isinstance(transformations, list):
         raise ValueError("Transformations must be a list when usingBetterRandAugment.")
     if usingBetterRandAugment:
         nb_augmentations = len(transformations)
+    
+    # Build cached dataset if requested
+    cached_dataset = None
+    if use_monai_cache:
+        cached_dataset = build_monai_cache_dataset(dataset, cache_rate=cache_rate, num_workers=cache_num_workers)
+    
     with torch.no_grad():
         predictions = []
-        if usingBetterRandAugment and isinstance(transformations, list) and all(isinstance(t, list) for t in transformations):
-            # Multiple policies: process each policy one by one
-            for transformation in transformations:
-                # Apply augmentations for this policy, get DataLoader
+        if is_gps_mode:
+            # GPS mode: transformations is [[group1_policies], [group2_policies], [group3_policies]]
+            print(f"  GPS mode: processing {len(transformations)} policy groups")
+            
+            all_groups_stds = []  # collect per-group std arrays (N,) or (N,C->reduced)
+            for group_idx, policy_group in enumerate(transformations):
+                print(f"  Applying policy group {group_idx + 1}/{len(transformations)} ({len(policy_group)} policies)...")
+                
+                # Ask apply_augmentations to produce all augmentations for this group:
+                # augmented_inputs shape expected: [K, N, C, H, W] where K = len(policy_group)
                 augmented_inputs, _ = apply_augmentations(
-                    dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformation, batch_size=batch_size
+                    dataset, len(policy_group), usingBetterRandAugment, n, m, image_normalization,
+                    nb_channels, mean, std, image_size, policy_group, batch_size=batch_size
                 )
-                # augmented_inputs shape: [1, batch_size, C, H, W]
-                dataset_aug = TensorDataset(augmented_inputs[0])
-                loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
-                all_preds = []
-                for batch in loader:
-                    batch_predictions = get_batch_predictions(models, batch[0], device)
-                    avg_preds = average_predictions(batch_predictions)
-                    all_preds.append(avg_preds)
-                predictions.append(torch.cat(all_preds, dim=0))
-            # Stack predictions: [num_policies, batch_size, num_classes]
-            averaged_predictions = torch.stack(predictions, dim=0).permute(1, 0, 2)  # [batch_size, num_policies, num_classes]
-            stds = compute_stds(averaged_predictions)
+                
+                K = augmented_inputs.shape[0]
+                preds_per_aug = []
+                for k in range(K):
+                    # each augmented_inputs[k] is [N, C, H, W]
+                    dataset_aug = TensorDataset(augmented_inputs[k])
+                    loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+                    
+                    all_preds = []
+                    for batch in loader:
+                        imgs = batch[0].to(device)
+                        batch_predictions = get_batch_predictions(models, imgs, device)  # [B, M, C] or [B, C]
+                        avg_preds = average_predictions(batch_predictions)  # [B, C]
+                        all_preds.append(avg_preds)
+                    
+                    preds_per_aug.append(torch.cat(all_preds, dim=0))  # [N, C]
+                
+                # Stack predictions -> [K, N, C], compute std across K -> [N, C]
+                stacked = torch.stack(preds_per_aug, dim=0)
+                std_per_class = torch.std(stacked, dim=0)  # [N, C]
+                
+                # reduce per-class std to scalar per sample (match previous behavior)
+                if std_per_class.shape[1] == 1:
+                    group_stds = std_per_class.squeeze(1)  # [N]
+                else:
+                    group_stds = torch.mean(std_per_class, dim=1)  # [N]
+                
+                all_groups_stds.append(group_stds.cpu().numpy())  # store numpy array [N]
+            
+            # all_groups_stds: list of G arrays [N]; average across groups -> final metric [N]
+            all_groups_stds = np.stack(all_groups_stds, axis=0)  # [G, N]
+            stds = np.mean(all_groups_stds, axis=0)  # [N]
+            averaged_predictions = None  # optional: construct if you need the stacked preds
         else:
             # Single policy or standard TTA: process each augmentation one by one
             for aug_idx in range(nb_augmentations):
-                # Apply augmentation for this index
                 augmented_inputs = apply_augmentations(
-                    dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations, batch_size=batch_size
+                    dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations, batch_size=batch_size, cached_dataset=cached_dataset, dataloader_workers=dataloader_workers
                 )
                 # augmented_inputs shape: [1, batch_size, C, H, W]
                 dataset_aug = TensorDataset(augmented_inputs[0])
