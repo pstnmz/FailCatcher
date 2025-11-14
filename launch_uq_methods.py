@@ -153,7 +153,7 @@ def compute_gps(models, test_dataset, device, num_classes, image_size,
         num_searches=30,
         top_k=3,
         plot=False,
-        seed=24
+        seed=64
     )
     
     # Step 2: Extract augmentation policies - pass entire group at once
@@ -183,7 +183,9 @@ def compute_gps(models, test_dataset, device, num_classes, image_size,
         image_normalization=True, 
         mean=0.5, 
         std=0.5, 
-        batch_size=batch_size
+        batch_size=batch_size,
+        is_gps_mode=True,
+        use_monai_cache=False
 )
     
     return metric

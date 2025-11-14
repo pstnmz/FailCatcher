@@ -1,6 +1,6 @@
-# UQ_Toolbox
+# Fail Catcher
 
-Uncertainty quantification toolkit for deep learning models.
+Post-Hoc Uncertainty quantification toolkit for pytorch deep learning models.
 
 ## Installation
 ```bash

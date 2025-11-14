@@ -1,0 +1,20 @@
+{
+  "flag": "breastmnist",
+  "timestamp": "20251112_181707",
+  "task_type": "binary-class",
+  "num_classes": 2,
+  "test_size": 156,
+  "calib_size": 125,
+  "test_accuracy": 0.9102564102564102,
+  "calibration_method": "platt",
+  "methods": {
+    "GPS": {
+      "time_seconds": 74.5904057577718,
+      "auc": -0.4426559356136821,
+      "threshold": 0.09004684597220239,
+      "balanced_accuracy": 0.5362173038229376,
+      "specificity": 0.6428571428571429,
+      "sensitivity": 0.4295774647887324
+    }
+  }
+}
