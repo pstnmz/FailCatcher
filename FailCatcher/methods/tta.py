@@ -365,7 +365,7 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         augmentations = [transforms.Compose([
                     EnsurePIL(),                                 # convert tensor/ndarray -> PIL if needed
                     transforms.Lambda(lambda img: img.convert("RGB")),  # ensure RGB for randaug
-                    *([to_3_channels] if nb_channels == 1 else []),      # if needed expand channels (no-op for RGB)
+                    # removed redundant to_3_channels() - convert("RGB") already ensures RGB
                     rand_aug,                                            # BetterRandAugment expects PIL Image
                     *([to_1_channel] if nb_channels == 1 else []),       # convert back to single channel if needed
                     transforms.PILToTensor(),                            # PIL -> Tensor (uint8 -> [0,255] -> Tensor)
@@ -373,42 +373,40 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                     *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
                 ]) for rand_aug in rand_aug_policies]
         
-        # If we have a cached_dataset, apply all augmentations in a single pass:
-        if cached_dataset is not None:
-            # _CachedRandAugDataset will return stacked KxC xH xW per sample, DataLoader -> B x K x C x H x W
-            aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
-            loader = DataLoader(dataset=aug_dataset, batch_size=batch_size, shuffle=False, num_workers=worker_count, pin_memory=True)
-            batches = []
-            for batch in loader:
-                imgs_stacked = batch[0]  # shape: [B, K, C, H, W]
-                batches.append(imgs_stacked)
-            if len(batches) == 0:
-                raise RuntimeError("cached loader returned no data")
-            all_imgs = torch.cat(batches, dim=0)  # [total_B, K, C, H, W]
-            # permute to [K, B, C, H, W] so callers that expect per-augmentation stack keep working
-            augmented_inputs = all_imgs.permute(1, 0, 2, 3, 4)
-        else:
-            # fallback: previous behaviour (iterate once per augmentation)
-            for i, augmentation in enumerate(augmentations):
-                augmented_inputs_batch = []
-                print(f"Applying augmentation n : {i}")
-                data_loader = _get_loader(augmentation)
-                for batch in data_loader:
-                    augmented_images = batch[0]
-                    augmented_inputs_batch.append(augmented_images)
-                augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
-            augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
 
-    else:
-        for i in range(nb_augmentations):
+        for i, augmentation in enumerate(augmentations):
             augmented_inputs_batch = []
             print(f"Applying augmentation n : {i}")
-            data_loader = _get_loader(transformations)
+            data_loader = _get_loader(augmentation)
             for batch in data_loader:
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
+
+    else:
+        # Standard TTA with torchvision RandAugment
+        # Build complete augmentation pipeline that outputs tensors
+        base_augmentations = [
+            transforms.Compose([
+                EnsurePIL(),
+                transforms.Lambda(lambda img: img.convert("RGB")),
+                transforms.RandAugment(num_ops=n, magnitude=m),  # torchvision RandAugment
+                *([to_1_channel] if nb_channels == 1 else []),
+                transforms.PILToTensor(),
+                transforms.ConvertImageDtype(torch.float),
+                *([transforms.Normalize(mean=mean, std=std)] if image_normalization else [])
+            ]) for _ in range(nb_augmentations)
+        ]
+        for i, augmentation in enumerate(base_augmentations):
+            augmented_inputs_batch = []
+            print(f"Applying augmentation {i+1}/{nb_augmentations}")
+            data_loader = _get_loader(augmentation)
+            for batch in data_loader:
+                augmented_images = batch[0]
+                augmented_inputs_batch.append(augmented_images)
+            augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+        augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [num_augmentations, batch_size, C, H, W]
     
     if usingBetterRandAugment : 
         return augmented_inputs, augmentations
