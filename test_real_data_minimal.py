@@ -2,7 +2,7 @@
 Minimal test with real medMNIST data before running full launch_uq_methods.py
 """
 import torch
-import UQ_Toolbox.UQ_toolbox as uq
+import FailCatcher.UQ_toolbox as uq
 from medMNIST.utils import train_load_datasets_resnet as tr
 import torchvision.transforms as transforms
 
