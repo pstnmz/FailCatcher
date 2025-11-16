@@ -31,39 +31,30 @@ from ..core.utils import (
 class TTAMethod(UQMethod):
     """
     TTA uncertainty quantification using fixed or random augmentations.
-    
-    Computes per-sample uncertainty as standard deviation across augmented predictions.
     """
-    def __init__(self, transformations=None, n=2, m=45, **kwargs):
+    def __init__(self, transformations=None, n=2, m=45, nb_augmentations=10, **kwargs):
         """
         Args:
             transformations: List of augmentation policies or None (random if None)
             n: Number of ops per augmentation (BetterRandAugment)
             m: Magnitude of ops (BetterRandAugment)
+            nb_augmentations: Number of augmentations (if transformations=None)  # ← ADD
             **kwargs: Additional TTA parameters (image_size, mean, std, etc.)
         """
         super().__init__("TTA")
         self.transformations = transformations
         self.n = n
         self.m = m
+        self.nb_augmentations = nb_augmentations
         self.kwargs = kwargs
     
     def compute(self, models, dataset, device, **run_kwargs):
-        """
-        Compute per-sample std across augmentations.
-        
-        Args:
-            models: Single model or list of models
-            dataset: PyTorch dataset
-            device: torch.device
-            **run_kwargs: Override TTA parameters (batch_size, image_size, etc.)
-        
-        Returns:
-            np.ndarray: Per-sample uncertainty scores (N,)
-        """
+        """Compute per-sample std across augmentations."""
         stds, _ = TTA(
             self.transformations, models, dataset, device,
-            usingBetterRandAugment=True, n=self.n, m=self.m,
+            nb_augmentations=self.nb_augmentations,  # ← ADD THIS
+            usingBetterRandAugment=False,
+            n=self.n, m=self.m,
             **{**self.kwargs, **run_kwargs}
         )
         return np.array(stds)
@@ -109,42 +100,32 @@ class GPSMethod(UQMethod):
         return self.policies
     
     def compute(self, models, dataset, device, n=2, m=45, **kwargs):
-        """
-        Compute uncertainty using discovered policies.
-        
-        Args:
-            models: Single model or list of models
-            dataset: PyTorch dataset
-            device: torch.device
-            n: Number of ops per augmentation
-            m: Magnitude of ops
-            **kwargs: Additional TTA parameters
-        
-        Returns:
-            np.ndarray: Per-sample uncertainty scores (N,)
-        
-        Raises:
-            RuntimeError: If search_policies() not called first
-        """
+        """Compute uncertainty using discovered policies."""
         if self.policies is None:
             raise RuntimeError("Call search_policies() before compute()")
         
-        # Flatten policies: pick first file from each group
-        pipeline = []
+        # Extract policies from search results
+        transformation_pipeline = []
         for group in self.policies:
-            files = group if isinstance(group, list) else [group]
-            for f in files[:1]:  # take first file only
-                _, _, pols = extract_gps_augmentations_info(f)
-                if pols and len(pols) > 0 and len(pols[0]) > 0:
-                    pipeline.append(pols[0])
+            n_group, m_group, transformations_group = extract_gps_augmentations_info(group)
+            transformation_pipeline.append(transformations_group)
         
-        if not pipeline:
+        if not transformation_pipeline:
             raise RuntimeError("No valid policies extracted from search results")
         
+        # Call TTA in GPS mode
         stds, _ = TTA(
-            pipeline, models, dataset, device,
-            usingBetterRandAugment=True, n=n, m=m, **kwargs
+            transformations=transformation_pipeline,
+            models=models,
+            dataset=dataset,
+            device=device,
+            usingBetterRandAugment=True,
+            n=n, m=m,
+            is_gps_mode=True,
+            average_groups=True,
+            **kwargs
         )
+        
         return np.array(stds)
 
 
@@ -152,6 +133,61 @@ class GPSMethod(UQMethod):
 # FUNCTIONAL API (existing, for backward compatibility)
 # ============================================================================
 
+def _batched_augmentation_inference(augmented_inputs, models, device, batch_size):
+    """
+    Process multiple augmentations in a single forward pass (faster).
+    
+    Args:
+        augmented_inputs: [K, N, C, H, W] where K=num_augmentations, N=num_samples
+        models: List of models
+        device: torch.device
+        batch_size: Max batch size
+    
+    Returns:
+        torch.Tensor: Predictions [K, N, num_classes]
+    """
+    K, N, C, H, W = augmented_inputs.shape
+    
+    # Check if we can fit all augmentations in memory
+    total_samples = K * N
+    max_gpu_batch = 10000  # Conservative estimate - adjust based on GPU memory
+    
+    if total_samples <= max_gpu_batch:
+        # Fast path: batch all augmentations together
+        print(f"  Using batched inference ({K} augmentations × {N} samples)")
+        
+        # Reshape: [K, N, C, H, W] → [K*N, C, H, W]
+        imgs_batched = augmented_inputs.reshape(total_samples, C, H, W)
+        
+        # Single forward pass
+        batch_preds = get_batch_predictions(models, imgs_batched, device)  # [K*N, num_classes]
+        avg_preds = average_predictions(batch_preds)  # [K*N, num_classes]
+        
+        # Reshape back: [K*N, num_classes] → [K, N, num_classes]
+        predictions = avg_preds.reshape(K, N, -1)
+        
+        return predictions
+    else:
+        # Fallback: process each augmentation separately
+        print(f"  Using sequential inference (total samples {total_samples} > {max_gpu_batch})")
+        preds_list = []
+        
+        for k in range(K):
+            dataset_aug = TensorDataset(augmented_inputs[k])
+            loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+            
+            all_preds = []
+            for batch in loader:
+                imgs = batch[0].to(device)
+                batch_predictions = get_batch_predictions(models, imgs, device)
+                avg_preds = average_predictions(batch_predictions)
+                all_preds.append(avg_preds)
+            
+            preds_list.append(torch.cat(all_preds, dim=0))  # [N, num_classes]
+        
+        predictions = torch.stack(preds_list, dim=0)  # [K, N, num_classes]
+        return predictions
+    
 def extract_gps_augmentations_info(policies):
     """
     Parse N, M and policy ops from filenames of form:
@@ -221,13 +257,30 @@ def extract_gps_augmentations_info(policies):
     return N_global, M_global, formatted_policies
 
 
-def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBetterRandAugment=False, n=2, m=45, image_normalization=False, nb_channels=1, mean=None, std=None, image_size=51, batch_size=None, use_monai_cache=False, cache_rate=1.0, cache_num_workers=0, dataloader_workers=None, is_gps_mode=False):
+def TTA(transformations, models, dataset, device, nb_augmentations=10, 
+        usingBetterRandAugment=False, n=2, m=45, image_normalization=False, 
+        nb_channels=1, mean=None, std=None, image_size=51, batch_size=None, 
+        use_monai_cache=False, cache_rate=1.0, cache_num_workers=0, 
+        dataloader_workers=None, is_gps_mode=False, average_groups=True):
     """
-    Perform Test-Time Augmentation (TTA) on a batch of images using specified transformations and models.
+    Perform Test-Time Augmentation (TTA) on a batch of images.
+    
+    Args:
+        ...existing args...
+        is_gps_mode: If True, expect transformations = [[group1], [group2], [group3]]
+        average_groups: If True (default), average std across groups in GPS mode
+    
+    Returns:
+        tuple: (stds, averaged_predictions)
+            - If GPS mode with average_groups=True: stds is [N] averaged across groups
+            - If GPS mode with average_groups=False: stds is [G, N] per-group stds
+            - Otherwise: stds is [N] for standard TTA
     """
-    if usingBetterRandAugment and not isinstance(transformations, list):
-        raise ValueError("Transformations must be a list when usingBetterRandAugment.")
-    if usingBetterRandAugment:
+    if usingBetterRandAugment and transformations is not None and not isinstance(transformations, list):
+        raise ValueError("Transformations must be a list (or None for random policies) when usingBetterRandAugment.")
+    
+    # Determine number of augmentations
+    if usingBetterRandAugment and transformations is not None:
         nb_augmentations = len(transformations)
     
     # Build cached dataset if requested
@@ -239,51 +292,39 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
         predictions = []
         if is_gps_mode:
             # GPS mode: transformations is [[group1_policies], [group2_policies], [group3_policies]]
-            print(f"  GPS mode: processing {len(transformations)} policy groups")
-            
-            all_groups_stds = []  # collect per-group std arrays (N,) or (N,C->reduced)
+            all_groups_stds = []
             for group_idx, policy_group in enumerate(transformations):
-                print(f"  Applying policy group {group_idx + 1}/{len(transformations)} ({len(policy_group)} policies)...")
+                print(f"  Applying policy group {group_idx + 1}/{len(transformations)}...")
                 
-                # Ask apply_augmentations to produce all augmentations for this group:
-                # augmented_inputs shape expected: [K, N, C, H, W] where K = len(policy_group)
+                # Get augmented inputs: [K, N, C, H, W]
                 augmented_inputs, _ = apply_augmentations(
-                    dataset, len(policy_group), usingBetterRandAugment, n, m, image_normalization,
-                    nb_channels, mean, std, image_size, policy_group, batch_size=batch_size
+                    dataset, len(policy_group), usingBetterRandAugment, n, m, 
+                    image_normalization, nb_channels, mean, std, image_size, 
+                    policy_group, batch_size=batch_size
                 )
                 
-                K = augmented_inputs.shape[0]
-                preds_per_aug = []
-                for k in range(K):
-                    # each augmented_inputs[k] is [N, C, H, W]
-                    dataset_aug = TensorDataset(augmented_inputs[k])
-                    loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
-                    
-                    all_preds = []
-                    for batch in loader:
-                        imgs = batch[0].to(device)
-                        batch_predictions = get_batch_predictions(models, imgs, device)  # [B, M, C] or [B, C]
-                        avg_preds = average_predictions(batch_predictions)  # [B, C]
-                        all_preds.append(avg_preds)
-                    
-                    preds_per_aug.append(torch.cat(all_preds, dim=0))  # [N, C]
+                # NEW: Use batched inference if possible
+                predictions = _batched_augmentation_inference(
+                    augmented_inputs, models, device, batch_size
+                )  # [K, N, num_classes]
                 
-                # Stack predictions -> [K, N, C], compute std across K -> [N, C]
-                stacked = torch.stack(preds_per_aug, dim=0)
-                std_per_class = torch.std(stacked, dim=0)  # [N, C]
+                # Compute std across K augmentations
+                std_per_class = torch.std(predictions, dim=0)  # [N, num_classes]
                 
-                # reduce per-class std to scalar per sample (match previous behavior)
                 if std_per_class.shape[1] == 1:
-                    group_stds = std_per_class.squeeze(1)  # [N]
+                    group_stds = std_per_class.squeeze(1)
                 else:
-                    group_stds = torch.mean(std_per_class, dim=1)  # [N]
+                    group_stds = torch.mean(std_per_class, dim=1)
                 
-                all_groups_stds.append(group_stds.cpu().numpy())  # store numpy array [N]
+                all_groups_stds.append(group_stds.cpu().numpy())
             
-            # all_groups_stds: list of G arrays [N]; average across groups -> final metric [N]
-            all_groups_stds = np.stack(all_groups_stds, axis=0)  # [G, N]
-            stds = np.mean(all_groups_stds, axis=0)  # [N]
-            averaged_predictions = None  # optional: construct if you need the stacked preds
+            # Average across groups if requested
+            if average_groups:
+                stds = np.mean(all_groups_stds, axis=0)  # [N]
+            else:
+                stds = all_groups_stds  # [G, N] - return per-group stds
+            
+            averaged_predictions = None # not computed in GPS mode
         else:
             # Single policy or standard TTA: process each augmentation one by one
             for aug_idx in range(nb_augmentations):
@@ -306,7 +347,7 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10, usingBett
     return stds, averaged_predictions
 
 
-def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=False, batch_size=None, cached_dataset=None, dataloader_workers=None):
+def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=None, batch_size=None, cached_dataset=None, dataloader_workers=None):
     """
     Apply augmentations to the images.
 
@@ -356,9 +397,11 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
     
     if usingBetterRandAugment:
         if isinstance(transformations, list):
+            # Case 1: Explicit policies provided
             rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=True, randomize_sign=False, image_size=image_size) for policy in transformations]
-            
-        elif transformations is False:
+        
+        # Case 2: Random policies (transformations is None or False)
+        else:
             rand_aug_policies = [BetterRandAugment(n, m, True, False, randomize_sign=False, image_size=image_size) for _ in range(nb_augmentations)] 
 
         # Ensure input is PIL, run randaugment (expects PIL), then convert to tensor and normalize.
@@ -383,7 +426,7 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                 augmented_inputs_batch.append(augmented_images)
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
-
+    
     else:
         # Standard TTA with torchvision RandAugment
         # Build complete augmentation pipeline that outputs tensors

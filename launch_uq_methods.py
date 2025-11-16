@@ -27,12 +27,28 @@ from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 
 # Import UQ_Toolbox
 import FailCatcher.UQ_toolbox as uq
+from FailCatcher.methods.tta import TTAMethod, GPSMethod
 from medMNIST.utils import train_load_datasets_resnet as tr
 
 
 # ============================================================================
 # HELPER CLASSES
 # ============================================================================
+
+GPS_CONFIG = {
+    'num_workers': 90,
+    'num_searches': 30,
+    'top_k': 3,
+    'seed': 64,
+    'mean': 0.5,
+    'std': 0.5
+}
+
+TTA_CONFIG = {
+    'nb_augmentations': 5,
+    'n': 2,  # RandAugment num_ops
+    'm': 9,  # RandAugment magnitude
+}
 
 class RepeatGrayToRGB:
     """Transform for converting grayscale to RGB."""
@@ -116,79 +132,65 @@ def compute_ensemble_std(indiv_scores):
     return metric
 
 
-def compute_tta(models, test_dataset, device, num_classes, image_size, 
-                color=False, batch_size=4000, nb_augmentations=5):
-    """Compute TTA with regular RandAugment (torchvision)."""
-    metric, avg_preds = uq.TTA(
-        transformations=None,  # Use random policies
-        models=models,
-        dataset=test_dataset,
-        device=device,
-        nb_augmentations=nb_augmentations,
-        usingBetterRandAugment=False,  # Use regular RandAugment
-        n=2,
-        m=9,  # Standard magnitude for torchvision RandAugment
-        image_normalization=True,
+def compute_tta(models, test_dataset, device, image_size, 
+                batch_size=4000, config=None):
+    """Compute TTA using class-based API."""
+    cfg = {**TTA_CONFIG, **(config or {})}
+    
+    tta = TTAMethod(
+        transformations=None,  # Random policies
+        n=cfg['n'],
+        m=cfg['m'],
+        nb_augmentations=cfg['nb_augmentations'],
         nb_channels=3,
+        image_size=image_size,
+        image_normalization=True,
         mean=0.5,
         std=0.5,
-        image_size=image_size,
         batch_size=batch_size
     )
-    return metric
+    
+    metric = tta.compute(models, test_dataset, device)
+    return metric.tolist()
 
 
-def compute_gps(models, test_dataset, device, num_classes, image_size,
+def compute_gps(models, test_dataset, device, image_size,
                 aug_folder, correct_idx_calib, incorrect_idx_calib,
-                max_iterations=5, batch_size=4000):
-    """Compute GPS with BetterRandAugment (greedy policy search)."""
-    # Step 1: Greedy search on calibration set
-    print("  Performing greedy policy search...")
-    best_aug = uq.perform_greedy_policy_search(
-        aug_folder, 
-        correct_idx_calib, 
-        incorrect_idx_calib,
-        num_workers=90,
-        max_iterations=max_iterations,
-        num_searches=30,
-        top_k=3,
-        plot=False,
-        seed=64
+                max_iterations=5, batch_size=4000, config=None):
+    """Compute GPS using class-based API."""
+    cfg = {**GPS_CONFIG, **(config or {})}
+    
+    # Step 1: Initialize GPS method
+    gps = GPSMethod(
+        aug_folder=aug_folder,
+        correct_calib=correct_idx_calib,
+        incorrect_calib=incorrect_idx_calib,
+        max_iter=max_iterations
     )
     
-    # Step 2: Extract augmentation policies - pass entire group at once
-    # best_aug is [[group1_files], [group2_files], [group3_files]]
-    # where each group has 5 policy files
-    if isinstance(best_aug, list) and all(isinstance(policy, list) for policy in best_aug):
-        transformation_pipeline = []
-        for aug in best_aug:
-            n, m, transformations = uq.extract_gps_augmentations_info(aug)
-            transformation_pipeline.append(transformations)
-    else:
-        raise ValueError("GPS search did not return valid policies")
+    # Step 2: Search for policies
+    print("  Performing greedy policy search...")
+    gps.search_policies(
+        num_workers=cfg['num_workers'],
+        num_searches=cfg['num_searches'],
+        top_k=cfg['top_k'],
+        seed=cfg['seed']
+    )
     
-    # Step 3: Apply TTA to the ENTIRE transformation_pipeline at once
-    # This matches the notebook behavior: TTA receives [[5 policies], [5 policies], [5 policies]]
+    # Step 3: Compute metric
     print(f"  Applying GPS augmentations to test set...")
-    metric, _ = uq.TTA(
-        transformation_pipeline, 
-        models, 
-        test_dataset, 
-        device,
-        usingBetterRandAugment=True, 
-        n=n, 
-        m=m, 
-        nb_channels=3, 
+    metric = gps.compute(
+        models, test_dataset, device,
+        n=2, m=45,
+        nb_channels=3,
         image_size=image_size,
-        image_normalization=True, 
-        mean=0.5, 
-        std=0.5, 
-        batch_size=batch_size,
-        is_gps_mode=True,
-        use_monai_cache=False
-)
+        image_normalization=True,
+        mean=cfg['mean'],
+        std=cfg['std'],
+        batch_size=batch_size
+    )
     
-    return metric
+    return metric.tolist()
 
 
 # ============================================================================
@@ -254,7 +256,7 @@ def evaluate_uq_method(metric, correct_idx, incorrect_idx):
 # ============================================================================
 
 def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5, 
-                     batch_size=4000, image_size=224):
+                     batch_size=4000, image_size=224, use_cache=True):
     """
     Run UQ methods benchmark for a given dataset.
     
@@ -286,7 +288,7 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     # ========================================================================
     # LOAD DATA AND MODELS
     # ========================================================================
-    
+    computed_metrics = {}
     print("📦 Loading data and models...")
     with Timer("Data loading"):
         # Transforms
@@ -326,24 +328,81 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     print(f"  Calibration method: {calib_method}")
     
     # ========================================================================
-    # EVALUATE MODELS (with logits for temperature scaling)
+    # EVALUATE MODELS (or load from cache)
     # ========================================================================
     
-    print("\n🔍 Evaluating models...")
-    with Timer("Model evaluation"):
-        # Test set (with logits)
-        y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores, logits_test = \
-            uq.evaluate_models_on_loader(models, test_loader, device, return_logits=True)
+    # Cache file paths
+    cache_dir = os.path.join(output_dir, 'cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    calib_cache_path = os.path.join(cache_dir, f'{flag}_calib_results.npz')
+    test_cache_path = os.path.join(cache_dir, f'{flag}_test_results.npz')
+    
+    # Try to load cached results FIRST
+    if use_cache and os.path.exists(calib_cache_path) and os.path.exists(test_cache_path):
+        print("\n📦 Loading cached evaluation results...")
+        with Timer("Cache loading"):
+            calib_cache = np.load(calib_cache_path, allow_pickle=True)
+            test_cache = np.load(test_cache_path, allow_pickle=True)
+            
+            # Calibration
+            y_true_calib = calib_cache['y_true']
+            y_scores_calib = calib_cache['y_scores']
+            correct_idx_calib = calib_cache['correct_idx']
+            incorrect_idx_calib = calib_cache['incorrect_idx']
+            indiv_scores_calib = calib_cache['indiv_scores']
+            logits_calib = calib_cache['logits']
+            
+            # Test
+            y_true = test_cache['y_true']
+            y_scores = test_cache['y_scores']
+            correct_idx = test_cache['correct_idx']
+            incorrect_idx = test_cache['incorrect_idx']
+            indiv_scores = test_cache['indiv_scores']
+            logits_test = test_cache['logits']
         
-        # Calibration set (with logits)
-        y_true_calib, y_scores_calib, digits_calib, correct_idx_calib, \
-        incorrect_idx_calib, indiv_scores_calib, logits_calib = \
-            uq.evaluate_models_on_loader(models, calib_loader, device, return_logits=True)
+        print(f"  ✓ Loaded cached results")
+        print(f"  Test accuracy: {len(correct_idx) / len(y_true):.3f}")
+        print(f"  Test: {len(correct_idx)} correct, {len(incorrect_idx)} incorrect")
+        print(f"  Calib: {len(correct_idx_calib)} correct, {len(incorrect_idx_calib)} incorrect")
     
-    print(f"  Test accuracy: {len(correct_idx) / len(y_true):.3f}")
-    print(f"  Test: {len(correct_idx)} correct, {len(incorrect_idx)} incorrect")
-    print(f"  Calib: {len(correct_idx_calib)} correct, {len(incorrect_idx_calib)} incorrect")
-    
+    else:
+        # No cache - evaluate models
+        print("\n🔍 Evaluating models...")
+        with Timer("Model evaluation"):
+            y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores, logits_test = \
+                uq.evaluate_models_on_loader(models, test_loader, device, return_logits=True)
+            
+            y_true_calib, y_scores_calib, digits_calib, correct_idx_calib, \
+            incorrect_idx_calib, indiv_scores_calib, logits_calib = \
+                uq.evaluate_models_on_loader(models, calib_loader, device, return_logits=True)
+        
+        print(f"  Test accuracy: {len(correct_idx) / len(y_true):.3f}")
+        print(f"  Test: {len(correct_idx)} correct, {len(incorrect_idx)} incorrect")
+        print(f"  Calib: {len(correct_idx_calib)} correct, {len(incorrect_idx_calib)} incorrect")
+        
+        # Save to cache for next time
+        if use_cache:
+            print("\n💾 Saving evaluation results to cache...")
+            np.savez_compressed(
+                calib_cache_path,
+                y_true=y_true_calib,
+                y_scores=y_scores_calib,
+                correct_idx=correct_idx_calib,
+                incorrect_idx=incorrect_idx_calib,
+                indiv_scores=indiv_scores_calib,
+                logits=logits_calib
+            )
+            np.savez_compressed(
+                test_cache_path,
+                y_true=y_true,
+                y_scores=y_scores,
+                correct_idx=correct_idx,
+                incorrect_idx=incorrect_idx,
+                indiv_scores=indiv_scores,
+                logits=logits_test
+            )
+            print(f"  ✓ Cached to {cache_dir}")
+            
     # ========================================================================
     # RUN UQ METHODS
     # ========================================================================
@@ -365,6 +424,7 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         print("\n🔬 Running MSR...")
         with Timer("MSR") as timer:
             metric = compute_msr(y_scores, y_true)
+        computed_metrics['MSR'] = metric
         metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
         results['methods']['MSR'] = {
             'time_seconds': timer.elapsed,
@@ -380,6 +440,7 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
                 y_scores, y_true, y_scores_calib, y_true_calib,
                 logits_test, logits_calib, calib_method
             )
+        computed_metrics[f'MSR_{calib_method}'] = metric
         metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
         results['methods'][f'MSR_{calib_method}'] = {
             'time_seconds': timer.elapsed,
@@ -392,6 +453,7 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         print("\n🔬 Running Ensemble STD...")
         with Timer("Ensembling") as timer:
             metric = compute_ensemble_std(indiv_scores)
+        computed_metrics['Ensembling'] = metric
         metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
         results['methods']['Ensembling'] = {
             'time_seconds': timer.elapsed,
@@ -404,9 +466,9 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         print("\n🔬 Running TTA...")
         with Timer("TTA") as timer:
             metric = compute_tta(
-                models, test_dataset_tta, device, num_classes, 
-                image_size, color, batch_size
+                models, test_dataset_tta, device, image_size, batch_size
             )
+        computed_metrics['TTA'] = metric
         metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
         results['methods']['TTA'] = {
             'time_seconds': timer.elapsed,
@@ -425,11 +487,12 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         else:
             with Timer("GPS") as timer:
                 metric = compute_gps(
-                    models, test_dataset, device, num_classes, image_size,
+                    models, test_dataset, device, image_size,
                     aug_folder, correct_idx_calib, incorrect_idx_calib,
                     max_gps_iterations, batch_size
                 )
             metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+            computed_metrics['GPS'] = metric
             results['methods']['GPS'] = {
                 'time_seconds': timer.elapsed,
                 **metrics
@@ -439,7 +502,14 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     # ========================================================================
     # SAVE RESULTS
     # ========================================================================
-    
+    # Save all metric values
+    all_metrics_file = os.path.join(output_dir, f'all_metrics_{flag}_{timestamp}.npz')
+    if computed_metrics:
+        np.savez_compressed(all_metrics_file, **computed_metrics)
+        results['all_metrics_file'] = all_metrics_file
+        print(f"\n💾 All metric values saved to: {all_metrics_file}")
+        
+    # Save JSON global results
     output_file = os.path.join(output_dir, f'uq_benchmark_{flag}_{timestamp}.json')
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
