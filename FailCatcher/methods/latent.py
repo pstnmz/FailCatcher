@@ -5,6 +5,7 @@ Includes SHAP importance, KNN distances, feature engineering, and hyperplane dis
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -19,109 +20,476 @@ from ..core.base import UQMethod
 
 
 # ============================================================================
+# HELPER FUNCTION FOR LAYER EXTRACTION
+# ============================================================================
+
+def get_layer_from_model(model, layer_name='avgpool'):
+    """
+    Extract a layer from a model by name.
+    
+    Args:
+        model: PyTorch model
+        layer_name: Name or pattern of layer to extract
+    
+    Returns:
+        torch.nn.Module: The layer module
+    
+    Supported patterns:
+        - 'avgpool': Global average pooling
+        - 'layer4': Last conv layer (ResNet)
+        - 'fc': Fully connected layer
+        - 'head': Classifier head (ViT)
+        - Custom: Direct attribute access (e.g., 'features.denseblock4')
+    
+    Example:
+        >>> layer = get_layer_from_model(model, 'avgpool')
+        >>> layer = get_layer_from_model(model, 'layer4')
+    """
+    # Try direct attribute access first
+    if hasattr(model, layer_name):
+        return getattr(model, layer_name)
+    
+    # Pattern-based search
+    if layer_name == 'avgpool':
+        # Try common pooling layer names
+        for attr in ['avgpool', 'global_pool', 'avg_pool']:
+            if hasattr(model, attr):
+                return getattr(model, attr)
+        # Fallback: search for adaptive pooling in modules
+        for name, module in model.named_modules():
+            if 'pool' in name.lower() and 'adaptive' in str(type(module)).lower():
+                return module
+    
+    elif layer_name == 'layer4':
+        if hasattr(model, 'layer4'):
+            return model.layer4
+        # For DenseNet: last dense block
+        if hasattr(model, 'features') and hasattr(model.features, 'denseblock4'):
+            return model.features.denseblock4
+    
+    elif layer_name == 'fc':
+        for attr in ['fc', 'classifier', 'head']:
+            if hasattr(model, attr):
+                return getattr(model, attr)
+    
+    # Nested attribute access (e.g., 'features.denseblock4')
+    if '.' in layer_name:
+        obj = model
+        for attr in layer_name.split('.'):
+            obj = getattr(obj, attr)
+        return obj
+    
+    raise ValueError(
+        f"Could not find layer '{layer_name}' in model. "
+        f"Available top-level attributes: {[name for name, _ in model.named_children()]}"
+    )
+# ============================================================================
 # CLASS-BASED API (new, recommended)
 # ============================================================================
 
-class SHAPLatentMethod(UQMethod):
+class ClassifierHeadWrapper(nn.Module):
     """
-    Uncertainty quantification using SHAP importance on latent features.
+    Generic wrapper for classifier head extraction.
+    Works with ResNets, ViTs, EfficientNets, etc.
     """
-    def __init__(self, layer_to_hook, classifierhead_wrapper, max_background_samples=1000):
+    def __init__(self, model, layer_name='avgpool'):
         """
         Args:
-            layer_to_hook: Layer to extract features from (e.g., model.avgpool)
-            classifierhead_wrapper: Wrapped classifier head for SHAP computation
-            max_background_samples: Max samples for SHAP background
+            model: Full PyTorch model
+            layer_name: Name of layer to hook (e.g., 'avgpool', 'layer4')
         """
-        super().__init__("SHAP-Latent")
-        self.layer = layer_to_hook
-        self.classifierhead = classifierhead_wrapper
-        self.max_background = max_background_samples
-    
-    def compute(self, model, data_loader, device):
+        super().__init__()
+        self.model = model
+        self.layer = get_layer_from_model(model, layer_name)
+        
+    def forward(self, x):
         """
-        Compute SHAP values for latent features.
+        Forward pass from latent features to predictions.
+        
+        Args:
+            x: Latent features (B, feature_dim) - already flattened
         
         Returns:
-            tuple: (shap_values, features, labels, success_flags)
+            Predictions (logits or probabilities)
         """
-        return extract_latent_space_and_compute_shap_importance(
-            model, data_loader, device, self.layer,
-            importance=True,
-            classifierheadwrapper=self.classifierhead,
-            max_background_samples=self.max_background
-        )
+        # For ResNets: avgpool -> flatten -> fc
+        if hasattr(self.model, 'fc'):
+            return self.model.fc(x)
+        
+        # For ViTs: typically has 'head' or 'heads'
+        elif hasattr(self.model, 'head'):
+            return self.model.head(x)
+        elif hasattr(self.model, 'heads'):
+            return self.model.heads(x)
+        
+        # For EfficientNet/MobileNet: usually 'classifier'
+        elif hasattr(self.model, 'classifier'):
+            return self.model.classifier(x)
+        
+        # Fallback: try to find any Linear layer at the end
+        else:
+            for name, module in reversed(list(self.model.named_modules())):
+                if isinstance(module, nn.Linear):
+                    return module(x)
+            
+            raise RuntimeError(
+                "Could not identify classifier head. "
+                "Please manually specify the classifier in ClassifierHeadWrapper."
+            )
 
 
 class KNNLatentMethod(UQMethod):
     """
-    Uncertainty quantification via KNN distance to training data in latent space.
+    Uncertainty quantification via KNN distance in RAW latent space.
+    No feature selection - uses all latent features.
+    Works with single model or ensemble (averages distances).
     """
-    def __init__(self, layer_to_hook, k=5):
+    def __init__(self, layer_name='avgpool', k=5, pca_variance=0.9):
         """
         Args:
-            layer_to_hook: Layer to extract features from
+            layer_name: Name of layer to extract features from (e.g., 'avgpool', 'layer4')
             k: Number of nearest neighbors
-        """
-        super().__init__("KNN-Latent")
-        self.layer = layer_to_hook
-        self.k = k
-        self.train_features = None
-        self.knn = None
-        self.scaler = None
-        self.pca = None
-    
-    def fit(self, model, train_loader, device, pca_variance=0.9):
-        """
-        Fit KNN on training data latent space.
-        
-        Args:
-            model: PyTorch model
-            train_loader: Training data loader
-            device: torch.device
             pca_variance: Variance to retain in PCA (0-1)
         """
-        features, labels, _, _ = extract_latent_space_and_compute_shap_importance(
-            model, train_loader, device, self.layer, importance=False
-        )
+        super().__init__("KNN-Latent-Raw")
+        self.layer_name = layer_name
+        self.k = k
+        self.pca_variance = pca_variance
+        self.fitted_models = []
+    
+    def fit(self, models, train_loader, device):
+        """
+        Fit KNN on training data latent space for each model.
         
-        # Standardize and apply PCA
-        self.scaler = StandardScaler()
-        features_std = self.scaler.fit_transform(features.numpy())
+        Args:
+            models: Single model or list of models
+            train_loader: Training data loader
+            device: torch.device
+        """
+        if not isinstance(models, list):
+            models = [models]
         
-        self.pca = PCA(n_components=pca_variance)
-        features_pca = self.pca.fit_transform(features_std)
+        self.fitted_models = []
         
-        # Fit KNN
-        self.knn = NearestNeighbors(n_neighbors=self.k)
-        self.knn.fit(features_pca)
+        for idx, model in enumerate(models):
+            print(f"  Fitting model {idx+1}/{len(models)}...")
+            
+            # Extract layer from this model
+            layer = get_layer_from_model(model, self.layer_name)
+            
+            # Extract raw features (no SHAP needed)
+            features, labels, _, _ = extract_latent_space_and_compute_shap_importance(
+                model, train_loader, device, layer, importance=False
+            )
+            
+            # Standardize and apply PCA
+            scaler = StandardScaler()
+            features_std = scaler.fit_transform(features.numpy())
+            
+            pca = PCA(n_components=self.pca_variance)
+            features_pca = pca.fit_transform(features_std)
+            
+            # Fit KNN
+            knn = NearestNeighbors(n_neighbors=self.k)
+            knn.fit(features_pca)
+            
+            self.fitted_models.append({
+                'knn': knn,
+                'scaler': scaler,
+                'pca': pca,
+                'layer': layer
+            })
+            
+            print(f"    Layer: {layer.__class__.__name__}")
+            print(f"    PCA: {features.shape[1]} -> {features_pca.shape[1]} features")
         
+        print(f"  ✓ Fitted KNN on {len(models)} model(s), {len(features)} training samples")
         return self
     
-    def compute(self, model, data_loader, device):
+    def compute(self, models, data_loader, device):
         """
-        Compute KNN distances for test data.
+        Compute KNN distances for test data, averaged across models.
+        
+        Args:
+            models: Single model or list of models
+            data_loader: Test data loader
+            device: torch.device
         
         Returns:
             np.ndarray: Mean distance to k nearest neighbors (N,)
         """
-        if self.knn is None:
+        if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
         
-        features, labels, success, _ = extract_latent_space_and_compute_shap_importance(
-            model, data_loader, device, self.layer, importance=False
+        if not isinstance(models, list):
+            models = [models]
+        
+        if len(models) != len(self.fitted_models):
+            raise ValueError(f"Expected {len(self.fitted_models)} models, got {len(models)}")
+        
+        all_distances = []
+        
+        for idx, (model, fitted) in enumerate(zip(models, self.fitted_models)):
+            # Extract test features using the saved layer
+            features, labels, success, _ = extract_latent_space_and_compute_shap_importance(
+                model, data_loader, device, fitted['layer'], importance=False
+            )
+            
+            # Transform test features
+            features_std = fitted['scaler'].transform(features.numpy())
+            features_pca = fitted['pca'].transform(features_std)
+            
+            # Compute distances
+            distances, _ = fitted['knn'].kneighbors(features_pca)
+            avg_distances = distances.mean(axis=1)
+            all_distances.append(avg_distances)
+        
+        # Average across models
+        final_distances = np.mean(all_distances, axis=0)
+        
+        print(f"  ✓ Computed KNN distances (averaged over {len(models)} models)")
+        return final_distances
+
+
+class KNNLatentSHAPMethod(UQMethod):
+    """
+    Uncertainty quantification via KNN distance in SHAP-SELECTED latent space.
+    
+    **Important**: KNN distances are computed PER PREDICTED CLASS:
+    - Test sample with predicted class i → KNN in training samples of class i
+    - This makes sense for failure detection: correct predictions should be
+      close to their class training data, misclassifications should be far.
+    
+    Works with single model or ensemble (averages distances).
+    """
+    def __init__(self, layer_name='avgpool', k=5, 
+                 n_shap_features=50,
+                 max_background_samples=1000):
+        """
+        Args:
+            layer_name: Name of layer to extract features from (e.g., 'avgpool', 'layer4')
+            k: Number of nearest neighbors
+            n_shap_features: Number of top SHAP features to select per class
+            max_background_samples: Max samples for SHAP background
+        """
+        super().__init__("KNN-Latent-SHAP")
+        self.layer_name = layer_name
+        self.k = k
+        self.n_shap_features = n_shap_features
+        self.max_background = max_background_samples
+        
+        # Will be set during fit()
+        self.fitted_models = []
+        self.num_classes = None
+    
+    def fit(self, models, train_loader, calib_loader, device):
+        """
+        Fit KNN on SHAP-selected features from training data.
+        
+        **Per-class KNN**: For each class i, fit KNN on training samples of class i only.
+        
+        Args:
+            models: Single model or list of models
+            train_loader: Training data loader (for KNN fitting)
+            calib_loader: Calibration data loader (for SHAP computation)
+            device: torch.device
+        
+        Returns:
+            self
+        """
+        if not isinstance(models, list):
+            models = [models]
+        
+        self.fitted_models = []
+        
+        # Step 1: Extract layer and create SHAP wrapper (using first model)
+        print("  Step 1: Computing SHAP values on calibration set...")
+        reference_model = models[0]
+        reference_layer = get_layer_from_model(reference_model, self.layer_name)
+        classifierhead = ClassifierHeadWrapper(reference_model, self.layer_name)
+        
+        shap_values, features_calib, labels_calib, _ = \
+            extract_latent_space_and_compute_shap_importance(
+                reference_model, calib_loader, device, reference_layer,
+                importance=True,
+                classifierheadwrapper=classifierhead,
+                max_background_samples=self.max_background
+            )
+        
+        print("  Step 2: Computing mean SHAP importances per class...")
+        mean_shap_results = compute_mean_shap_values(
+            shap_values, fold=0, true_labels=labels_calib, nb_features=self.n_shap_features
         )
         
-        # Transform test features
-        features_std = self.scaler.transform(features.numpy())
-        features_pca = self.pca.transform(features_std)
+        self.num_classes = len(mean_shap_results)
+        print(f"    Detected {self.num_classes} classes")
         
-        # Compute distances
-        distances, _ = self.knn.kneighbors(features_pca)
-        avg_distances = distances.mean(axis=1)
+        # Extract SHAP-selected features per class (just take top-n by importance)
+        selected_features_per_class = []
+        for class_idx in range(self.num_classes):
+            mean_shap_series = mean_shap_results[class_idx][2]  # (fold, class, importance_series)
+            
+            # Select top-n features by SHAP importance
+            top_features = mean_shap_series.nlargest(self.n_shap_features).index.tolist()
+            selected_features_per_class.append(top_features)
+            
+            print(f"  Step 3.{class_idx}: Selected top {len(top_features)} SHAP features for class {class_idx}")
         
-        return avg_distances
-
+        # Step 4: Fit KNN per model, per class
+        for model_idx, model in enumerate(models):
+            print(f"  Step 4.{model_idx}: Fitting KNN for model {model_idx+1}/{len(models)}...")
+            
+            # Extract layer for this model
+            layer = get_layer_from_model(model, self.layer_name)
+            
+            # Extract training features
+            features_train, labels_train, _, _ = extract_latent_space_and_compute_shap_importance(
+                model, train_loader, device, layer, importance=False
+            )
+            
+            train_df = pd.DataFrame(
+                features_train.numpy(),
+                columns=[f"Feature_{i}" for i in range(features_train.shape[1])]
+            )
+            
+            model_knns = []
+            
+            for class_idx in range(self.num_classes):
+                # Filter training data by class
+                class_mask = (labels_train == class_idx)
+                train_class_df = train_df[class_mask]
+                
+                if len(train_class_df) == 0:
+                    print(f"    ⚠️  No training samples for class {class_idx}")
+                    model_knns.append(None)
+                    continue
+                
+                # Select top SHAP features for this class
+                selected_features = selected_features_per_class[class_idx]
+                train_selected = train_class_df[selected_features].values
+                
+                # Standardize and PCA (PCA handles redundancy)
+                scaler = StandardScaler()
+                train_std = scaler.fit_transform(train_selected)
+                
+                pca = PCA(n_components=0.9)
+                train_pca = pca.fit_transform(train_std)
+                
+                # Fit KNN
+                knn = NearestNeighbors(n_neighbors=min(self.k, len(train_pca)))
+                knn.fit(train_pca)
+                
+                model_knns.append({
+                    'knn': knn,
+                    'scaler': scaler,
+                    'pca': pca,
+                    'selected_features': selected_features,
+                    'layer': layer,
+                    'n_samples': len(train_pca)
+                })
+                
+                print(f"      Class {class_idx}: {len(train_pca)} samples, "
+                      f"{len(selected_features)} SHAP features -> {train_pca.shape[1]} PCA components")
+            
+            self.fitted_models.append(model_knns)
+        
+        print(f"  ✓ Fitted {len(models)} model(s) with per-class KNN")
+        return self
+    
+    def compute(self, models, data_loader, device):
+        """
+        Compute KNN distances for test data using SHAP-selected features.
+        
+        **Per-class matching**: Each test sample is compared to training samples
+        of its PREDICTED class (not true class). This is key for failure detection.
+        
+        Args:
+            models: Single model or list of models
+            data_loader: Test data loader
+            device: torch.device
+        
+        Returns:
+            np.ndarray: Mean distance to k nearest neighbors (N,)
+        """
+        if not self.fitted_models:
+            raise RuntimeError("Call fit() before compute()")
+        
+        if not isinstance(models, list):
+            models = [models]
+        
+        if len(models) != len(self.fitted_models):
+            raise ValueError(f"Expected {len(self.fitted_models)} models, got {len(models)}")
+        
+        all_distances = []
+        
+        for model_idx, (model, model_knns) in enumerate(zip(models, self.fitted_models)):
+            # Use the layer from the first non-None class
+            layer = None
+            for knn_data in model_knns:
+                if knn_data is not None:
+                    layer = knn_data['layer']
+                    break
+            
+            if layer is None:
+                raise RuntimeError("No valid class KNN data found")
+            
+            # Extract test features
+            features_test, labels_test, success_test, predictions = \
+                extract_latent_space_and_compute_shap_importance(
+                    model, data_loader, device, layer, importance=False
+                )
+            
+            # Get predicted classes
+            if isinstance(predictions, list):
+                predictions = np.array(predictions)
+            if predictions.ndim == 2:
+                predicted_classes = predictions.argmax(axis=1)
+            else:
+                predicted_classes = predictions
+            
+            test_df = pd.DataFrame(
+                features_test.numpy(),
+                columns=[f"Feature_{i}" for i in range(features_test.shape[1])]
+            )
+            
+            distances_per_sample = np.zeros(len(test_df))
+            
+            # Compute distances per class
+            for class_idx in range(self.num_classes):
+                if model_knns[class_idx] is None:
+                    continue
+                
+                fitted = model_knns[class_idx]
+                
+                # Test samples PREDICTED as this class
+                class_mask = (predicted_classes == class_idx)
+                test_class_df = test_df[class_mask]
+                
+                if len(test_class_df) == 0:
+                    continue
+                
+                # Select same features as training
+                test_selected = test_class_df[fitted['selected_features']].values
+                
+                # Transform
+                test_std = fitted['scaler'].transform(test_selected)
+                test_pca = fitted['pca'].transform(test_std)
+                
+                # Compute distances
+                distances, _ = fitted['knn'].kneighbors(test_pca)
+                avg_distances = distances.mean(axis=1)
+                
+                # Store distances
+                indices = np.where(class_mask)[0]
+                distances_per_sample[indices] = avg_distances
+            
+            all_distances.append(distances_per_sample)
+        
+        # Average across models
+        final_distances = np.mean(all_distances, axis=0)
+        
+        print(f"  ✓ Computed per-class KNN distances (averaged over {len(models)} models)")
+        return final_distances
 
 class HyperplaneDistanceMethod(UQMethod):
     """
@@ -337,109 +705,27 @@ def display_shap_values(shap_df):
 
 def feature_engineering_pipeline(mean_shap_df, latent_space, shap_threshold=0.05, corr_threshold=0.8):
     """
-    Feature selection pipeline based on SHAP and correlation.
-
-    Args:
-        mean_shap_df: Mean absolute SHAP values (Series)
-        latent_space: DataFrame of latent features (samples x features)
-        shap_threshold: Min SHAP value to retain feature
-        corr_threshold: Max correlation allowed between retained features
-
-    Returns:
-        tuple: (retained_latent_space_df, final_feature_list)
+    DEPRECATED: Use n_shap_features parameter in KNNLatentSHAPMethod instead.
     
-    Pipeline:
-        1. Filter by SHAP threshold
-        2. Cluster correlated features
-        3. Keep most important feature per cluster
-        4. Iteratively remove correlated pairs
+    Simplified version: just select top features by SHAP importance.
+    PCA will handle redundancy automatically.
     """
-    # Step 1: SHAP filtering
+    import warnings
+    warnings.warn(
+        "feature_engineering_pipeline is deprecated. "
+        "Use KNNLatentSHAPMethod(n_shap_features=N) instead.",
+        DeprecationWarning
+    )
+    
+    # Just select features above threshold
     retained_features = mean_shap_df[mean_shap_df > shap_threshold].index
     retained_features = retained_features.intersection(latent_space.columns)
-    print(f"Retained {len(retained_features)} features after SHAP filtering (threshold={shap_threshold})")
-
-    retained_latent_space = latent_space[retained_features]
-    correlation_matrix = retained_latent_space.corr()
-    abs_correlation_matrix = np.abs(correlation_matrix)
-
-    # Visualize with dendrogram
-    linkage_matrix = linkage(squareform(1 - abs_correlation_matrix), method="ward")
-    sns.clustermap(
-        abs_correlation_matrix,
-        row_linkage=linkage_matrix,
-        col_linkage=linkage_matrix,
-        cmap="coolwarm",
-        vmin=0, vmax=1,
-        figsize=(12, 12),
-        annot=True
-    )
-    plt.title("Clustered Correlation Heatmap After SHAP Filtering")
-    plt.show()
-
-    # Step 2: Identify clusters
-    clusters = fcluster(linkage_matrix, t=1 - corr_threshold, criterion="distance")
-    cluster_groups = {cluster: [] for cluster in np.unique(clusters)}
     
-    for feature, cluster in zip(abs_correlation_matrix.columns, clusters):
-        cluster_groups[cluster].append(feature)
-
-    print(f"Identified {len(cluster_groups)} clusters")
-
-    # Step 3: Keep most important from each cluster
-    final_features = []
-    for cluster, features in cluster_groups.items():
-        if len(features) > 1:
-            most_important = max(features, key=lambda f: mean_shap_df[f])
-            final_features.append(most_important)
-        else:
-            final_features.extend(features)
-
-    # Step 4: Resolve remaining high correlations
-    retained_latent_space = latent_space[final_features]
-    correlation_matrix = retained_latent_space.corr()
-    abs_correlation_matrix = np.abs(correlation_matrix)
-
-    while True:
-        correlated_pairs = [
-            (i, j)
-            for i in abs_correlation_matrix.columns
-            for j in abs_correlation_matrix.columns
-            if i != j and abs_correlation_matrix.loc[i, j] > corr_threshold
-        ]
-        if not correlated_pairs:
-            break
-
-        features_to_remove = set()
-        for i, j in correlated_pairs:
-            less_important = i if mean_shap_df[i] < mean_shap_df[j] else j
-            features_to_remove.add(less_important)
-
-        final_features = [f for f in final_features if f not in features_to_remove]
-        retained_latent_space = latent_space[final_features]
-        correlation_matrix = retained_latent_space.corr()
-        abs_correlation_matrix = np.abs(correlation_matrix)
-
-    print(f"Retained {len(final_features)} features after correlation filtering (threshold={corr_threshold})")
-
-    # Final heatmap
-    final_corr_matrix = abs_correlation_matrix.loc[final_features, final_features]
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(
-        final_corr_matrix,
-        xticklabels=final_features,
-        yticklabels=final_features,
-        cmap="coolwarm",
-        vmin=0, vmax=1,
-        annot=True,
-        cbar=True
-    )
-    plt.title("Final Retained Features Correlation Heatmap")
-    plt.xlabel("Features")
-    plt.ylabel("Features")
-    plt.tight_layout()
-    plt.show()
-
+    retained_latent_space = latent_space[retained_features]
+    final_features = retained_features.tolist()
+    
+    print(f"Selected {len(final_features)} features above SHAP threshold {shap_threshold}")
+    
     return retained_latent_space, final_features
 
 

@@ -27,7 +27,6 @@ from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 
 # Import UQ_Toolbox
 import FailCatcher.UQ_toolbox as uq
-from FailCatcher.methods.tta import TTAMethod, GPSMethod
 from medMNIST.utils import train_load_datasets_resnet as tr
 
 
@@ -137,7 +136,7 @@ def compute_tta(models, test_dataset, device, image_size,
     """Compute TTA using class-based API."""
     cfg = {**TTA_CONFIG, **(config or {})}
     
-    tta = TTAMethod(
+    tta = uq.TTAMethod(
         transformations=None,  # Random policies
         n=cfg['n'],
         m=cfg['m'],
@@ -161,7 +160,7 @@ def compute_gps(models, test_dataset, device, image_size,
     cfg = {**GPS_CONFIG, **(config or {})}
     
     # Step 1: Initialize GPS method
-    gps = GPSMethod(
+    gps = uq.GPSMethod(
         aug_folder=aug_folder,
         correct_calib=correct_idx_calib,
         incorrect_calib=incorrect_idx_calib,
@@ -182,7 +181,6 @@ def compute_gps(models, test_dataset, device, image_size,
     metric = gps.compute(
         models, test_dataset, device,
         n=2, m=45,
-        nb_channels=3,
         image_size=image_size,
         image_normalization=True,
         mean=cfg['mean'],
@@ -191,6 +189,31 @@ def compute_gps(models, test_dataset, device, image_size,
     )
     
     return metric.tolist()
+
+def compute_knn_raw(models, train_loader, test_loader, device, layer_name='avgpool', k=5):
+    """Compute KNN in raw latent space (supports model ensembles)."""
+    knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=k)
+    knn_method.fit(models, train_loader, device)
+    metric = knn_method.compute(models, test_loader, device)
+    return metric
+
+
+def compute_knn_shap(models, train_loader, calib_loader, test_loader, 
+                     device, layer_name='avgpool', k=5, n_shap_features=50):
+    """
+    Compute KNN in SHAP-selected latent space (supports model ensembles).
+    
+    Per-class matching: Test sample → Training samples of PREDICTED class.
+    """
+    knn_method = uq.KNNLatentSHAPMethod(
+        layer_name=layer_name,
+        k=k,
+        n_shap_features=n_shap_features  # Just specify number of features!
+    )
+    knn_method.fit(models, train_loader, calib_loader, device)
+    metric = knn_method.compute(models, test_loader, device)
+    return metric
+
 
 
 # ============================================================================
@@ -499,6 +522,39 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
             }
             print(f"  AUC: {metrics['auc']:.4f}")
     
+    # KNN Raw Latent
+    if 'KNN_Raw' in methods:
+        print("\n🔬 Running KNN (Raw Latent)...")
+        with Timer("KNN_Raw") as timer:
+            metric = compute_knn_raw(
+                models, train_loader, test_loader, device, 
+                layer_name='avgpool'  # Just pass the string!
+            )
+        computed_metrics['KNN_Raw'] = metric
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        results['methods']['KNN_Raw'] = {
+            'time_seconds': timer.elapsed,
+            **metrics
+        }
+        print(f"  AUC: {metrics['auc']:.4f}")
+
+    # KNN SHAP
+    if 'KNN_SHAP' in methods:
+        print("\n🔬 Running KNN (SHAP-Selected Latent)...")
+        with Timer("KNN_SHAP") as timer:
+            metric = compute_knn_shap(
+                models, train_loader, calib_loader, test_loader,
+                device, layer_name='avgpool', n_shap_features=50  # Clean parameter!
+            )
+        computed_metrics['KNN_SHAP'] = metric
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        results['methods']['KNN_SHAP'] = {
+            'time_seconds': timer.elapsed,
+            **metrics
+        }
+        print(f"  AUC: {metrics['auc']:.4f}")
+        
+
     # ========================================================================
     # SAVE RESULTS
     # ========================================================================
@@ -547,8 +603,8 @@ def main():
     )
     parser.add_argument(
         '--methods', nargs='+', 
-        default=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS'],
-        choices=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS'],
+        default=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP'],
+        choices=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP'],
         help='UQ methods to run (default: all)'
     )
     parser.add_argument(
@@ -576,7 +632,7 @@ def main():
     args = parser.parse_args()
     
     if args.all_methods:
-        methods = ['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS']
+        methods = ['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP']
     else:
         methods = args.methods
     

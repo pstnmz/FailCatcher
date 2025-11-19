@@ -48,9 +48,11 @@ from .methods.distance import (
 
 # Latent space methods
 from .methods.latent import (
-    SHAPLatentMethod,
+    ClassifierHeadWrapper,
+    KNNLatentSHAPMethod,
     KNNLatentMethod,
     HyperplaneDistanceMethod,
+    get_layer_from_model,
     extract_latent_space_and_compute_shap_importance,
     compute_mean_shap_values,
     display_shap_values,
@@ -120,9 +122,11 @@ __all__ = [
     "fit_temperature_scaling",
     "compute_class_weights",
     # Latent
-    "SHAPLatentMethod",
+    "ClassifierHeadWrapper",
+    "KNNLatentSHAPMethod",
     "KNNLatentMethod",
     "HyperplaneDistanceMethod",
+    "get_layer_from_model",
     "extract_latent_space_and_compute_shap_importance",
     "compute_mean_shap_values",
     "display_shap_values",
