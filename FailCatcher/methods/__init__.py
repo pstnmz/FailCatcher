@@ -30,9 +30,11 @@ from .distance import (
 )
 # Latent space
 from .latent import (
-    SHAPLatentMethod,
+    ClassifierHeadWrapper,
+    KNNLatentSHAPMethod,
     KNNLatentMethod,
     HyperplaneDistanceMethod,
+    get_layer_from_model,
     extract_latent_space_and_compute_shap_importance,
     compute_mean_shap_values,
     display_shap_values,
@@ -66,14 +68,16 @@ __all__ = [
     "fit_temperature_scaling",
     "compute_class_weights",
     # Latent Classes
-    "SHAPLatentMethod",
+    "ClassifierHeadWrapper",
+    "KNNLatentSHAPMethod",
     "KNNLatentMethod",
     "HyperplaneDistanceMethod",
     # Latent Functions
+    "get_layer_from_model",
     "extract_latent_space_and_compute_shap_importance",
     "compute_mean_shap_values",
     "display_shap_values",
     "feature_engineering_pipeline",
     "analyze_hyperplane_distance",
-    "compute_knn_distances_to_train_data",
+    "compute_knn_distances_to_train_data"
 ]

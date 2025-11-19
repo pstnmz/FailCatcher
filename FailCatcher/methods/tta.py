@@ -19,7 +19,6 @@ from ..core.utils import (
     EnsurePIL,
     _CachedRandAugDataset,
     _dl_worker_init,
-    to_3_channels,
     to_1_channel
 )
 
@@ -408,7 +407,6 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
         augmentations = [transforms.Compose([
                     EnsurePIL(),                                 # convert tensor/ndarray -> PIL if needed
                     transforms.Lambda(lambda img: img.convert("RGB")),  # ensure RGB for randaug
-                    # removed redundant to_3_channels() - convert("RGB") already ensures RGB
                     rand_aug,                                            # BetterRandAugment expects PIL Image
                     *([to_1_channel] if nb_channels == 1 else []),       # convert back to single channel if needed
                     transforms.PILToTensor(),                            # PIL -> Tensor (uint8 -> [0,255] -> Tensor)
@@ -523,7 +521,6 @@ def apply_randaugment_and_store_results(
                 transforms.Compose([
                     EnsurePIL(),
                     transforms.Lambda(lambda img: img.convert("RGB")),
-                    *([to_3_channels] if nb_channels == 1 else []),
                     rand_aug,
                     *([to_1_channel] if nb_channels == 1 else []),
                     transforms.ToTensor(),
