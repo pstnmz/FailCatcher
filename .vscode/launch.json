@@ -8,7 +8,7 @@
             "program": "${workspaceFolder}/launch_uq_methods.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["--flag", "breastmnist", "--methods", "GPS"],
+            "args": ["--flag", "breastmnist", "--methods", "KNN_SHAP"],
             "justMyCode": false
         }
     ]

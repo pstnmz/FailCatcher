@@ -141,43 +141,46 @@ class ClassifierHeadWrapper(nn.Module):
 class KNNLatentMethod(UQMethod):
     """
     Uncertainty quantification via KNN distance in RAW latent space.
-    No feature selection - uses all latent features.
-    Works with single model or ensemble (averages distances).
+    Supports CV ensembles with per-fold training data.
     """
     def __init__(self, layer_name='avgpool', k=5, pca_variance=0.9):
-        """
-        Args:
-            layer_name: Name of layer to extract features from (e.g., 'avgpool', 'layer4')
-            k: Number of nearest neighbors
-            pca_variance: Variance to retain in PCA (0-1)
-        """
         super().__init__("KNN-Latent-Raw")
         self.layer_name = layer_name
         self.k = k
         self.pca_variance = pca_variance
         self.fitted_models = []
     
-    def fit(self, models, train_loader, device):
+    def fit(self, models, train_loaders, device):
         """
         Fit KNN on training data latent space for each model.
         
         Args:
-            models: Single model or list of models
-            train_loader: Training data loader
+            models: List of models (one per fold)
+            train_loaders: List of train DataLoaders (one per fold) OR single loader
             device: torch.device
         """
         if not isinstance(models, list):
             models = [models]
         
+        # Handle both single loader and list of loaders
+        if not isinstance(train_loaders, list):
+            train_loaders = [train_loaders] * len(models)
+        
+        if len(models) != len(train_loaders):
+            raise ValueError(
+                f"Number of models ({len(models)}) must match "
+                f"number of train loaders ({len(train_loaders)})"
+            )
+        
         self.fitted_models = []
         
-        for idx, model in enumerate(models):
-            print(f"  Fitting model {idx+1}/{len(models)}...")
+        for idx, (model, train_loader) in enumerate(zip(models, train_loaders)):
+            print(f"  Fold {idx}: Fitting KNN on its training set...")
             
             # Extract layer from this model
             layer = get_layer_from_model(model, self.layer_name)
             
-            # Extract raw features (no SHAP needed)
+            # Extract features from THIS fold's training data
             features, labels, _, _ = extract_latent_space_and_compute_shap_importance(
                 model, train_loader, device, layer, importance=False
             )
@@ -200,24 +203,13 @@ class KNNLatentMethod(UQMethod):
                 'layer': layer
             })
             
-            print(f"    Layer: {layer.__class__.__name__}")
-            print(f"    PCA: {features.shape[1]} -> {features_pca.shape[1]} features")
+            print(f"    {len(features)} train samples, {features.shape[1]} → {features_pca.shape[1]} PCA dims")
         
-        print(f"  ✓ Fitted KNN on {len(models)} model(s), {len(features)} training samples")
+        print(f"  ✓ Fitted {len(models)} fold(s)")
         return self
     
     def compute(self, models, data_loader, device):
-        """
-        Compute KNN distances for test data, averaged across models.
-        
-        Args:
-            models: Single model or list of models
-            data_loader: Test data loader
-            device: torch.device
-        
-        Returns:
-            np.ndarray: Mean distance to k nearest neighbors (N,)
-        """
+        """Compute KNN distances, averaged across folds."""
         if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
         
@@ -231,7 +223,7 @@ class KNNLatentMethod(UQMethod):
         
         for idx, (model, fitted) in enumerate(zip(models, self.fitted_models)):
             # Extract test features using the saved layer
-            features, labels, success, _ = extract_latent_space_and_compute_shap_importance(
+            features, _, _, _ = extract_latent_space_and_compute_shap_importance(
                 model, data_loader, device, fitted['layer'], importance=False
             )
             
@@ -244,10 +236,10 @@ class KNNLatentMethod(UQMethod):
             avg_distances = distances.mean(axis=1)
             all_distances.append(avg_distances)
         
-        # Average across models
+        # Average across folds
         final_distances = np.mean(all_distances, axis=0)
         
-        print(f"  ✓ Computed KNN distances (averaged over {len(models)} models)")
+        print(f"  ✓ Computed KNN distances (averaged over {len(models)} folds)")
         return final_distances
 
 
@@ -255,94 +247,82 @@ class KNNLatentSHAPMethod(UQMethod):
     """
     Uncertainty quantification via KNN distance in SHAP-SELECTED latent space.
     
-    **Important**: KNN distances are computed PER PREDICTED CLASS:
-    - Test sample with predicted class i → KNN in training samples of class i
-    - This makes sense for failure detection: correct predictions should be
-      close to their class training data, misclassifications should be far.
-    
-    Works with single model or ensemble (averages distances).
+    **Critical Process:**
+    For EACH model with its CV training split:
+      1. Compute SHAP on calibration → select top-k features per class
+      2. For each test sample:
+         - Get predicted class
+         - Extract latent features, keep only top-k for that class
+         - Compute KNN distance to training samples (true label = predicted class)
+      3. Average distances across all models
     """
-    def __init__(self, layer_name='avgpool', k=5, 
-                 n_shap_features=50,
-                 max_background_samples=1000):
-        """
-        Args:
-            layer_name: Name of layer to extract features from (e.g., 'avgpool', 'layer4')
-            k: Number of nearest neighbors
-            n_shap_features: Number of top SHAP features to select per class
-            max_background_samples: Max samples for SHAP background
-        """
+    def __init__(self, layer_name='avgpool', k=5, n_shap_features=50, max_background_samples=1000):
         super().__init__("KNN-Latent-SHAP")
         self.layer_name = layer_name
         self.k = k
         self.n_shap_features = n_shap_features
         self.max_background = max_background_samples
         
-        # Will be set during fit()
         self.fitted_models = []
         self.num_classes = None
     
-    def fit(self, models, train_loader, calib_loader, device):
+    def fit(self, models, train_loaders, calib_loader, device):
         """
-        Fit KNN on SHAP-selected features from training data.
-        
-        **Per-class KNN**: For each class i, fit KNN on training samples of class i only.
-        
-        Args:
-            models: Single model or list of models
-            train_loader: Training data loader (for KNN fitting)
-            calib_loader: Calibration data loader (for SHAP computation)
-            device: torch.device
-        
-        Returns:
-            self
+        Fit KNN PER MODEL using:
+        - SHAP computed on calibration (per model)
+        - KNN fitted on training (per model's CV split)
         """
         if not isinstance(models, list):
             models = [models]
         
+        if not isinstance(train_loaders, list):
+            train_loaders = [train_loaders] * len(models)
+        
+        if len(models) != len(train_loaders):
+            raise ValueError(f"Models ({len(models)}) != train_loaders ({len(train_loaders)})")
+        
         self.fitted_models = []
         
-        # Step 1: Extract layer and create SHAP wrapper (using first model)
-        print("  Step 1: Computing SHAP values on calibration set...")
-        reference_model = models[0]
-        reference_layer = get_layer_from_model(reference_model, self.layer_name)
-        classifierhead = ClassifierHeadWrapper(reference_model, self.layer_name)
-        
-        shap_values, features_calib, labels_calib, _ = \
-            extract_latent_space_and_compute_shap_importance(
-                reference_model, calib_loader, device, reference_layer,
-                importance=True,
-                classifierheadwrapper=classifierhead,
-                max_background_samples=self.max_background
-            )
-        
-        print("  Step 2: Computing mean SHAP importances per class...")
-        mean_shap_results = compute_mean_shap_values(
-            shap_values, fold=0, true_labels=labels_calib, nb_features=self.n_shap_features
-        )
-        
-        self.num_classes = len(mean_shap_results)
-        print(f"    Detected {self.num_classes} classes")
-        
-        # Extract SHAP-selected features per class (just take top-n by importance)
-        selected_features_per_class = []
-        for class_idx in range(self.num_classes):
-            mean_shap_series = mean_shap_results[class_idx][2]  # (fold, class, importance_series)
-            
-            # Select top-n features by SHAP importance
-            top_features = mean_shap_series.nlargest(self.n_shap_features).index.tolist()
-            selected_features_per_class.append(top_features)
-            
-            print(f"  Step 3.{class_idx}: Selected top {len(top_features)} SHAP features for class {class_idx}")
-        
-        # Step 4: Fit KNN per model, per class
-        for model_idx, model in enumerate(models):
-            print(f"  Step 4.{model_idx}: Fitting KNN for model {model_idx+1}/{len(models)}...")
+        # =======================================================================
+        # FOR EACH MODEL: Compute SHAP + Fit KNN
+        # =======================================================================
+        for fold_idx, (model, train_loader) in enumerate(zip(models, train_loaders)):
+            print(f"\n  Model {fold_idx+1}/{len(models)}: Computing SHAP + fitting KNN...")
             
             # Extract layer for this model
             layer = get_layer_from_model(model, self.layer_name)
+            classifierhead = ClassifierHeadWrapper(model, self.layer_name)
             
-            # Extract training features
+            # STEP 1: Compute SHAP on CALIBRATION for THIS model
+            print(f"    Step 1: Computing SHAP on calibration...")
+            shap_values, features_calib, labels_calib, _ = \
+                extract_latent_space_and_compute_shap_importance(
+                    model, calib_loader, device, layer,
+                    importance=True,
+                    classifierheadwrapper=classifierhead,
+                    max_background_samples=self.max_background
+                )
+            
+            # STEP 2: Get mean SHAP importances per class
+            print(f"    Step 2: Computing mean SHAP per class...")
+            mean_shap_results = compute_mean_shap_values(
+                shap_values, fold=fold_idx, true_labels=labels_calib, 
+                nb_features=self.n_shap_features
+            )
+            
+            if self.num_classes is None:
+                self.num_classes = len(mean_shap_results)
+                print(f"      Detected {self.num_classes} classes")
+            
+            # STEP 3: Extract top-k SHAP features per class
+            selected_features_per_class = []
+            for class_idx in range(self.num_classes):
+                mean_shap_series = mean_shap_results[class_idx][2]
+                top_features = mean_shap_series.nlargest(self.n_shap_features).index.tolist()
+                selected_features_per_class.append(top_features)
+            
+            # STEP 4: Extract TRAINING features for THIS model
+            print(f"    Step 3: Extracting training features...")
             features_train, labels_train, _, _ = extract_latent_space_and_compute_shap_importance(
                 model, train_loader, device, layer, importance=False
             )
@@ -352,30 +332,32 @@ class KNNLatentSHAPMethod(UQMethod):
                 columns=[f"Feature_{i}" for i in range(features_train.shape[1])]
             )
             
+            # STEP 5: Fit KNN per class using THIS MODEL's SHAP features
+            print(f"    Step 4: Fitting KNN per class...")
             model_knns = []
             
             for class_idx in range(self.num_classes):
-                # Filter training data by class
+                # Filter by TRUE class label
                 class_mask = (labels_train == class_idx)
                 train_class_df = train_df[class_mask]
                 
                 if len(train_class_df) == 0:
-                    print(f"    ⚠️  No training samples for class {class_idx}")
+                    print(f"      Class {class_idx}: No training samples")
                     model_knns.append(None)
                     continue
                 
-                # Select top SHAP features for this class
+                # Use THIS MODEL's SHAP features
                 selected_features = selected_features_per_class[class_idx]
                 train_selected = train_class_df[selected_features].values
                 
-                # Standardize and PCA (PCA handles redundancy)
+                # Fit scaler + PCA on TRAINING data
                 scaler = StandardScaler()
                 train_std = scaler.fit_transform(train_selected)
                 
                 pca = PCA(n_components=0.9)
                 train_pca = pca.fit_transform(train_std)
                 
-                # Fit KNN
+                # Fit KNN on TRAINING data
                 knn = NearestNeighbors(n_neighbors=min(self.k, len(train_pca)))
                 knn.fit(train_pca)
                 
@@ -388,28 +370,22 @@ class KNNLatentSHAPMethod(UQMethod):
                     'n_samples': len(train_pca)
                 })
                 
-                print(f"      Class {class_idx}: {len(train_pca)} samples, "
-                      f"{len(selected_features)} SHAP features -> {train_pca.shape[1]} PCA components")
+                print(f"      Class {class_idx}: {len(train_pca)} train samples, "
+                      f"{len(selected_features)} SHAP → {train_pca.shape[1]} PCA")
             
             self.fitted_models.append(model_knns)
         
-        print(f"  ✓ Fitted {len(models)} model(s) with per-class KNN")
+        print(f"\n  ✓ Fitted {len(models)} models (each with its own SHAP + KNN)")
         return self
     
     def compute(self, models, data_loader, device):
         """
-        Compute KNN distances for test data using SHAP-selected features.
+        Compute KNN distances for test samples.
         
-        **Per-class matching**: Each test sample is compared to training samples
-        of its PREDICTED class (not true class). This is key for failure detection.
-        
-        Args:
-            models: Single model or list of models
-            data_loader: Test data loader
-            device: torch.device
-        
-        Returns:
-            np.ndarray: Mean distance to k nearest neighbors (N,)
+        For each test sample:
+        - Get predicted class from model
+        - Use that model's SHAP-selected features for that class
+        - Compute distance to training samples (true label = predicted class)
         """
         if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
@@ -423,7 +399,9 @@ class KNNLatentSHAPMethod(UQMethod):
         all_distances = []
         
         for model_idx, (model, model_knns) in enumerate(zip(models, self.fitted_models)):
-            # Use the layer from the first non-None class
+            model.eval()
+            
+            # Get layer from first non-None class
             layer = None
             for knn_data in model_knns:
                 if knn_data is not None:
@@ -433,19 +411,21 @@ class KNNLatentSHAPMethod(UQMethod):
             if layer is None:
                 raise RuntimeError("No valid class KNN data found")
             
-            # Extract test features
-            features_test, labels_test, success_test, predictions = \
-                extract_latent_space_and_compute_shap_importance(
-                    model, data_loader, device, layer, importance=False
-                )
+            # =======================================================================
+            # EXTRACT TEST FEATURES + PREDICTIONS
+            # =======================================================================
             
-            # Get predicted classes
-            if isinstance(predictions, list):
-                predictions = np.array(predictions)
-            if predictions.ndim == 2:
-                predicted_classes = predictions.argmax(axis=1)
-            else:
-                predicted_classes = predictions
+            all_labels = []
+            features_test, labels_test, _, predicted_classes = extract_latent_space_and_compute_shap_importance(
+                model, data_loader, device, layer, importance=False
+            )
+            
+            # Concatenate features
+            labels_test = np.array(labels_test, dtype=int)  # ← Ensure int type
+            predicted_classes = np.array(predicted_classes, dtype=int)  # ← Ensure int type
+            
+            print(f"\n  Model {model_idx+1}: Processing {len(predicted_classes)} test samples")
+            print(f"    Predicted: {np.bincount(labels_test)} | True: {np.bincount(labels_test)}")
             
             test_df = pd.DataFrame(
                 features_test.numpy(),
@@ -454,7 +434,9 @@ class KNNLatentSHAPMethod(UQMethod):
             
             distances_per_sample = np.zeros(len(test_df))
             
-            # Compute distances per class
+            # =======================================================================
+            # COMPUTE DISTANCES PER PREDICTED CLASS
+            # =======================================================================
             for class_idx in range(self.num_classes):
                 if model_knns[class_idx] is None:
                     continue
@@ -462,22 +444,37 @@ class KNNLatentSHAPMethod(UQMethod):
                 fitted = model_knns[class_idx]
                 
                 # Test samples PREDICTED as this class
-                class_mask = (predicted_classes == class_idx)
-                test_class_df = test_df[class_mask]
+                class_mask = (labels_test == class_idx)
+                n_samples_class = class_mask.sum()
                 
-                if len(test_class_df) == 0:
+                if n_samples_class == 0:
                     continue
                 
-                # Select same features as training
+                test_class_df = test_df[class_mask]
+                
+                # Use THIS MODEL's SHAP features for this class
                 test_selected = test_class_df[fitted['selected_features']].values
                 
-                # Transform
+                # Transform using THIS MODEL's fitted scaler + PCA
                 test_std = fitted['scaler'].transform(test_selected)
                 test_pca = fitted['pca'].transform(test_std)
                 
-                # Compute distances
+                # Compute KNN distances to TRAINING data
                 distances, _ = fitted['knn'].kneighbors(test_pca)
                 avg_distances = distances.mean(axis=1)
+                
+                # Debug
+                class_labels = labels_test[class_mask]
+                n_correct = (class_labels == class_idx).sum()
+                n_incorrect = (class_labels != class_idx).sum()
+                
+                print(f"    Class {class_idx}: {n_samples_class} pred ({n_correct} ✓, {n_incorrect} ✗)")
+                if n_correct > 0:
+                    correct_dists = avg_distances[class_labels == class_idx]
+                    print(f"      Correct: {correct_dists.mean():.3f}±{correct_dists.std():.3f}")
+                if n_incorrect > 0:
+                    incorrect_dists = avg_distances[class_labels != class_idx]
+                    print(f"      Incorrect: {incorrect_dists.mean():.3f}±{incorrect_dists.std():.3f}")
                 
                 # Store distances
                 indices = np.where(class_mask)[0]
@@ -485,10 +482,11 @@ class KNNLatentSHAPMethod(UQMethod):
             
             all_distances.append(distances_per_sample)
         
-        # Average across models
+        # Step 3: Average distances across all models
         final_distances = np.mean(all_distances, axis=0)
         
-        print(f"  ✓ Computed per-class KNN distances (averaged over {len(models)} models)")
+        print(f"\n  ✓ Final averaged distances: {final_distances.mean():.3f}±{final_distances.std():.3f}")
+        
         return final_distances
 
 class HyperplaneDistanceMethod(UQMethod):
