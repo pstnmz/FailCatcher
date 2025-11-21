@@ -1,0 +1,53 @@
+{
+  "flag": "breastmnist",
+  "timestamp": "20251116_171300",
+  "task_type": "binary-class",
+  "num_classes": 2,
+  "test_size": 156,
+  "calib_size": 125,
+  "test_accuracy": 0.9102564102564102,
+  "calibration_method": "platt",
+  "methods": {
+    "MSR": {
+      "time_seconds": 0.00018504401668906212,
+      "auc": 0.8038229376257545,
+      "threshold": 0.013286200352013111,
+      "balanced_accuracy": 0.7635814889336017,
+      "specificity": 0.9285714285714286,
+      "sensitivity": 0.5985915492957746
+    },
+    "MSR_platt": {
+      "time_seconds": 0.009348912863060832,
+      "auc": 0.7032193158953723,
+      "threshold": 0.47690516569422364,
+      "balanced_accuracy": 0.7132796780684105,
+      "specificity": 0.7857142857142857,
+      "sensitivity": 0.6408450704225352
+    },
+    "Ensembling": {
+      "time_seconds": 0.0002048059832304716,
+      "auc": 0.789738430583501,
+      "threshold": 0.020350430616785074,
+      "balanced_accuracy": 0.7706237424547284,
+      "specificity": 0.9285714285714286,
+      "sensitivity": 0.6126760563380281
+    },
+    "TTA": {
+      "time_seconds": 3.7366134370677173,
+      "auc": 0.6911468812877264,
+      "threshold": 0.16166542814550428,
+      "balanced_accuracy": 0.7168008048289738,
+      "specificity": 0.7857142857142857,
+      "sensitivity": 0.647887323943662
+    },
+    "GPS": {
+      "time_seconds": 52.462872467935085,
+      "auc": 0.8043259557344065,
+      "threshold": 0.11277323700488778,
+      "balanced_accuracy": 0.7489939637826961,
+      "specificity": 0.8571428571428571,
+      "sensitivity": 0.6408450704225352
+    }
+  },
+  "all_metrics_file": "./uq_benchmark_results/all_metrics_breastmnist_20251116_171300.npz"
+}

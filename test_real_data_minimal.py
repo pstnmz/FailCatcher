@@ -1,0 +1,66 @@
+"""
+Minimal test with real medMNIST data before running full launch_uq_methods.py
+"""
+import torch
+import FailCatcher.UQ_toolbox as uq
+from medMNIST.utils import train_load_datasets_resnet as tr
+import torchvision.transforms as transforms
+
+# Config
+flag = 'breastmnist'
+size = 224
+batch_size = 128
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print(f"Testing {flag} on {device}")
+
+# Load data (grayscale)
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[.5], std=[.5]),
+    transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Grayscale -> RGB
+])
+
+# Load models and datasets
+models = tr.load_models(flag, device=device)
+print(f"Loaded {len(models)} models")
+
+[_, calibration_dataset, test_dataset], [_, calibration_loader, test_loader], info = \
+    tr.load_datasets(flag, False, size, transform, batch_size)
+
+print(f"Calibration: {len(calibration_dataset)} samples")
+print(f"Test: {len(test_dataset)} samples")
+
+# Test 1: Evaluate models
+print("\n=== Test 1: Model Evaluation ===")
+y_true, y_scores, digits, correct_idx, incorrect_idx, indiv_scores = \
+    uq.evaluate_models_on_loader(models, test_loader, device)
+
+print(f"Correct: {len(correct_idx)}, Incorrect: {len(incorrect_idx)}")
+print(f"Accuracy: {len(correct_idx) / len(y_true):.3f}")
+
+# Test 2: Ensemble STD
+print("\n=== Test 2: Ensemble STD ===")
+ensemble_stds = uq.ensembling_stds_computation(indiv_scores)
+print(f"Computed {len(ensemble_stds)} std values")
+print(f"Mean std: {sum(ensemble_stds) / len(ensemble_stds):.4f}")
+
+fpr, tpr, auc = uq.roc_curve_UQ_method_computation(
+    [ensemble_stds[i] for i in correct_idx],
+    [ensemble_stds[i] for i in incorrect_idx]
+)
+print(f"Ensemble AUC: {auc:.4f}")
+
+# Test 3: Distance to hard labels
+print("\n=== Test 3: Distance to Hard Labels ===")
+dhl_scores = uq.distance_to_hard_labels_computation(y_scores)
+print(f"Computed {len(dhl_scores)} DHL scores")
+print(f"Mean DHL: {sum(dhl_scores) / len(dhl_scores):.4f}")
+
+fpr, tpr, auc = uq.roc_curve_UQ_method_computation(
+    [dhl_scores[i] for i in correct_idx],
+    [dhl_scores[i] for i in incorrect_idx]
+)
+print(f"DHL AUC: {auc:.4f}")
+
+print("\n✅ All basic tests passed! Ready to run full pipeline.")
