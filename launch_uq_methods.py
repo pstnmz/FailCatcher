@@ -15,6 +15,7 @@ import sys
 import time
 from datetime import datetime
 import pickle as pkl
+from sklearn.model_selection import StratifiedKFold
 
 import torch
 import numpy as np
@@ -69,6 +70,54 @@ class Timer:
     def __exit__(self, *args):
         self.elapsed = time.perf_counter() - self.start_time
         print(f"⏱️  {self.name}: {self.elapsed:.2f}s")
+
+
+# ============================================================================
+# CV SPLIT HELPERS (matching train_resnet18_medMNIST.py)
+# ============================================================================
+
+def get_cv_train_loaders_for_models(study_dataset, models, batch_size=4000, 
+                                   n_splits=5, seed=42, num_workers=4):
+    """
+    Create per-fold training loaders matching the CV splits used during training.
+    
+    Returns:
+        List[DataLoader]: One train_loader per model (fold)
+    """
+    from torch.utils.data import DataLoader, Subset
+    
+    # Get labels from dataset
+    labels = [label for _, label in study_dataset]
+    
+    # Create same CV splits as training (CRITICAL: same seed!)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    
+    train_loaders = []
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(np.zeros(len(labels)), labels)):
+        print(f"  Fold {fold_idx}: train={len(train_idx)}, val={len(val_idx)}")
+        
+        # Create training subset for THIS fold
+        train_subset = Subset(study_dataset, train_idx)
+        
+        # Create loader
+        train_loader = DataLoader(
+            train_subset, 
+            batch_size=batch_size, 
+            shuffle=True,  # No shuffle needed for KNN fitting
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False
+        )
+        
+        train_loaders.append(train_loader)
+    
+    if len(train_loaders) != len(models):
+        raise ValueError(
+            f"CV splits produced {len(train_loaders)} folds but got {len(models)} models. "
+            f"Check n_splits={n_splits} and seed={seed} match training!"
+        )
+    
+    return train_loaders
 
 
 # ============================================================================
@@ -190,27 +239,53 @@ def compute_gps(models, test_dataset, device, image_size,
     
     return metric.tolist()
 
-def compute_knn_raw(models, train_loader, test_loader, device, layer_name='avgpool', k=5):
-    """Compute KNN in raw latent space (supports model ensembles)."""
+def compute_knn_raw(models, study_dataset, test_loader, device, 
+                   layer_name='avgpool', k=5, batch_size=4000, 
+                   cv_seed=42, n_splits=5):
+    """
+    Compute KNN in raw latent space using correct CV splits per model.
+    """
+    print(f"  Reconstructing CV splits (seed={cv_seed}, n_splits={n_splits})...")
+    train_loaders = get_cv_train_loaders_for_models(
+        study_dataset, models, batch_size, n_splits, cv_seed
+    )
+    
+    # Pass loaders directly to the method
     knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=k)
-    knn_method.fit(models, train_loader, device)
+    knn_method.fit(models, train_loaders, device)
     metric = knn_method.compute(models, test_loader, device)
     return metric
 
 
-def compute_knn_shap(models, train_loader, calib_loader, test_loader, 
-                     device, layer_name='avgpool', k=5, n_shap_features=50):
+def compute_knn_shap(models, study_dataset, calib_loader, test_loader, 
+                    device, layer_name='avgpool', k=5, n_shap_features=50,
+                    batch_size=4000, cv_seed=42, n_splits=5):
     """
-    Compute KNN in SHAP-selected latent space (supports model ensembles).
+    Compute KNN in SHAP-selected latent space using correct CV splits.
     
-    Per-class matching: Test sample → Training samples of PREDICTED class.
+    Args:
+        models: List of models
+        study_dataset: Full study dataset (for CV splitting)
+        calib_loader: Pre-built calibration loader (for SHAP)
+        test_loader: Pre-built test loader
+        device: torch.device
+        layer_name: Layer name for feature extraction
+        k: Number of nearest neighbors
+        n_shap_features: Number of top SHAP features to select
+        batch_size: Batch size for CV train loaders
+        cv_seed: CV random seed (must match training)
+        n_splits: Number of CV folds (must match training)
     """
-    knn_method = uq.KNNLatentSHAPMethod(
-        layer_name=layer_name,
-        k=k,
-        n_shap_features=n_shap_features  # Just specify number of features!
+    print(f"  Reconstructing CV splits (seed={cv_seed}, n_splits={n_splits})...")
+    train_loaders = get_cv_train_loaders_for_models(
+        study_dataset, models, batch_size, n_splits, cv_seed
     )
-    knn_method.fit(models, train_loader, calib_loader, device)
+    
+    # Pass existing calib_loader directly to the method
+    knn_method = uq.KNNLatentSHAPMethod(
+        layer_name=layer_name, k=k, n_shap_features=n_shap_features
+    )
+    knn_method.fit(models, train_loaders, calib_loader, device)
     metric = knn_method.compute(models, test_loader, device)
     return metric
 
@@ -334,8 +409,8 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         
         # Load models and datasets
         models = tr.load_models(flag, device=device)
-        [train_dataset, calib_dataset, test_dataset], \
-        [train_loader, calib_loader, test_loader], info = \
+        [study_dataset, calib_dataset, test_dataset], \
+        [study_loader, calib_loader, test_loader], info = \
             tr.load_datasets(flag, color, image_size, transform, batch_size)
         
         [_, calib_dataset_tta, test_dataset_tta], \
@@ -346,7 +421,7 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         num_classes = len(info['label'])
     
     print(f"  Models: {len(models)}")
-    print(f"  Train: {len(train_dataset)}, Calib: {len(calib_dataset)}, Test: {len(test_dataset)}")
+    print(f"  Train+val: {len(study_dataset)}, Calib: {len(calib_dataset)}, Test: {len(test_dataset)}")
     print(f"  Task: {task_type}, Classes: {num_classes}")
     print(f"  Calibration method: {calib_method}")
     
@@ -522,13 +597,19 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
             }
             print(f"  AUC: {metrics['auc']:.4f}")
     
-    # KNN Raw Latent
     if 'KNN_Raw' in methods:
         print("\n🔬 Running KNN (Raw Latent)...")
         with Timer("KNN_Raw") as timer:
             metric = compute_knn_raw(
-                models, train_loader, test_loader, device, 
-                layer_name='avgpool'  # Just pass the string!
+                models, 
+                study_dataset,  # Full study dataset for CV splits
+                test_loader,    # Already-built test loader
+                device,
+                layer_name='avgpool',
+                k=5,
+                batch_size=batch_size,
+                cv_seed=42,      # MUST match training
+                n_splits=5       # MUST match training
             )
         computed_metrics['KNN_Raw'] = metric
         metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
@@ -543,8 +624,17 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         print("\n🔬 Running KNN (SHAP-Selected Latent)...")
         with Timer("KNN_SHAP") as timer:
             metric = compute_knn_shap(
-                models, train_loader, calib_loader, test_loader,
-                device, layer_name='avgpool', n_shap_features=50  # Clean parameter!
+                models, 
+                study_dataset,   # Full study dataset for CV splits
+                calib_loader,    # Already-built calib loader (reuse!)
+                test_loader,     # Already-built test loader
+                device,
+                layer_name='avgpool',
+                k=5,
+                n_shap_features=50,
+                batch_size=batch_size,
+                cv_seed=42,      # MUST match training
+                n_splits=5       # MUST match training
             )
         computed_metrics['KNN_SHAP'] = metric
         metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)

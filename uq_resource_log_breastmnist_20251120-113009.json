@@ -1,0 +1,18 @@
+[
+  {
+    "label": "KNNshap",
+    "wall_time_s": 6.389697110746056,
+    "cpu_user_s": 98.44,
+    "cpu_system_s": 1.6400000000000001,
+    "rss_mb_start": 1591.12890625,
+    "rss_mb_end": 1840.25,
+    "cuda_idx": 0,
+    "gpu_mem_mb_peak": 6912.10791015625,
+    "gpu_mem_mb_end": 249.81982421875,
+    "gpu_util_avg": 49.37931034482759,
+    "gpu_util_max": 100,
+    "flag": "breastmnist",
+    "num_classes": 2,
+    "batch_size": 4000
+  }
+]

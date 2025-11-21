@@ -53,15 +53,15 @@ def compute_shap_for_fold(fold, device_str, results, color, dataflag, size, batc
         classifierheadwrapper=classifier_head,
         max_background_samples=1000
     )
-    results[fold] = (shap_features, shap_values, success.squeeze() if success.ndim > 1 else success)
+    results[fold] = (shap_features, shap_values, success.squeeze() if success.ndim > 1 else success, labels)
 
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
 
-    dataflag = 'bloodmnist'
-    color = True # True for color, False for grayscale
-    activation = 'softmax'
+    dataflag = 'breastmnist'
+    color = False # True for color, False for grayscale
+    activation = 'sigmoid'
     batch_size = 4000
     im_size = 224
     size = 224  # Image size for the models
@@ -71,6 +71,7 @@ if __name__ == '__main__':
     latent_spaces = []
     shap_values_folds = []
     success_folds = []
+    labels_folds = []
 
     # Create a manager to store results
     manager = mp.Manager()
@@ -96,17 +97,19 @@ if __name__ == '__main__':
 
     # Collect results
     for fold in range(5):
-        shap_features, shap_values, success = results[fold]
+        shap_features, shap_values, success, labels = results[fold]
         latent_spaces.append(shap_features)
         shap_values_folds.append(shap_values)
         success_folds.append(success)
-    folder_name = f'/mnt/data/psteinmetz/archive_notebooks/Documents/medMNIST/shap/{im_size}*{im_size}'
+        labels_folds.append(labels)
+    folder_name = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/'
     os.makedirs(folder_name, exist_ok=True)
     # Save results to a file
-    with open(f'/mnt/data/psteinmetz/archive_notebooks/Documents/medMNIST/shap/{im_size}*{im_size}/shap_results_calibration_{dataflag}.pkl', 'wb') as f:
+    with open(f'{folder_name}shap_results_calibration_{dataflag}_test.pkl', 'wb') as f:
         pickle.dump({
             'latent_spaces': latent_spaces,
             'shap_values_folds': shap_values_folds,
             'success_folds': success_folds,
+            'labels' : labels_folds,
             'results': dict(results)  # Save the results dictionary as well
         }, f)
