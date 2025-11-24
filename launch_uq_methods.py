@@ -76,8 +76,8 @@ class Timer:
 # CV SPLIT HELPERS (matching train_resnet18_medMNIST.py)
 # ============================================================================
 
-def get_cv_train_loaders_for_models(study_dataset, models, batch_size=4000, 
-                                   n_splits=5, seed=42, num_workers=4):
+def get_cv_train_loaders_for_models(study_dataset, models, batch_size=5000, 
+                                   n_splits=5, seed=42, num_workers=0):
     """
     Create per-fold training loaders matching the CV splits used during training.
     
@@ -103,7 +103,7 @@ def get_cv_train_loaders_for_models(study_dataset, models, batch_size=4000,
         train_loader = DataLoader(
             train_subset, 
             batch_size=batch_size, 
-            shuffle=True,  # No shuffle needed for KNN fitting
+            shuffle=True,
             num_workers=num_workers,
             pin_memory=True,
             drop_last=False
@@ -257,9 +257,7 @@ def compute_knn_raw(models, study_dataset, test_loader, device,
     return metric
 
 
-def compute_knn_shap(models, study_dataset, calib_loader, test_loader, 
-                    device, layer_name='avgpool', k=5, n_shap_features=50,
-                    batch_size=4000, cv_seed=42, n_splits=5):
+def compute_knn_shap(models, study_dataset, calib_loader, test_loader, device, flag, layer_name='avgpool', k=5, n_shap_features=50, batch_size=4000, cv_seed=42, n_splits=5, cache_dir='./uq_benchmark_results/shap_cache', parallel=False, n_jobs=2):
     """
     Compute KNN in SHAP-selected latent space using correct CV splits.
     
@@ -275,17 +273,27 @@ def compute_knn_shap(models, study_dataset, calib_loader, test_loader,
         batch_size: Batch size for CV train loaders
         cv_seed: CV random seed (must match training)
         n_splits: Number of CV folds (must match training)
+        cache_dir: Directory to cache SHAP results
+        parallel: Enable parallel processing across folds
+        n_jobs: Number of parallel workers (default: 2)
     """
     print(f"  Reconstructing CV splits (seed={cv_seed}, n_splits={n_splits})...")
     train_loaders = get_cv_train_loaders_for_models(
         study_dataset, models, batch_size, n_splits, cv_seed
     )
     
-    # Pass existing calib_loader directly to the method
+    # Create method with parallelization enabled
     knn_method = uq.KNNLatentSHAPMethod(
-        layer_name=layer_name, k=k, n_shap_features=n_shap_features
+        layer_name=layer_name, 
+        k=k, 
+        n_shap_features=n_shap_features,
+        cache_dir=cache_dir,
+        parallel=parallel,  # ← Enable parallel mode
+        n_jobs=n_jobs       # ← Number of workers
     )
-    knn_method.fit(models, train_loaders, calib_loader, device)
+    
+    # fit() will now run in parallel if enabled
+    knn_method.fit(models, train_loaders, calib_loader, device, flag=flag)
     metric = knn_method.compute(models, test_loader, device)
     return metric
 
@@ -622,19 +630,34 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     # KNN SHAP
     if 'KNN_SHAP' in methods:
         print("\n🔬 Running KNN (SHAP-Selected Latent)...")
+        n_gpus = torch.cuda.device_count()
+    
+        if n_gpus >= 3:
+            print(f"  Using {n_gpus} GPUs for parallel processing")
+            parallel_mode = True
+            n_jobs = 3  # Use 3 GPUs (one per fold, with 5 folds = some will reuse GPUs)
+        else:
+            print(f"  Only {n_gpus} GPU(s) available, using sequential mode")
+            parallel_mode = False
+            n_jobs = 1
+        
         with Timer("KNN_SHAP") as timer:
             metric = compute_knn_shap(
                 models, 
-                study_dataset,   # Full study dataset for CV splits
-                calib_loader,    # Already-built calib loader (reuse!)
-                test_loader,     # Already-built test loader
-                device,
+                study_dataset,
+                calib_loader,
+                test_loader,
+                device,  # Main device (for non-parallel parts)
+                flag,
                 layer_name='avgpool',
                 k=5,
                 n_shap_features=50,
                 batch_size=batch_size,
-                cv_seed=42,      # MUST match training
-                n_splits=5       # MUST match training
+                cv_seed=42,
+                n_splits=5,
+                cache_dir=os.path.join(output_dir, 'shap_cache'),
+                parallel=parallel_mode,
+                n_jobs=n_jobs  # Number of parallel workers (≤ num GPUs)
             )
         computed_metrics['KNN_SHAP'] = metric
         metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
@@ -643,7 +666,6 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
             **metrics
         }
         print(f"  AUC: {metrics['auc']:.4f}")
-        
 
     # ========================================================================
     # SAVE RESULTS

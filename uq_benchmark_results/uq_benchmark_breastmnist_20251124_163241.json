@@ -1,0 +1,21 @@
+{
+  "flag": "breastmnist",
+  "timestamp": "20251124_163241",
+  "task_type": "binary-class",
+  "num_classes": 2,
+  "test_size": 156,
+  "calib_size": 125,
+  "test_accuracy": 0.9102564102564102,
+  "calibration_method": "platt",
+  "methods": {
+    "KNN_SHAP": {
+      "time_seconds": 77.75275192083791,
+      "auc": 0.7318913480885312,
+      "threshold": 4.799575262214882,
+      "balanced_accuracy": 0.7233400402414487,
+      "specificity": 0.7142857142857143,
+      "sensitivity": 0.7323943661971831
+    }
+  },
+  "all_metrics_file": "./uq_benchmark_results/all_metrics_breastmnist_20251124_163241.npz"
+}
