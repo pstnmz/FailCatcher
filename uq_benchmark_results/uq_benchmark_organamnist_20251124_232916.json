@@ -1,0 +1,21 @@
+{
+  "flag": "organamnist",
+  "timestamp": "20251124_232916",
+  "task_type": "multi-class",
+  "num_classes": 11,
+  "test_size": 17778,
+  "calib_size": 8211,
+  "test_accuracy": 0.9756440544493193,
+  "calibration_method": "temperature",
+  "methods": {
+    "KNN_SHAP": {
+      "time_seconds": 1134.64118532883,
+      "auc": 0.9136442406081713,
+      "threshold": 4.578931511645814,
+      "balanced_accuracy": 0.8579073509547114,
+      "specificity": 0.9122401847575058,
+      "sensitivity": 0.803574517151917
+    }
+  },
+  "all_metrics_file": "./uq_benchmark_results/all_metrics_organamnist_20251124_232916.npz"
+}

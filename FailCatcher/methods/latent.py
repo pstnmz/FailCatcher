@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import os
 import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -13,8 +14,9 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
-from scipy.cluster.hierarchy import linkage, fcluster
-from scipy.spatial.distance import squareform
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import torch.multiprocessing as torch_mp
 
 from ..core.base import UQMethod
 
@@ -83,8 +85,76 @@ def get_layer_from_model(model, layer_name='avgpool'):
         f"Could not find layer '{layer_name}' in model. "
         f"Available top-level attributes: {[name for name, _ in model.named_children()]}"
     )
+    
+    
 # ============================================================================
-# CLASS-BASED API (new, recommended)
+# PARALLEL WORKER FUNCTIONS (must be at module level for pickling)
+# ============================================================================
+
+def _fit_fold_worker_multigpu(fold_idx, model, train_loader, calib_loader, device_str, flag, gpu_id, cache_dir=None):
+    """
+    Worker function for parallel fold fitting with explicit GPU assignment.
+    
+    Args:
+        fold_idx: Fold index
+        model: PyTorch model (on CPU)
+        train_loader: Training DataLoader
+        calib_loader: Calibration DataLoader
+        device_str: Device string (e.g., 'cuda:1')
+        flag: Dataset name for caching
+        gpu_id: GPU ID for this worker
+        cache_dir: Directory for SHAP cache (None to disable)
+    
+    Returns:
+        List of per-class KNN dicts
+    """
+    import torch
+    import gc
+    import os
+    
+    # Set CUDA device for this process
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+    torch.cuda.set_device(0)  # After setting visible devices, use device 0
+    
+    # Reconstruct device (now points to the assigned GPU)
+    device = torch.device('cuda:0')
+    
+    print(f"  Worker {fold_idx}: Using GPU {gpu_id}")
+    
+    # Move model to assigned GPU
+    model = model.to(device)
+    model.eval()
+    
+    # Reduce background samples for parallel mode (saves GPU memory)
+    max_bg_samples = 100
+    
+    # Create a temporary method instance for this fold
+    temp_method = KNNLatentSHAPMethod(
+        layer_name='avgpool',
+        k=5,
+        n_shap_features=50,
+        cache_dir=cache_dir,
+        max_background_samples=max_bg_samples
+    )
+    
+    # Fit this fold
+    model_knns = temp_method._fit_single_fold(
+        fold_idx, model, train_loader, calib_loader, device, flag
+    )
+    
+    # Cleanup GPU memory
+    model = model.cpu()
+    del model
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    print(f"  Worker {fold_idx}: Done on GPU {gpu_id}")
+    
+    return model_knns
+
+
+# ============================================================================
+# CLASS-BASED API
 # ============================================================================
 
 class ClassifierHeadWrapper(nn.Module):
@@ -256,21 +326,39 @@ class KNNLatentSHAPMethod(UQMethod):
          - Compute KNN distance to training samples (true label = predicted class)
       3. Average distances across all models
     """
-    def __init__(self, layer_name='avgpool', k=5, n_shap_features=50, max_background_samples=1000):
+    def __init__(self, layer_name='avgpool', k=5, n_shap_features=50, 
+                 max_background_samples=1000, cache_dir=None, parallel=False, n_jobs=None):
         super().__init__("KNN-Latent-SHAP")
         self.layer_name = layer_name
         self.k = k
         self.n_shap_features = n_shap_features
         self.max_background = max_background_samples
-        
+        self.cache_dir = cache_dir
+        self.parallel = parallel 
         self.fitted_models = []
         self.num_classes = None
+        
+        # Auto-detect number of GPUs if parallel and n_jobs not specified
+        if parallel and n_jobs is None:
+            import torch
+            self.n_jobs = torch.cuda.device_count()
+            print(f"  Auto-detected {self.n_jobs} GPUs for parallel processing")
+        else:
+            self.n_jobs = n_jobs or 2
     
-    def fit(self, models, train_loaders, calib_loader, device):
+    def _get_cache_path(self, flag, fold_idx):
+        """Generate cache file path for a specific fold."""
+        if self.cache_dir is None:
+            return None
+        os.makedirs(self.cache_dir, exist_ok=True)
+        return os.path.join(
+            self.cache_dir, 
+            f'shap_cache_{flag}_fold{fold_idx}_bg{self.max_background}.npz'
+        )
+    
+    def fit(self, models, train_loaders, calib_loader, device, flag='unknown'):
         """
-        Fit KNN PER MODEL using:
-        - SHAP computed on calibration (per model)
-        - KNN fitted on training (per model's CV split)
+        Fit KNN PER MODEL using SHAP caching (sequential or parallel).
         """
         if not isinstance(models, list):
             models = [models]
@@ -281,111 +369,239 @@ class KNNLatentSHAPMethod(UQMethod):
         if len(models) != len(train_loaders):
             raise ValueError(f"Models ({len(models)}) != train_loaders ({len(train_loaders)})")
         
-        self.fitted_models = []
+        if self.parallel and len(models) > 1:
+            print(f"\n  🚀 Parallel mode: {self.n_jobs} workers across {len(models)} folds")
+            self.fitted_models = self._fit_parallel(models, train_loaders, calib_loader, device, flag)
+            
+            # Infer num_classes from the fitted models (workers don't share self.num_classes)
+            if self.num_classes is None:
+                # Count non-None entries in first model's KNN list
+                for model_knns in self.fitted_models:
+                    if model_knns is not None:
+                        self.num_classes = len(model_knns)
+                        print(f"  Inferred {self.num_classes} classes from fitted models")
+                        break
+            
+            # Move models back to original device after parallel processing
+            print(f"  Moving models back to {device}...")
+            for model in models:
+                model.to(device)
+        else:
+            print(f"\n  Sequential mode: {len(models)} folds")
+            self.fitted_models = self._fit_sequential(models, train_loaders, calib_loader, device, flag)
         
-        # =======================================================================
-        # FOR EACH MODEL: Compute SHAP + Fit KNN
-        # =======================================================================
+        print(f"\n  ✓ Fitted {len(models)} models (each with its own SHAP + KNN)")
+        return self
+    
+    def _fit_sequential(self, models, train_loaders, calib_loader, device, flag):
+        """Sequential fitting (existing code)."""
+        fitted_models = []
+        
         for fold_idx, (model, train_loader) in enumerate(zip(models, train_loaders)):
             print(f"\n  Model {fold_idx+1}/{len(models)}: Computing SHAP + fitting KNN...")
             
-            # Extract layer for this model
-            layer = get_layer_from_model(model, self.layer_name)
-            classifierhead = ClassifierHeadWrapper(model, self.layer_name)
+            model_knns = self._fit_single_fold(
+                fold_idx, model, train_loader, calib_loader, device, flag
+            )
+            fitted_models.append(model_knns)
+        
+        return fitted_models
+    
+    def _fit_parallel(self, models, train_loaders, calib_loader, device, flag):
+        """Parallel fitting across folds with multi-GPU support."""
+        import torch
+        
+        n_gpus = torch.cuda.device_count()
+        if n_gpus == 0:
+            raise RuntimeError("No GPUs available for parallel processing")
+        
+        print(f"  Detected {n_gpus} GPUs, distributing {len(models)} folds...")
+        
+        try:
+            torch_mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass
+        
+        fold_args = []
+        for fold_idx, (model, train_loader) in enumerate(zip(models, train_loaders)):
+            gpu_id = fold_idx % n_gpus
+            device_str = f'cuda:{gpu_id}'
+            model_cpu = model.cpu()
             
-            # STEP 1: Compute SHAP on CALIBRATION for THIS model
+            fold_args.append((fold_idx, model_cpu, train_loader, calib_loader, device_str, flag, gpu_id, self.cache_dir))
+            print(f"    Fold {fold_idx} → GPU {gpu_id}")
+        
+        fitted_models = [None] * len(models)
+        
+        with ProcessPoolExecutor(max_workers=min(self.n_jobs, n_gpus)) as executor:
+            future_to_fold = {
+                executor.submit(_fit_fold_worker_multigpu, *args): args[0]
+                for args in fold_args
+            }
+            
+            for future in as_completed(future_to_fold):
+                fold_idx = future_to_fold[future]
+                try:
+                    model_knns = future.result()
+                    fitted_models[fold_idx] = model_knns
+                    print(f"    ✓ Fold {fold_idx} complete")
+                except Exception as e:
+                    print(f"    ✗ Fold {fold_idx} failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
+        
+        return fitted_models
+    
+    def _fit_single_fold(self, fold_idx, model, train_loader, calib_loader, device, flag):
+        """
+        Fit a single fold (called by both sequential and parallel modes).
+        Returns: List of per-class KNN dicts
+        """
+        import gc
+    
+        layer = get_layer_from_model(model, self.layer_name)
+        classifierhead = ClassifierHeadWrapper(model, self.layer_name)
+        
+        # =====================================================================
+        # Check cache first
+        # =====================================================================
+        cache_path = self._get_cache_path(flag, fold_idx)
+        shap_values, features_calib, labels_calib = None, None, None
+        
+        if cache_path and os.path.exists(cache_path):
+            print(f"    ✓ Loading cached SHAP from {os.path.basename(cache_path)}")
+            try:
+                cache = np.load(cache_path, allow_pickle=True)
+                shap_values = cache['shap_values']
+                features_calib = torch.from_numpy(cache['features'])
+                labels_calib = cache['labels']
+                
+                # FIX: Infer num_classes from cached SHAP shape
+                if isinstance(shap_values, list):
+                    # Multi-class: list of arrays per class
+                    inferred_num_classes = len(shap_values)
+                elif shap_values.ndim == 3:
+                    # Multi-class: (N, features, classes)
+                    inferred_num_classes = shap_values.shape[2]
+                else:
+                    # Binary: (N, features)
+                    inferred_num_classes = 2
+                
+                if self.num_classes is None:
+                    self.num_classes = inferred_num_classes
+                    print(f"    Inferred {self.num_classes} classes from cached SHAP")
+                
+            except Exception as e:
+                print(f"      ⚠️  Cache load failed: {e}, recomputing...")
+                shap_values = None
+        
+        # Compute SHAP if not cached
+        if shap_values is None:
             print(f"    Step 1: Computing SHAP on calibration...")
             shap_values, features_calib, labels_calib, _ = \
                 extract_latent_space_and_compute_shap_importance(
                     model, calib_loader, device, layer,
                     importance=True,
                     classifierheadwrapper=classifierhead,
-                    max_background_samples=self.max_background
+                    max_background_samples=self.max_background,
+                    shap_batch_size=5000
                 )
-            
-            # STEP 2: Get mean SHAP importances per class
-            print(f"    Step 2: Computing mean SHAP per class...")
-            mean_shap_results = compute_mean_shap_values(
-                shap_values, fold=fold_idx, true_labels=labels_calib, 
-                nb_features=self.n_shap_features
-            )
-            
-            if self.num_classes is None:
-                self.num_classes = len(mean_shap_results)
-                print(f"      Detected {self.num_classes} classes")
-            
-            # STEP 3: Extract top-k SHAP features per class
-            selected_features_per_class = []
-            for class_idx in range(self.num_classes):
-                mean_shap_series = mean_shap_results[class_idx][2]
-                top_features = mean_shap_series.nlargest(self.n_shap_features).index.tolist()
-                selected_features_per_class.append(top_features)
-            
-            # STEP 4: Extract TRAINING features for THIS model
-            print(f"    Step 3: Extracting training features...")
-            features_train, labels_train, _, _ = extract_latent_space_and_compute_shap_importance(
-                model, train_loader, device, layer, importance=False
-            )
-            
-            train_df = pd.DataFrame(
-                features_train.numpy(),
-                columns=[f"Feature_{i}" for i in range(features_train.shape[1])]
-            )
-            
-            # STEP 5: Fit KNN per class using THIS MODEL's SHAP features
-            print(f"    Step 4: Fitting KNN per class...")
-            model_knns = []
-            
-            for class_idx in range(self.num_classes):
-                # Filter by TRUE class label
-                class_mask = (labels_train == class_idx)
-                train_class_df = train_df[class_mask]
                 
-                if len(train_class_df) == 0:
-                    print(f"      Class {class_idx}: No training samples")
-                    model_knns.append(None)
-                    continue
-                
-                # Use THIS MODEL's SHAP features
-                selected_features = selected_features_per_class[class_idx]
-                train_selected = train_class_df[selected_features].values
-                
-                # Fit scaler + PCA on TRAINING data
-                scaler = StandardScaler()
-                train_std = scaler.fit_transform(train_selected)
-                
-                pca = PCA(n_components=0.9)
-                train_pca = pca.fit_transform(train_std)
-                
-                # Fit KNN on TRAINING data
-                knn = NearestNeighbors(n_neighbors=min(self.k, len(train_pca)))
-                knn.fit(train_pca)
-                
-                model_knns.append({
-                    'knn': knn,
-                    'scaler': scaler,
-                    'pca': pca,
-                    'selected_features': selected_features,
-                    'layer': layer,
-                    'n_samples': len(train_pca)
-                })
-                
-                print(f"      Class {class_idx}: {len(train_pca)} train samples, "
-                      f"{len(selected_features)} SHAP → {train_pca.shape[1]} PCA")
+            # Cleanup GPU memory after SHAP
+            del classifierhead
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            gc.collect()
             
-            self.fitted_models.append(model_knns)
+            # Save to cache
+            if cache_path:
+                print(f"    💾 Saving SHAP to cache")
+                np.savez_compressed(
+                    cache_path,
+                    shap_values=shap_values,
+                    features=features_calib.numpy(),
+                    labels=labels_calib
+                )
         
-        print(f"\n  ✓ Fitted {len(models)} models (each with its own SHAP + KNN)")
-        return self
+        # =====================================================================
+        # Compute mean SHAP per class
+        # =====================================================================
+        print(f"    Step 2: Computing mean SHAP per class...")
+        mean_shap_results = compute_mean_shap_values(
+            shap_values, fold=fold_idx, true_labels=labels_calib, 
+            nb_features=self.n_shap_features
+        )
+        
+        # FIX: Always set num_classes (even if cached)
+        if self.num_classes is None:
+            self.num_classes = len(mean_shap_results)
+            print(f"    Detected {self.num_classes} classes")
+        
+        # Extract top features per class
+        selected_features_per_class = []
+        for class_idx in range(self.num_classes):
+            mean_shap_series = mean_shap_results[class_idx][2]
+            top_features = mean_shap_series.nlargest(self.n_shap_features).index.tolist()
+            selected_features_per_class.append(top_features)
+        
+        # =====================================================================
+        # Extract training features
+        # =====================================================================
+        print(f"    Step 3: Extracting training features...")
+        features_train, labels_train, _, _ = extract_latent_space_and_compute_shap_importance(
+            model, train_loader, device, layer, importance=False
+        )
+        
+        # Cleanup after feature extraction
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        gc.collect()
+        
+        train_df = pd.DataFrame(
+            features_train.numpy(),
+            columns=[f"Feature_{i}" for i in range(features_train.shape[1])]
+        )
+        
+        # =====================================================================
+        # Fit KNN per class
+        # =====================================================================
+        print(f"    Step 4: Fitting KNN per class...")
+        model_knns = []
+        
+        for class_idx in range(self.num_classes):
+            class_mask = (labels_train == class_idx)
+            train_class_df = train_df[class_mask]
+            
+            if len(train_class_df) == 0:
+                model_knns.append(None)
+                continue
+            
+            selected_features = selected_features_per_class[class_idx]
+            train_selected = train_class_df[selected_features].values
+            
+            scaler = StandardScaler()
+            train_std = scaler.fit_transform(train_selected)
+            
+            pca = PCA(n_components=0.9)
+            train_pca = pca.fit_transform(train_std)
+            
+            knn = NearestNeighbors(n_neighbors=min(self.k, len(train_pca)))
+            knn.fit(train_pca)
+            
+            model_knns.append({
+                'knn': knn,
+                'scaler': scaler,
+                'pca': pca,
+                'selected_features': selected_features,
+                'n_samples': len(train_pca)
+            })
+        
+        return model_knns
     
     def compute(self, models, data_loader, device):
         """
         Compute KNN distances for test samples.
-        
-        For each test sample:
-        - Get predicted class from model
-        - Use that model's SHAP-selected features for that class
-        - Compute distance to training samples (true label = predicted class)
         """
         if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
@@ -401,31 +617,23 @@ class KNNLatentSHAPMethod(UQMethod):
         for model_idx, (model, model_knns) in enumerate(zip(models, self.fitted_models)):
             model.eval()
             
-            # Get layer from first non-None class
-            layer = None
-            for knn_data in model_knns:
-                if knn_data is not None:
-                    layer = knn_data['layer']
-                    break
+            # Get fresh layer reference from the MAIN process model
+            layer = get_layer_from_model(model, self.layer_name)
             
-            if layer is None:
-                raise RuntimeError("No valid class KNN data found")
-            
-            # =======================================================================
-            # EXTRACT TEST FEATURES + PREDICTIONS
-            # =======================================================================
-            
-            all_labels = []
+            # Extract test features + predictions
             features_test, labels_test, _, predicted_classes = extract_latent_space_and_compute_shap_importance(
                 model, data_loader, device, layer, importance=False
             )
             
-            # Concatenate features
-            labels_test = np.array(labels_test, dtype=int)  # ← Ensure int type
-            predicted_classes = np.array(predicted_classes, dtype=int)  # ← Ensure int type
+            # Ensure proper types
+            labels_test = np.array(labels_test, dtype=int)
+            predicted_classes = np.round(predicted_classes).astype(int)
             
             print(f"\n  Model {model_idx+1}: Processing {len(predicted_classes)} test samples")
-            print(f"    Predicted: {np.bincount(labels_test)} | True: {np.bincount(labels_test)}")
+            if predicted_classes.shape[1] > 1:
+                predicted_classes = np.argmax(predicted_classes, axis=1)
+            print(f"    Predicted classes: {np.bincount(predicted_classes)}")
+            print(f"    True classes: {np.bincount(labels_test)}")
             
             test_df = pd.DataFrame(
                 features_test.numpy(),
@@ -434,9 +642,7 @@ class KNNLatentSHAPMethod(UQMethod):
             
             distances_per_sample = np.zeros(len(test_df))
             
-            # =======================================================================
-            # COMPUTE DISTANCES PER PREDICTED CLASS
-            # =======================================================================
+            # Compute distances per PREDICTED class
             for class_idx in range(self.num_classes):
                 if model_knns[class_idx] is None:
                     continue
@@ -444,7 +650,7 @@ class KNNLatentSHAPMethod(UQMethod):
                 fitted = model_knns[class_idx]
                 
                 # Test samples PREDICTED as this class
-                class_mask = (labels_test == class_idx)
+                class_mask = (predicted_classes == class_idx)
                 n_samples_class = class_mask.sum()
                 
                 if n_samples_class == 0:
@@ -452,14 +658,14 @@ class KNNLatentSHAPMethod(UQMethod):
                 
                 test_class_df = test_df[class_mask]
                 
-                # Use THIS MODEL's SHAP features for this class
+                # Use SHAP features for this class
                 test_selected = test_class_df[fitted['selected_features']].values
                 
-                # Transform using THIS MODEL's fitted scaler + PCA
+                # Transform
                 test_std = fitted['scaler'].transform(test_selected)
                 test_pca = fitted['pca'].transform(test_std)
                 
-                # Compute KNN distances to TRAINING data
+                # KNN distances
                 distances, _ = fitted['knn'].kneighbors(test_pca)
                 avg_distances = distances.mean(axis=1)
                 
@@ -476,13 +682,13 @@ class KNNLatentSHAPMethod(UQMethod):
                     incorrect_dists = avg_distances[class_labels != class_idx]
                     print(f"      Incorrect: {incorrect_dists.mean():.3f}±{incorrect_dists.std():.3f}")
                 
-                # Store distances
+                # Store
                 indices = np.where(class_mask)[0]
                 distances_per_sample[indices] = avg_distances
             
             all_distances.append(distances_per_sample)
         
-        # Step 3: Average distances across all models
+        # Average across models
         final_distances = np.mean(all_distances, axis=0)
         
         print(f"\n  ✓ Final averaged distances: {final_distances.mean():.3f}±{final_distances.std():.3f}")
@@ -536,13 +742,10 @@ class HyperplaneDistanceMethod(UQMethod):
         return np.abs(distances)
 
 
-# ============================================================================
-# FUNCTIONAL API (existing, for backward compatibility)
-# ============================================================================
-
 def extract_latent_space_and_compute_shap_importance(
     model, data_loader, device, layer_to_be_hooked,
-    importance=True, classifierheadwrapper=None, max_background_samples=1000
+    importance=True, classifierheadwrapper=None, max_background_samples=1000,
+    shap_batch_size=500
 ):
     """
     Extract latent features and optionally compute SHAP values.
@@ -555,7 +758,8 @@ def extract_latent_space_and_compute_shap_importance(
         importance: Whether to compute SHAP values
         classifierheadwrapper: Wrapped classifier head for SHAP
         max_background_samples: Max samples for SHAP background
-
+        shap_batch_size: Batch size for SHAP computation (smaller = faster but less accurate)
+        
     Returns:
         If importance=True: (shap_values, features, labels, success_flags)
         If importance=False: (features, labels, success_flags, predictions)
@@ -580,7 +784,6 @@ def extract_latent_space_and_compute_shap_importance(
     predictions = []
     
     def hook(module, input, output):
-        # Flatten (B, C, 1, 1) → (B, C)
         penultimate_features.append(output.detach().flatten(1))
 
     hook_handle = layer_to_be_hooked.register_forward_hook(hook)
@@ -606,33 +809,84 @@ def extract_latent_space_and_compute_shap_importance(
                 probs = torch.sigmoid(logits).squeeze(1)
                 preds_cls = (probs > 0.5).long()
                 success_flags.extend((preds_cls == labels_flat).cpu().numpy().astype(int).tolist())
-                predictions.extend(probs.cpu().numpy())
+                predictions.extend(probs.cpu().numpy().tolist())
             else:
                 probs = torch.softmax(logits, dim=1)
                 preds_cls = probs.argmax(dim=1)
                 success_flags.extend((preds_cls == labels_flat).cpu().numpy().astype(int).tolist())
-                predictions.extend(probs.cpu().numpy())
+                predictions.extend(probs.cpu().numpy().tolist())
 
     hook_handle.remove()
 
+    # Concatenate on CPU (happens once at the end)
     features = torch.cat(penultimate_features).cpu()
     labels = np.array(all_labels)
     success_flags = np.array(success_flags)
-    background_features = features.to(device)
-
-    if len(background_features) > max_background_samples:
-        background_features = background_features[:max_background_samples]
 
     if importance:
         if classifierheadwrapper is None:
             raise ValueError("classifierheadwrapper required when importance=True")
         
+        # ====================================================================
+        # Subsample BEFORE moving to GPU
+        # ====================================================================
+        print(f"    Selecting {max_background_samples} background samples from {len(features)}...")
+        
+        if len(features) > max_background_samples:
+            # Random sampling
+            indices = np.random.choice(
+                len(features), max_background_samples, replace=False
+            )
+            background_features = features[indices]
+        else:
+            background_features = features
+        
+        # NOW move subsampled features to GPU
+        background_features = background_features.to(device)
+        
+        print(f"    Computing SHAP with {len(background_features)} background samples (GPU mem: ~{background_features.element_size() * background_features.nelement() / 1e6:.1f}MB)...")
+        
+        # DeepExplainer with subsampled background
         explainer = shap.DeepExplainer(classifierheadwrapper, background_features.clone())
-        shap_values = explainer.shap_values(features.clone().detach())
+        
+        # Process SHAP in batches to reduce memory
+        all_shap_values = []
+        n_samples = len(features)
+        
+        for start_idx in range(0, n_samples, shap_batch_size):
+            end_idx = min(start_idx + shap_batch_size, n_samples)
+            batch_features = features[start_idx:end_idx].to(device)  # ← Move batch to GPU
+            
+            batch_shap = explainer.shap_values(batch_features)
+            all_shap_values.append(batch_shap)
+            
+            # Free GPU memory immediately after batch
+            del batch_features
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            
+            if (start_idx // shap_batch_size) % 10 == 0:
+                print(f"      SHAP progress: {end_idx}/{n_samples} samples")
+        
+        # Cleanup explainer
+        del explainer
+        del background_features
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        
+        # Concatenate batches (on CPU)
+        if isinstance(all_shap_values[0], list):  # Multi-class
+            shap_values = [
+                np.concatenate([batch[i] for batch in all_shap_values], axis=0)
+                for i in range(len(all_shap_values[0]))
+            ]
+        else:  # Binary
+            shap_values = np.concatenate(all_shap_values, axis=0)
+        
         return shap_values, features, labels, success_flags
     else:
+        # No SHAP computation - just return features (already on CPU)
         return features, labels, success_flags, predictions
-
 
 def compute_mean_shap_values(shap_values, fold, true_labels=None, nb_features=50):
     """
