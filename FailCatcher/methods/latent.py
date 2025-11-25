@@ -91,15 +91,15 @@ def get_layer_from_model(model, layer_name='avgpool'):
 # PARALLEL WORKER FUNCTIONS (must be at module level for pickling)
 # ============================================================================
 
-def _fit_fold_worker_multigpu(fold_idx, model, train_loader, calib_loader, device_str, flag, gpu_id, cache_dir=None):
+def _fit_fold_worker_multigpu(fold_idx, model, train_loader_params, calib_loader_params, device_str, flag, gpu_id, cache_dir=None):
     """
     Worker function for parallel fold fitting with explicit GPU assignment.
     
     Args:
         fold_idx: Fold index
         model: PyTorch model (on CPU)
-        train_loader: Training DataLoader
-        calib_loader: Calibration DataLoader
+        train_loader_params: Dict with keys: 'dataset', 'indices', 'batch_size', 'shuffle', 'num_workers'
+        calib_loader_params: Dict with keys: 'dataset', 'indices', 'batch_size', 'shuffle', 'num_workers'
         device_str: Device string (e.g., 'cuda:1')
         flag: Dataset name for caching
         gpu_id: GPU ID for this worker
@@ -111,6 +111,7 @@ def _fit_fold_worker_multigpu(fold_idx, model, train_loader, calib_loader, devic
     import torch
     import gc
     import os
+    from torch.utils.data import DataLoader, Subset
     
     # Set CUDA device for this process
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
@@ -119,6 +120,25 @@ def _fit_fold_worker_multigpu(fold_idx, model, train_loader, calib_loader, devic
     # Reconstruct device (now points to the assigned GPU)
     device = torch.device('cuda:0')
     
+    # Reconstruct DataLoaders from parameters
+    train_subset = Subset(train_loader_params['dataset'], train_loader_params['indices'])
+    train_loader = DataLoader(
+        train_subset,
+        batch_size=train_loader_params['batch_size'],
+        shuffle=train_loader_params.get('shuffle', False),
+        num_workers=0,  # Always 0 within worker to avoid nested multiprocessing
+        pin_memory=True
+    )
+    
+    calib_subset = Subset(calib_loader_params['dataset'], calib_loader_params['indices'])
+    calib_loader = DataLoader(
+        calib_subset,
+        batch_size=calib_loader_params['batch_size'],
+        shuffle=calib_loader_params.get('shuffle', False),
+        num_workers=0,
+        pin_memory=True
+    )
+    
     print(f"  Worker {fold_idx}: Using GPU {gpu_id}")
     
     # Move model to assigned GPU
@@ -126,7 +146,7 @@ def _fit_fold_worker_multigpu(fold_idx, model, train_loader, calib_loader, devic
     model.eval()
     
     # Reduce background samples for parallel mode (saves GPU memory)
-    max_bg_samples = 100
+    max_bg_samples = 1000
     
     # Create a temporary method instance for this fold
     temp_method = KNNLatentSHAPMethod(
@@ -356,6 +376,26 @@ class KNNLatentSHAPMethod(UQMethod):
             f'shap_cache_{flag}_fold{fold_idx}_bg{self.max_background}.npz'
         )
     
+    def _extract_loader_params(self, data_loader):
+        """Extract parameters from a DataLoader for reconstruction in workers."""
+        from torch.utils.data import Subset
+        
+        # Get dataset and indices
+        if isinstance(data_loader.dataset, Subset):
+            dataset = data_loader.dataset.dataset
+            indices = list(data_loader.dataset.indices)
+        else:
+            dataset = data_loader.dataset
+            indices = list(range(len(dataset)))
+        
+        return {
+            'dataset': dataset,
+            'indices': indices,
+            'batch_size': data_loader.batch_size,
+            'shuffle': hasattr(data_loader, 'shuffle') and data_loader.shuffle,
+            'num_workers': data_loader.num_workers
+        }
+    
     def fit(self, models, train_loaders, calib_loader, device, flag='unknown'):
         """
         Fit KNN PER MODEL using SHAP caching (sequential or parallel).
@@ -422,13 +462,19 @@ class KNNLatentSHAPMethod(UQMethod):
         except RuntimeError:
             pass
         
+        # Extract calibration loader parameters once (shared across all folds)
+        calib_loader_params = self._extract_loader_params(calib_loader)
+        
         fold_args = []
         for fold_idx, (model, train_loader) in enumerate(zip(models, train_loaders)):
             gpu_id = fold_idx % n_gpus
             device_str = f'cuda:{gpu_id}'
             model_cpu = model.cpu()
             
-            fold_args.append((fold_idx, model_cpu, train_loader, calib_loader, device_str, flag, gpu_id, self.cache_dir))
+            # Extract train loader parameters for this fold
+            train_loader_params = self._extract_loader_params(train_loader)
+            
+            fold_args.append((fold_idx, model_cpu, train_loader_params, calib_loader_params, device_str, flag, gpu_id, self.cache_dir))
             print(f"    Fold {fold_idx} → GPU {gpu_id}")
         
         fitted_models = [None] * len(models)
@@ -477,20 +523,13 @@ class KNNLatentSHAPMethod(UQMethod):
                 features_calib = torch.from_numpy(cache['features'])
                 labels_calib = cache['labels']
                 
-                # FIX: Infer num_classes from cached SHAP shape
-                if isinstance(shap_values, list):
-                    # Multi-class: list of arrays per class
-                    inferred_num_classes = len(shap_values)
-                elif shap_values.ndim == 3:
-                    # Multi-class: (N, features, classes)
-                    inferred_num_classes = shap_values.shape[2]
-                else:
-                    # Binary: (N, features)
-                    inferred_num_classes = 2
+                # FIX: Infer num_classes from labels, not SHAP shape
+                # For binary classification, SHAP may be 2D (N, features) but we still have 2 classes
+                inferred_num_classes = len(np.unique(labels_calib))
                 
                 if self.num_classes is None:
                     self.num_classes = inferred_num_classes
-                    print(f"    Inferred {self.num_classes} classes from cached SHAP")
+                    print(f"    Inferred {self.num_classes} classes from cached labels")
                 
             except Exception as e:
                 print(f"      ⚠️  Cache load failed: {e}, recomputing...")
@@ -630,7 +669,7 @@ class KNNLatentSHAPMethod(UQMethod):
             predicted_classes = np.round(predicted_classes).astype(int)
             
             print(f"\n  Model {model_idx+1}: Processing {len(predicted_classes)} test samples")
-            if predicted_classes.shape[1] > 1:
+            if predicted_classes.ndim > 1:
                 predicted_classes = np.argmax(predicted_classes, axis=1)
             print(f"    Predicted classes: {np.bincount(predicted_classes)}")
             print(f"    True classes: {np.bincount(labels_test)}")

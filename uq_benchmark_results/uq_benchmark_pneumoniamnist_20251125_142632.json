@@ -1,0 +1,21 @@
+{
+  "flag": "pneumoniamnist",
+  "timestamp": "20251125_142632",
+  "task_type": "binary-class",
+  "num_classes": 2,
+  "test_size": 624,
+  "calib_size": 1047,
+  "test_accuracy": 0.9118589743589743,
+  "calibration_method": "platt",
+  "methods": {
+    "KNN_Raw": {
+      "time_seconds": 28.92123578581959,
+      "auc": 0.8285828407093784,
+      "threshold": 0.04909252174385079,
+      "balanced_accuracy": 0.7790381850135805,
+      "specificity": 0.8181818181818182,
+      "sensitivity": 0.7398945518453427
+    }
+  },
+  "all_metrics_file": "./uq_benchmark_results/all_metrics_pneumoniamnist_20251125_142632.npz"
+}

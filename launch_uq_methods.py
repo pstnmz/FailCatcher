@@ -708,10 +708,14 @@ def main():
         description='Benchmark UQ methods on medMNIST datasets'
     )
     parser.add_argument(
-        '--flag', type=str, required=True,
+        '--flag', type=str,
         choices=['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'dermamnist-e',
                  'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist'],
         help='Dataset to benchmark'
+    )
+    parser.add_argument(
+        '--all-flags', action='store_true',
+        help='Run all available flags'
     )
     parser.add_argument(
         '--methods', nargs='+', 
@@ -742,23 +746,33 @@ def main():
     )
     
     args = parser.parse_args()
-    
+    if args.all_flags:
+        flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'dermamnist-e',
+                 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist']
+    else:
+        flags = [args.flag]
+        
     if args.all_methods:
         methods = ['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP']
     else:
         methods = args.methods
     
-    # Run benchmark
-    results = run_uq_benchmark(
-        flag=args.flag,
-        methods=methods,
-        output_dir=args.output_dir,
-        max_gps_iterations=args.max_gps_iterations,
-        batch_size=args.batch_size,
-        image_size=args.image_size
-    )
-    
-    print("\n✅ Benchmark complete!")
+    for flag in flags:
+        print(f"\n==============================")
+        print(f" Running benchmark for: {flag} ")
+        print(f"==============================")
+        
+        # Run benchmark
+        results = run_uq_benchmark(
+            flag=flag,
+            methods=methods,
+            output_dir=args.output_dir,
+            max_gps_iterations=args.max_gps_iterations,
+            batch_size=args.batch_size,
+            image_size=args.image_size
+        )
+        
+        print("\n✅ Benchmark complete!")
 
 
 if __name__ == '__main__':
