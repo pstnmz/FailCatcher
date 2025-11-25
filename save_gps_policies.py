@@ -1,4 +1,4 @@
-import UQ_toolbox as uq
+from FailCatcher import UQ_toolbox as uq
 from medMNIST.utils import train_load_datasets_resnet as tr
 import torch
 import torchvision.transforms as transforms
