@@ -149,11 +149,11 @@ def _batched_augmentation_inference(augmented_inputs, models, device, batch_size
     
     # Check if we can fit all augmentations in memory
     total_samples = K * N
-    max_gpu_batch = 10000  # Conservative estimate - adjust based on GPU memory
     
-    if total_samples <= max_gpu_batch:
+    # Use batch_size as the limit (respects user's --batch-size flag)
+    if total_samples <= batch_size:
         # Fast path: batch all augmentations together
-        print(f"  Using batched inference ({K} augmentations × {N} samples)")
+        print(f"  Using batched inference ({K} augmentations × {N} samples = {total_samples})")
         
         # Reshape: [K, N, C, H, W] → [K*N, C, H, W]
         imgs_batched = augmented_inputs.reshape(total_samples, C, H, W)
@@ -167,8 +167,8 @@ def _batched_augmentation_inference(augmented_inputs, models, device, batch_size
         
         return predictions
     else:
-        # Fallback: process each augmentation separately
-        print(f"  Using sequential inference (total samples {total_samples} > {max_gpu_batch})")
+        # Fallback: process each augmentation separately with proper batching
+        print(f"  Using sequential inference (total samples {total_samples} > batch_size {batch_size})")
         preds_list = []
         
         for k in range(K):

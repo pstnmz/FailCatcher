@@ -666,7 +666,10 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     # GPS (Greedy Policy Search)
     if 'GPS' in methods:
         print("\n🔬 Running GPS...")
-        aug_folder = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{image_size}*{image_size}/{flag}_calibration_set'
+        if flag != 'amos22':
+            aug_folder = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{image_size}*{image_size}/{flag}_calibration_set'
+        else:
+            aug_folder = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/gps_augment/{image_size}*{image_size}/organamnist_calibration_set'
         
         if not os.path.exists(aug_folder):
             print(f"  ⚠️  GPS augmentation folder not found: {aug_folder}")

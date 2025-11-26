@@ -1,0 +1,11 @@
+{
+  "flag": "amos22",
+  "timestamp": "20251126_173527",
+  "task_type": "multi-class",
+  "num_classes": 11,
+  "test_size": 1789,
+  "calib_size": 8211,
+  "test_accuracy": 0.5936277249860257,
+  "calibration_method": "temperature",
+  "methods": {}
+}
