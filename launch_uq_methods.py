@@ -416,18 +416,99 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
             ])
         
         # Load models and datasets
-        models = tr.load_models(flag, device=device)
-        [study_dataset, calib_dataset, test_dataset], \
-        [study_loader, calib_loader, test_loader], info = \
-            tr.load_datasets(flag, color, image_size, transform, batch_size)
-        
-        [_, calib_dataset_tta, test_dataset_tta], \
-        [_, calib_loader_tta, test_loader_tta], _ = \
-            tr.load_datasets(flag, color, image_size, transform_tta, batch_size)
-        
-        task_type = info['task']
-        num_classes = len(info['label'])
-    
+        if flag != 'amos22':
+            models = tr.load_models(flag, device=device)
+            [study_dataset, calib_dataset, test_dataset], \
+            [study_loader, calib_loader, test_loader], info = \
+                tr.load_datasets(flag, color, image_size, transform, batch_size)
+            
+            [_, calib_dataset_tta, test_dataset_tta], \
+            [_, calib_loader_tta, test_loader_tta], _ = \
+                tr.load_datasets(flag, color, image_size, transform_tta, batch_size)
+            
+            task_type = info['task']
+            num_classes = len(info['label'])
+        else:
+            # Load OrganaMNIST models and calibration data
+            models = tr.load_models('organamnist', device=device)
+            [study_dataset, calib_dataset, _], \
+            [study_loader, calib_loader, _], info = \
+                tr.load_datasets('organamnist', color, image_size, transform, batch_size)
+            
+            [_, calib_dataset_tta, _], \
+            [_, calib_loader_tta, _], _ = \
+                tr.load_datasets('organamnist', color, image_size, transform_tta, batch_size)
+            
+            # Load AMOS external test dataset
+            print("  Loading AMOS external test dataset...")
+            amos_path = '/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/AMOS_2022/amos_external_test_224.npz'
+            amos_data = np.load(amos_path)
+            amos_images = amos_data['test_images']  # (N, 224, 224, 1)
+            amos_labels = amos_data['test_labels']  # (N, 15) - AMOS organ labels
+            
+            # OrganaMNIST to AMOS mapping
+            amos_to_organamnist = {
+                0: 10,  # spleen → spleen
+                1: 5,   # right kidney → kidney-right
+                2: 4,   # left kidney → kidney-left
+                5: 6,   # liver → liver
+                9: 9,   # pancreas → pancreas
+                13: 0,  # bladder → bladder
+            }
+            
+            # Filter to mapped organs and convert labels
+            mapped_indices = []
+            mapped_labels = []
+            for idx in range(len(amos_labels)):
+                amos_organ_id = np.argmax(amos_labels[idx])
+                if amos_organ_id in amos_to_organamnist:
+                    mapped_indices.append(idx)
+                    mapped_labels.append(amos_to_organamnist[amos_organ_id])
+            
+            filtered_images = amos_images[mapped_indices]
+            filtered_labels = np.array(mapped_labels)
+            
+            # Create AMOS dataset classes
+            class AMOSDataset(torch.utils.data.Dataset):
+                def __init__(self, images, labels, transform=None):
+                    self.images = images
+                    self.labels = labels
+                    self.transform = transform
+                
+                def __len__(self):
+                    return len(self.images)
+                
+                def __getitem__(self, idx):
+                    from PIL import Image as PILImage
+                    img = self.images[idx].squeeze()
+                    label = self.labels[idx]
+                    img_pil = PILImage.fromarray(img, mode='L')
+                    
+                    if self.transform:
+                        img_tensor = self.transform(img_pil)
+                    else:
+                        img_tensor = torch.from_numpy(img).float().unsqueeze(0) / 255.0
+                    
+                    # Convert to 3-channel for ResNet
+                    if img_tensor.shape[0] == 1:
+                        img_tensor = img_tensor.repeat(3, 1, 1)
+                    
+                    return img_tensor, torch.tensor(label, dtype=torch.long)
+            
+            # Create datasets and loaders
+            test_dataset = AMOSDataset(filtered_images, filtered_labels, transform=transform)
+            test_loader = torch.utils.data.DataLoader(
+                test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+            )
+            
+            test_dataset_tta = AMOSDataset(filtered_images, filtered_labels, transform=transform_tta)
+            test_loader_tta = torch.utils.data.DataLoader(
+                test_dataset_tta, batch_size=batch_size, shuffle=False, num_workers=4
+            )
+            
+            task_type = info['task']
+            num_classes = len(info['label'])
+            print(f"  AMOS: {len(test_dataset)} samples (filtered from {len(amos_images)})")
     print(f"  Models: {len(models)}")
     print(f"  Train+val: {len(study_dataset)}, Calib: {len(calib_dataset)}, Test: {len(test_dataset)}")
     print(f"  Task: {task_type}, Classes: {num_classes}")
@@ -710,7 +791,7 @@ def main():
     parser.add_argument(
         '--flag', type=str,
         choices=['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'dermamnist-e',
-                 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist'],
+                 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'amos22'],
         help='Dataset to benchmark'
     )
     parser.add_argument(
@@ -748,7 +829,7 @@ def main():
     args = parser.parse_args()
     if args.all_flags:
         flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'dermamnist-e',
-                 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist']
+                 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'amos22']
     else:
         flags = [args.flag]
         
