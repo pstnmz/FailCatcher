@@ -204,9 +204,27 @@ def compute_tta(models, test_dataset, device, image_size,
 
 def compute_gps(models, test_dataset, device, image_size,
                 aug_folder, correct_idx_calib, incorrect_idx_calib,
-                max_iterations=5, batch_size=4000, config=None):
+                max_iterations=5, batch_size=4000, config=None, cache_dir='./uq_benchmark_results/gps_cache'):
     """Compute GPS using class-based API."""
     cfg = {**GPS_CONFIG, **(config or {})}
+    
+    # Create cache directory
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Generate cache key based on aug_folder, indices, and search params
+    import hashlib
+    cache_key_parts = [
+        aug_folder,
+        str(sorted(correct_idx_calib)),
+        str(sorted(incorrect_idx_calib)),
+        str(max_iterations),
+        str(cfg['num_workers']),
+        str(cfg['num_searches']),
+        str(cfg['top_k']),
+        str(cfg['seed'])
+    ]
+    cache_key = hashlib.md5('_'.join(cache_key_parts).encode()).hexdigest()
+    cache_file = os.path.join(cache_dir, f'gps_policies_{cache_key}.pkl')
     
     # Step 1: Initialize GPS method
     gps = uq.GPSMethod(
@@ -216,14 +234,27 @@ def compute_gps(models, test_dataset, device, image_size,
         max_iter=max_iterations
     )
     
-    # Step 2: Search for policies
-    print("  Performing greedy policy search...")
-    gps.search_policies(
-        num_workers=cfg['num_workers'],
-        num_searches=cfg['num_searches'],
-        top_k=cfg['top_k'],
-        seed=cfg['seed']
-    )
+    # Step 2: Search for policies (or load from cache)
+    if os.path.exists(cache_file):
+        print(f"  Loading cached GPS policies from {os.path.basename(cache_file)}...")
+        import pickle
+        with open(cache_file, 'rb') as f:
+            gps.policies = pickle.load(f)
+        print(f"  ✓ Loaded {len(gps.policies)} policy groups from cache")
+    else:
+        print("  Performing greedy policy search...")
+        gps.search_policies(
+            num_workers=cfg['num_workers'],
+            num_searches=cfg['num_searches'],
+            top_k=cfg['top_k'],
+            seed=cfg['seed']
+        )
+        # Save to cache
+        print(f"  Saving GPS policies to cache: {os.path.basename(cache_file)}")
+        import pickle
+        with open(cache_file, 'wb') as f:
+            pickle.dump(gps.policies, f)
+        print(f"  ✓ Cached {len(gps.policies)} policy groups")
     
     # Step 3: Compute metric
     print(f"  Applying GPS augmentations to test set...")
@@ -679,7 +710,8 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
                 metric = compute_gps(
                     models, test_dataset, device, image_size,
                     aug_folder, correct_idx_calib, incorrect_idx_calib,
-                    max_gps_iterations, batch_size
+                    max_gps_iterations, batch_size,
+                    cache_dir=os.path.join(output_dir, 'gps_cache')
                 )
             metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
             computed_metrics['GPS'] = metric
