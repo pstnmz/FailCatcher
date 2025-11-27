@@ -51,8 +51,8 @@ class TTAMethod(UQMethod):
         """Compute per-sample std across augmentations."""
         stds, _ = TTA(
             self.transformations, models, dataset, device,
-            nb_augmentations=self.nb_augmentations,  # ← ADD THIS
-            usingBetterRandAugment=False,
+            nb_augmentations=self.nb_augmentations,
+            usingBetterRandAugment=False,  # Use torchvision.RandAugment for TTA
             n=self.n, m=self.m,
             **{**self.kwargs, **run_kwargs}
         )

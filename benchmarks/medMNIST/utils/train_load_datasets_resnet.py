@@ -16,7 +16,7 @@ from PIL import Image
 from torchvision import transforms as T
 from torchvision.models import ResNet18_Weights
 import numpy as np
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix, roc_auc_score, accuracy_score, recall_score
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, roc_auc_score, accuracy_score
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 import seaborn as sns
@@ -700,10 +700,10 @@ def load_models(flag, device, waugmentation=False, size=224):
         
         # Load the state dictionary
         if waugmentation:
-            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}_augmented.pt')
+            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}_augmented.pt')
         else:
             # Load the state dictionary
-            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}.pt')
+            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}.pt')
             
         # Remove the 'model.' prefix from the state_dict keys if necessary
         state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}

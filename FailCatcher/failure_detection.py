@@ -29,6 +29,7 @@ Example:
     ... )
 """
 
+import os
 import numpy as np
 import torch
 from typing import List, Callable, Optional, Dict, Any, Tuple
@@ -100,6 +101,42 @@ class FailureDetector:
         for model in self.models:
             model.to(self.device)
             model.eval()
+        
+        # Cache for predictions (computed once)
+        self._test_predictions_cache = None
+        self._test_loader_cache = None
+        
+        # Storage for computed uncertainties
+        self._uncertainties = {}
+        self._results = {}
+    
+    def set_test_predictions(
+        self,
+        y_scores: np.ndarray,
+        y_true: np.ndarray,
+        y_pred: Optional[np.ndarray] = None
+    ):
+        """
+        Set pre-computed test predictions to avoid recomputing.
+        
+        Args:
+            y_scores: Ensemble probability scores [N, num_classes]
+            y_true: True labels [N]
+            y_pred: Predicted labels [N] (optional, will compute from y_scores if not provided)
+        """
+        if y_pred is None:
+            y_pred = np.argmax(y_scores, axis=1)
+        
+        correct_idx = np.where(y_pred == y_true)[0]
+        incorrect_idx = np.where(y_pred != y_true)[0]
+        
+        self._test_predictions_cache = {
+            'y_scores': y_scores,
+            'y_true': y_true,
+            'y_pred': y_pred,
+            'correct_idx': correct_idx,
+            'incorrect_idx': incorrect_idx
+        }
     
     def run_msr(
         self,
@@ -116,14 +153,26 @@ class FailureDetector:
         Returns:
             tuple: (uncertainties, metrics_dict)
         """
-        with Timer("MSR computation"):
+        timer = Timer("MSR computation")
+        with timer:
             uncertainties = uq.distance_to_hard_labels_computation(y_scores)
         
-        correct_idx = np.where(np.argmax(y_scores, axis=1) == y_true)[0]
-        incorrect_idx = np.where(np.argmax(y_scores, axis=1) != y_true)[0]
+        # Use cached predictions if available
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache['correct_idx']
+            incorrect_idx = self._test_predictions_cache['incorrect_idx']
+            y_pred = self._test_predictions_cache['y_pred']
+        else:
+            y_pred = np.argmax(y_scores, axis=1)
+            correct_idx = np.where(y_pred == y_true)[0]
+            incorrect_idx = np.where(y_pred != y_true)[0]
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, 
-                                       np.argmax(y_scores, axis=1), y_true)
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        metrics['time_seconds'] = timer.elapsed
+        
+        # Store results
+        self._uncertainties['MSR'] = uncertainties
+        self._results['MSR'] = metrics
         
         return uncertainties, metrics
     
@@ -155,7 +204,8 @@ class FailureDetector:
         from .methods.distance import posthoc_calibration
         from .core.utils import apply_calibration
         
-        with Timer(f"MSR-{method} calibration"):
+        timer = Timer(f"MSR-{method} calibration")
+        with timer:
             # Fit calibration on calibration set
             if method == 'temperature':
                 if logits_calib is None:
@@ -177,11 +227,24 @@ class FailureDetector:
             # Compute uncertainty
             uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
         
-        correct_idx = np.where(np.argmax(calibrated_scores, axis=1) == y_true_test)[0]
-        incorrect_idx = np.where(np.argmax(calibrated_scores, axis=1) != y_true_test)[0]
+        # Handle both 1D (binary) and 2D (multiclass) calibrated scores
+        if calibrated_scores.ndim == 1:
+            # Binary classification: calibrated_scores is [N] (prob of positive class)
+            y_pred_calibrated = (calibrated_scores > 0.5).astype(int)
+        else:
+            # Multiclass: calibrated_scores is [N, C]
+            y_pred_calibrated = np.argmax(calibrated_scores, axis=1)
+        
+        correct_idx = np.where(y_pred_calibrated == y_true_test)[0]
+        incorrect_idx = np.where(y_pred_calibrated != y_true_test)[0]
         
         metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
-                                       np.argmax(calibrated_scores, axis=1), y_true_test)
+                                       y_pred_calibrated, y_true_test)
+        metrics['time_seconds'] = timer.elapsed
+        
+        # Store results
+        self._uncertainties['MSR_calibrated'] = uncertainties
+        self._results['MSR_calibrated'] = metrics
         
         return uncertainties, metrics
     
@@ -200,16 +263,27 @@ class FailureDetector:
         Returns:
             tuple: (uncertainties, metrics_dict)
         """
-        with Timer("Ensemble computation"):
+        timer = Timer("Ensemble STD computation")
+        with timer:
             uncertainties = uq.ensembling_stds_computation(indiv_scores)
         
-        # Get ensemble predictions
-        y_scores = np.mean(indiv_scores, axis=0)
-        correct_idx = np.where(np.argmax(y_scores, axis=1) == y_true)[0]
-        incorrect_idx = np.where(np.argmax(y_scores, axis=1) != y_true)[0]
+        # Use cached predictions if available
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache['correct_idx']
+            incorrect_idx = self._test_predictions_cache['incorrect_idx']
+            y_pred = self._test_predictions_cache['y_pred']
+        else:
+            y_scores = np.mean(indiv_scores, axis=0)
+            y_pred = np.argmax(y_scores, axis=1)
+            correct_idx = np.where(y_pred == y_true)[0]
+            incorrect_idx = np.where(y_pred != y_true)[0]
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
-                                       np.argmax(y_scores, axis=1), y_true)
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        metrics['time_seconds'] = timer.elapsed
+        
+        # Store results
+        self._uncertainties['Ensembling'] = uncertainties
+        self._results['Ensembling'] = metrics
         
         return uncertainties, metrics
     
@@ -244,7 +318,8 @@ class FailureDetector:
         Returns:
             tuple: (uncertainties, metrics_dict)
         """
-        with Timer("TTA computation"):
+        timer = Timer("TTA computation")
+        with timer:
             tta = uq.TTAMethod(
                 transformations=None,  # Random policies
                 n=n,
@@ -260,15 +335,24 @@ class FailureDetector:
             
             uncertainties = tta.compute(self.models, test_dataset, self.device)
         
-        # Get predictions from ensemble
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-        y_scores = self._get_ensemble_predictions(test_loader)
+        # Use cached predictions if available, otherwise compute
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache['correct_idx']
+            incorrect_idx = self._test_predictions_cache['incorrect_idx']
+            y_pred = self._test_predictions_cache['y_pred']
+        else:
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            y_scores = self._get_ensemble_predictions(test_loader)
+            y_pred = np.argmax(y_scores, axis=1)
+            correct_idx = np.where(y_pred == y_true)[0]
+            incorrect_idx = np.where(y_pred != y_true)[0]
         
-        correct_idx = np.where(np.argmax(y_scores, axis=1) == y_true)[0]
-        incorrect_idx = np.where(np.argmax(y_scores, axis=1) != y_true)[0]
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        metrics['time_seconds'] = timer.elapsed
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
-                                       np.argmax(y_scores, axis=1), y_true)
+        # Store results
+        self._uncertainties['TTA'] = uncertainties
+        self._results['TTA'] = metrics
         
         return uncertainties, metrics
     
@@ -319,7 +403,8 @@ class FailureDetector:
         import pickle
         import hashlib
         
-        with Timer("GPS computation"):
+        timer = Timer("GPS computation")
+        with timer:
             # Initialize GPS
             gps = uq.GPSMethod(
                 aug_folder=aug_folder,
@@ -379,15 +464,24 @@ class FailureDetector:
                 batch_size=batch_size
             )
         
-        # Get predictions
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-        y_scores = self._get_ensemble_predictions(test_loader)
+        # Use cached predictions if available, otherwise compute
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache['correct_idx']
+            incorrect_idx = self._test_predictions_cache['incorrect_idx']
+            y_pred = self._test_predictions_cache['y_pred']
+        else:
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            y_scores = self._get_ensemble_predictions(test_loader)
+            y_pred = np.argmax(y_scores, axis=1)
+            correct_idx = np.where(y_pred == y_true)[0]
+            incorrect_idx = np.where(y_pred != y_true)[0]
         
-        correct_idx = np.where(np.argmax(y_scores, axis=1) == y_true)[0]
-        incorrect_idx = np.where(np.argmax(y_scores, axis=1) != y_true)[0]
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        metrics['time_seconds'] = timer.elapsed
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
-                                       np.argmax(y_scores, axis=1), y_true)
+        # Store results
+        self._uncertainties['GPS'] = uncertainties
+        self._results['GPS'] = metrics
         
         return uncertainties, metrics
     
@@ -413,20 +507,30 @@ class FailureDetector:
         Returns:
             tuple: (uncertainties, metrics_dict)
         """
-        with Timer("KNN-Raw computation"):
+        timer = Timer("KNN-Raw computation")
+        with timer:
             # Fit and compute
             knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=k)
             knn_method.fit(self.models, train_loaders, self.device)
             uncertainties = knn_method.compute(self.models, test_loader, self.device)
         
-        # Get predictions
-        y_scores = self._get_ensemble_predictions(test_loader)
+        # Use cached predictions if available, otherwise compute
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache['correct_idx']
+            incorrect_idx = self._test_predictions_cache['incorrect_idx']
+            y_pred = self._test_predictions_cache['y_pred']
+        else:
+            y_scores = self._get_ensemble_predictions(test_loader)
+            y_pred = np.argmax(y_scores, axis=1)
+            correct_idx = np.where(y_pred == y_true)[0]
+            incorrect_idx = np.where(y_pred != y_true)[0]
         
-        correct_idx = np.where(np.argmax(y_scores, axis=1) == y_true)[0]
-        incorrect_idx = np.where(np.argmax(y_scores, axis=1) != y_true)[0]
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        metrics['time_seconds'] = timer.elapsed
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
-                                       np.argmax(y_scores, axis=1), y_true)
+        # Store results
+        self._uncertainties['KNN_Raw'] = uncertainties
+        self._results['KNN_Raw'] = metrics
         
         return uncertainties, metrics
     
@@ -464,7 +568,8 @@ class FailureDetector:
         Returns:
             tuple: (uncertainties, metrics_dict)
         """
-        with Timer("KNN-SHAP computation"):
+        timer = Timer("KNN-SHAP computation")
+        with timer:
             # Create method with parallelization
             knn_method = uq.KNNLatentSHAPMethod(
                 layer_name=layer_name,
@@ -479,14 +584,23 @@ class FailureDetector:
             knn_method.fit(self.models, train_loaders, calib_loader, self.device, flag=flag)
             uncertainties = knn_method.compute(self.models, test_loader, self.device)
         
-        # Get predictions
-        y_scores = self._get_ensemble_predictions(test_loader)
+        # Use cached predictions if available, otherwise compute
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache['correct_idx']
+            incorrect_idx = self._test_predictions_cache['incorrect_idx']
+            y_pred = self._test_predictions_cache['y_pred']
+        else:
+            y_scores = self._get_ensemble_predictions(test_loader)
+            y_pred = np.argmax(y_scores, axis=1)
+            correct_idx = np.where(y_pred == y_true)[0]
+            incorrect_idx = np.where(y_pred != y_true)[0]
         
-        correct_idx = np.where(np.argmax(y_scores, axis=1) == y_true)[0]
-        incorrect_idx = np.where(np.argmax(y_scores, axis=1) != y_true)[0]
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        metrics['time_seconds'] = timer.elapsed
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
-                                       np.argmax(y_scores, axis=1), y_true)
+        # Store results
+        self._uncertainties['KNN_SHAP'] = uncertainties
+        self._results['KNN_SHAP'] = metrics
         
         return uncertainties, metrics
     
@@ -507,7 +621,17 @@ class FailureDetector:
                     
                     images = images.to(self.device)
                     logits = model(images)
-                    probs = torch.softmax(logits, dim=1)
+                    
+                    # Handle both binary and multiclass
+                    if logits.shape[1] == 1:
+                        # Binary classification with single output
+                        probs = torch.sigmoid(logits)  # [B, 1]
+                        # Convert to 2-class format: [B, 2]
+                        probs = torch.cat([1 - probs, probs], dim=1)
+                    else:
+                        # Multi-class
+                        probs = torch.softmax(logits, dim=1)  # [B, C]
+                    
                     preds_fold.append(probs.cpu().numpy())
             
             all_preds.append(np.concatenate(preds_fold, axis=0))
@@ -529,3 +653,91 @@ class FailureDetector:
             uncertainties, predictions, labels, correct_idx, incorrect_idx
         )
         return metrics
+    
+    def save_results(
+        self, 
+        output_dir: str,
+        flag: str = None,
+        timestamp: str = None
+    ) -> Dict[str, str]:
+        """
+        Save all computed uncertainties, evaluation plots, and results summary.
+        
+        Args:
+            output_dir: Base directory for saving results
+            flag: Dataset/experiment identifier (optional, for filenames)
+            timestamp: Timestamp string (optional, will generate if not provided)
+            
+        Returns:
+            Dictionary with paths to saved files:
+                - 'metrics_file': Path to .npz file with all uncertainties
+                - 'figures_dir': Directory containing evaluation plots
+                - 'summary_file': Path to JSON results summary
+        """
+        from datetime import datetime
+        import json
+        
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if flag is None:
+            flag = 'results'
+        
+        os.makedirs(output_dir, exist_ok=True)
+        saved_paths = {}
+        
+        # Save all metric values (uncertainties) to .npz
+        if self._uncertainties:
+            metrics_file = os.path.join(output_dir, f'all_metrics_{flag}_{timestamp}.npz')
+            np.savez_compressed(metrics_file, **self._uncertainties)
+            saved_paths['metrics_file'] = metrics_file
+            print(f"\n💾 All metric values saved to: {metrics_file}")
+        
+        # Generate and save evaluation plots for each method
+        if self._uncertainties and self._test_predictions_cache is not None:
+            figures_dir = os.path.join(output_dir, 'figures', flag, timestamp)
+            os.makedirs(figures_dir, exist_ok=True)
+            
+            y_pred = self._test_predictions_cache['y_pred']
+            y_true = self._test_predictions_cache['y_true']
+            
+            print(f"\n📊 Generating evaluation plots...")
+            for method_name, metric_values in self._uncertainties.items():
+                try:
+                    fig_paths = uq.save_all_evaluation_plots(
+                        uncertainties=metric_values,
+                        predictions=y_pred,
+                        labels=y_true,
+                        method_name=method_name,
+                        output_dir=figures_dir
+                    )
+                    print(f"  ✓ {method_name}: {len(fig_paths)} plots saved")
+                except Exception as e:
+                    print(f"  ⚠️  Failed to generate plots for {method_name}: {e}")
+            
+            saved_paths['figures_dir'] = figures_dir
+            print(f"✓ Figures saved to: {figures_dir}")
+        
+        # Save JSON summary
+        if self._results and self._test_predictions_cache is not None:
+            y_true = self._test_predictions_cache['y_true']
+            correct_idx = self._test_predictions_cache['correct_idx']
+            
+            summary = {
+                'flag': flag,
+                'timestamp': timestamp,
+                'test_accuracy': float(len(correct_idx) / len(y_true)),
+                'test_size': len(y_true),
+                'methods': self._results,
+                'metrics_file': saved_paths.get('metrics_file'),
+                'figures_dir': saved_paths.get('figures_dir')
+            }
+            
+            summary_file = os.path.join(output_dir, f'uq_benchmark_{flag}_{timestamp}.json')
+            with open(summary_file, 'w') as f:
+                json.dump(summary, f, indent=2)
+            
+            saved_paths['summary_file'] = summary_file
+            print(f"\n💾 Results summary saved to: {summary_file}")
+        
+        return saved_paths

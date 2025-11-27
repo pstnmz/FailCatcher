@@ -26,9 +26,10 @@ from torch.utils.data import DataLoader, Subset
 # Import FailCatcher library
 import FailCatcher
 from FailCatcher import failure_detection
+from FailCatcher import UQ_toolbox as uq
 
 # Import medMNIST-specific utilities
-from medMNIST_data_models.utils import train_load_datasets_resnet as tr
+from utils import train_load_datasets_resnet as tr
 
 
 class RepeatGrayToRGB:
@@ -152,7 +153,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         
         # Load AMOS external test dataset
         print("  Loading AMOS external test dataset...")
-        amos_path = '/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST_data_models/AMOS_2022/amos_external_test_224.npz'
+        amos_path = '/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/Data_models/AMOS_2022/amos_external_test_224.npz'
         amos_data = np.load(amos_path)
         amos_images = amos_data['test_images']  # (N, 224, 224, 1)
         amos_labels = amos_data['test_labels']  # (N, 15) - AMOS organ labels
@@ -220,24 +221,80 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print(f"  Task: {info['task']}, Classes: {len(info['label'])}")
     
     # ========================================================================
-    # EVALUATE MODELS
+    # EVALUATE MODELS (or load from cache)
     # ========================================================================
-    print("\n📊 Evaluating ensemble predictions on test set...")
-    y_true, y_scores, y_pred, indiv_scores, logits = tr.evaluate_models_on_loader(
-        models, test_loader, device, return_logits=True
-    )
     
-    # Calibration set
-    y_true_calib, y_scores_calib, _, _, logits_calib = \
-        tr.evaluate_models_on_loader(models, calib_loader, device, return_logits=True)
+    # Cache file paths
+    cache_dir = os.path.join(output_dir, 'cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    calib_cache_path = os.path.join(cache_dir, f'{flag}_calib_results.npz')
+    test_cache_path = os.path.join(cache_dir, f'{flag}_test_results.npz')
     
-    # Get correct/incorrect indices
-    correct_idx = np.where(y_pred == y_true)[0]
-    incorrect_idx = np.where(y_pred != y_true)[0]
-    correct_idx_calib = np.where(np.argmax(y_scores_calib, axis=1) == y_true_calib)[0]
-    incorrect_idx_calib = np.where(np.argmax(y_scores_calib, axis=1) != y_true_calib)[0]
+    # Try to load cached results FIRST
+    if os.path.exists(calib_cache_path) and os.path.exists(test_cache_path):
+        print("\n📦 Loading cached evaluation results...")
+        calib_cache = np.load(calib_cache_path, allow_pickle=True)
+        test_cache = np.load(test_cache_path, allow_pickle=True)
+        
+        # Calibration
+        y_true_calib = calib_cache['y_true']
+        y_scores_calib = calib_cache['y_scores']
+        correct_idx_calib = calib_cache['correct_idx']
+        incorrect_idx_calib = calib_cache['incorrect_idx']
+        indiv_scores_calib = calib_cache['indiv_scores']
+        logits_calib = calib_cache['logits']
+        
+        # Test
+        y_true = test_cache['y_true']
+        y_scores = test_cache['y_scores']
+        correct_idx = test_cache['correct_idx']
+        incorrect_idx = test_cache['incorrect_idx']
+        indiv_scores = test_cache['indiv_scores']
+        logits = test_cache['logits']
+        
+        # Compute y_pred from cached scores (for compatibility with old cache format)
+        y_pred = np.argmax(y_scores, axis=1)
+        y_pred_calib = np.argmax(y_scores_calib, axis=1)
+        
+        print(f"  ✓ Loaded cached results")
+        print(f"  Test accuracy: {len(correct_idx) / len(y_true):.4f}")
     
-    print(f"  Test accuracy: {len(correct_idx)/len(y_true):.4f}")
+    else:
+        # No cache - evaluate models
+        print("\n📊 Evaluating ensemble predictions on test set...")
+        y_true, y_scores, y_pred, correct_idx, incorrect_idx, indiv_scores, logits = uq.evaluate_models_on_loader(
+            models, test_loader, device, return_logits=True
+        )
+        
+        # Calibration set
+        y_true_calib, y_scores_calib, y_pred_calib, correct_idx_calib, incorrect_idx_calib, indiv_scores_calib, logits_calib = \
+            uq.evaluate_models_on_loader(models, calib_loader, device, return_logits=True)
+        
+        print(f"  Test accuracy: {len(correct_idx)/len(y_true):.4f}")
+        
+        # Save to cache for next time
+        print("\n💾 Saving evaluation results to cache...")
+        np.savez_compressed(
+            calib_cache_path,
+            y_true=y_true_calib,
+            y_scores=y_scores_calib,
+            y_pred=y_pred_calib,
+            correct_idx=correct_idx_calib,
+            incorrect_idx=incorrect_idx_calib,
+            indiv_scores=indiv_scores_calib,
+            logits=logits_calib
+        )
+        np.savez_compressed(
+            test_cache_path,
+            y_true=y_true,
+            y_scores=y_scores,
+            y_pred=y_pred,
+            correct_idx=correct_idx,
+            incorrect_idx=incorrect_idx,
+            indiv_scores=indiv_scores,
+            logits=logits
+        )
+        print(f"  ✓ Cached to {cache_dir}")
     
     # ========================================================================
     # CREATE FAILCATCHER DETECTOR
@@ -250,6 +307,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         device=device,
         num_classes=len(info['label'])
     )
+    
+    # Set predictions once to avoid recomputing for each method
+    detector.set_test_predictions(y_scores, y_true, y_pred)
     
     # Create CV train loaders for KNN methods
     cv_gen = create_cv_generator(n_splits=5, seed=42, batch_size=batch_size)
@@ -339,6 +399,20 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         )
         results['KNN_SHAP'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+    
+    # ========================================================================
+    # SAVE RESULTS AND FIGURES (via FailureDetector)
+    # ========================================================================
+    from datetime import datetime
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save all results using the detector's save_results method
+    saved_paths = detector.save_results(
+        output_dir=output_dir,
+        flag=flag,
+        timestamp=timestamp
+    )
     
     # ========================================================================
     # PRINT SUMMARY
