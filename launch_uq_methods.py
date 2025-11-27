@@ -261,6 +261,7 @@ def compute_gps(models, test_dataset, device, image_size,
     metric = gps.compute(
         models, test_dataset, device,
         n=2, m=45,
+        nb_channels=3,  # Always use 3 channels for ResNet models
         image_size=image_size,
         image_normalization=True,
         mean=cfg['mean'],
@@ -367,9 +368,21 @@ def find_best_threshold(metric, correct_idx, metric_name='balanced_accuracy'):
     }
 
 
-def evaluate_uq_method(metric, correct_idx, incorrect_idx):
-    """Compute ROC AUC and optimal threshold metrics."""
-    # ROC AUC
+def evaluate_uq_method(metric, correct_idx, incorrect_idx, predictions=None, labels=None):
+    """
+    Compute all UQ evaluation metrics.
+    
+    Args:
+        metric: Uncertainty scores [N]
+        correct_idx: Indices of correct predictions
+        incorrect_idx: Indices of incorrect predictions
+        predictions: Optional predicted labels [N] (for AURC/AUGRC)
+        labels: Optional true labels [N] (for AURC/AUGRC)
+    
+    Returns:
+        dict: Metrics including AUROC, threshold metrics, and optionally AURC/AUGRC
+    """
+    # ROC AUC (for failure prediction)
     fpr, tpr, auc = uq.roc_curve_UQ_method_computation(
         [metric[i] for i in correct_idx],
         [metric[i] for i in incorrect_idx]
@@ -378,14 +391,26 @@ def evaluate_uq_method(metric, correct_idx, incorrect_idx):
     # Optimal threshold metrics
     threshold_metrics = find_best_threshold(metric, correct_idx)
     
-    # Convert numpy types to Python types for JSON serialization
-    return {
-        'auc': float(auc),  # Convert numpy.float64 -> Python float
+    # Base results
+    results = {
+        'auroc': float(auc),  # Renamed from 'auc' for clarity
         'threshold': float(threshold_metrics['threshold']),
         'balanced_accuracy': float(threshold_metrics['balanced_accuracy']),
         'specificity': float(threshold_metrics['specificity']),
         'sensitivity': float(threshold_metrics['sensitivity'])
     }
+    
+    # Compute AURC and AUGRC if predictions and labels provided
+    if predictions is not None and labels is not None:
+        aurc, _ = uq.compute_aurc(metric, predictions, labels)
+        augrc, _ = uq.compute_augrc(metric, predictions, labels)
+        
+        results.update({
+            'aurc': float(aurc),
+            'augrc': float(augrc)
+        })
+    
+    return results
 
 
 # ============================================================================
@@ -625,6 +650,9 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     # RUN UQ METHODS
     # ========================================================================
     
+    # Compute predictions for AURC/AUGRC metrics
+    y_pred = np.argmax(y_scores, axis=1)
+    
     results = {
         'flag': flag,
         'timestamp': timestamp,
@@ -643,12 +671,12 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         with Timer("MSR") as timer:
             metric = compute_msr(y_scores, y_true)
         computed_metrics['MSR'] = metric
-        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx, y_pred, y_true)
         results['methods']['MSR'] = {
             'time_seconds': timer.elapsed,
             **metrics
         }
-        print(f"  AUC: {metrics['auc']:.4f}")
+        print(f"  AUROC: {metrics['auroc']:.4f}, AURC: {metrics.get('aurc', 'N/A')}, AUGRC: {metrics.get('augrc', 'N/A')}")
     
     # MSR with Calibration (Temperature/Platt/Isotonic)
     if 'MSR_calibrated' in methods:
@@ -659,12 +687,12 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
                 logits_test, logits_calib, calib_method
             )
         computed_metrics[f'MSR_{calib_method}'] = metric
-        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx, y_pred, y_true)
         results['methods'][f'MSR_{calib_method}'] = {
             'time_seconds': timer.elapsed,
             **metrics
         }
-        print(f"  AUC: {metrics['auc']:.4f}")
+        print(f"  AUROC: {metrics['auroc']:.4f}, AURC: {metrics.get('aurc', 'N/A')}, AUGRC: {metrics.get('augrc', 'N/A')}")
     
     # Ensemble STD
     if 'Ensembling' in methods:
@@ -672,12 +700,12 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         with Timer("Ensembling") as timer:
             metric = compute_ensemble_std(indiv_scores)
         computed_metrics['Ensembling'] = metric
-        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx, y_pred, y_true)
         results['methods']['Ensembling'] = {
             'time_seconds': timer.elapsed,
             **metrics
         }
-        print(f"  AUC: {metrics['auc']:.4f}")
+        print(f"  AUROC: {metrics['auroc']:.4f}, AURC: {metrics.get('aurc', 'N/A')}, AUGRC: {metrics.get('augrc', 'N/A')}")
     
     # TTA (Test-Time Augmentation)
     if 'TTA' in methods:
@@ -687,12 +715,12 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
                 models, test_dataset_tta, device, image_size, batch_size
             )
         computed_metrics['TTA'] = metric
-        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx, y_pred, y_true)
         results['methods']['TTA'] = {
             'time_seconds': timer.elapsed,
             **metrics
         }
-        print(f"  AUC: {metrics['auc']:.4f}")
+        print(f"  AUROC: {metrics['auroc']:.4f}, AURC: {metrics.get('aurc', 'N/A')}, AUGRC: {metrics.get('augrc', 'N/A')}")
     
     # GPS (Greedy Policy Search)
     if 'GPS' in methods:
@@ -713,13 +741,13 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
                     max_gps_iterations, batch_size,
                     cache_dir=os.path.join(output_dir, 'gps_cache')
                 )
-            metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+            metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx, y_pred, y_true)
             computed_metrics['GPS'] = metric
             results['methods']['GPS'] = {
                 'time_seconds': timer.elapsed,
                 **metrics
             }
-            print(f"  AUC: {metrics['auc']:.4f}")
+            print(f"  AUROC: {metrics['auroc']:.4f}, AURC: {metrics.get('aurc', 'N/A')}, AUGRC: {metrics.get('augrc', 'N/A')}")
     
     if 'KNN_Raw' in methods:
         print("\n🔬 Running KNN (Raw Latent)...")
@@ -736,12 +764,12 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
                 n_splits=5       # MUST match training
             )
         computed_metrics['KNN_Raw'] = metric
-        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx, y_pred, y_true)
         results['methods']['KNN_Raw'] = {
             'time_seconds': timer.elapsed,
             **metrics
         }
-        print(f"  AUC: {metrics['auc']:.4f}")
+        print(f"  AUROC: {metrics['auroc']:.4f}, AURC: {metrics.get('aurc', 'N/A')}, AUGRC: {metrics.get('augrc', 'N/A')}")
 
     # KNN SHAP
     if 'KNN_SHAP' in methods:
@@ -776,12 +804,12 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
                 n_jobs=n_jobs  # Number of parallel workers (≤ num GPUs)
             )
         computed_metrics['KNN_SHAP'] = metric
-        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx)
+        metrics = evaluate_uq_method(metric, correct_idx, incorrect_idx, y_pred, y_true)
         results['methods']['KNN_SHAP'] = {
             'time_seconds': timer.elapsed,
             **metrics
         }
-        print(f"  AUC: {metrics['auc']:.4f}")
+        print(f"  AUROC: {metrics['auroc']:.4f}, AURC: {metrics.get('aurc', 'N/A')}, AUGRC: {metrics.get('augrc', 'N/A')}")
 
     # ========================================================================
     # SAVE RESULTS
@@ -792,6 +820,27 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
         np.savez_compressed(all_metrics_file, **computed_metrics)
         results['all_metrics_file'] = all_metrics_file
         print(f"\n💾 All metric values saved to: {all_metrics_file}")
+    
+    # Generate and save evaluation plots for each method
+    figures_dir = os.path.join(output_dir, 'figures', flag, timestamp)
+    os.makedirs(figures_dir, exist_ok=True)
+    results['figures'] = {}
+    
+    print(f"\n📊 Generating evaluation plots...")
+    for method_name, metric_values in computed_metrics.items():
+        try:
+            fig_paths = uq.save_all_evaluation_plots(
+                uncertainties=metric_values,
+                predictions=y_pred,
+                labels=y_true,
+                method_name=method_name,
+                output_dir=figures_dir
+            )
+            results['figures'][method_name] = fig_paths
+        except Exception as e:
+            print(f"  ⚠️  Failed to generate plots for {method_name}: {e}")
+    
+    print(f"✓ Figures saved to: {figures_dir}")
         
     # Save JSON global results
     output_file = os.path.join(output_dir, f'uq_benchmark_{flag}_{timestamp}.json')
@@ -804,12 +853,21 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     print("\n" + "="*80)
     print("SUMMARY")
     print("="*80)
-    print(f"{'Method':<20} {'Time (s)':<12} {'AUC':<10} {'Bal. Acc':<10}")
+    print(f"{'Method':<20} {'Time (s)':<12} {'AUROC_f':<10} {'AUGRC':<10} {'Bal. Acc':<10}")
     print("-"*80)
     for method_name, method_results in results['methods'].items():
+        auroc = method_results.get('auroc', method_results.get('auc', 'N/A'))
+        aurc = method_results.get('aurc', 'N/A')
+        augrc = method_results.get('augrc', 'N/A')
+        bal_acc = method_results.get('balanced_accuracy', 'N/A')
+        
+        auroc_str = f"{auroc:.4f}" if isinstance(auroc, float) else str(auroc)
+        aurc_str = f"{aurc:.4f}" if isinstance(aurc, float) else str(aurc)
+        augrc_str = f"{augrc:.4f}" if isinstance(augrc, float) else str(augrc)
+        bal_acc_str = f"{bal_acc:.4f}" if isinstance(bal_acc, float) else str(bal_acc)
+        
         print(f"{method_name:<20} {method_results['time_seconds']:<12.2f} "
-              f"{method_results['auc']:<10.4f} "
-              f"{method_results['balanced_accuracy']:<10.4f}")
+              f"{auroc_str:<10} {aurc_str:<10} {augrc_str:<10} {bal_acc_str:<10}")
     print("="*80)
     
     return results
