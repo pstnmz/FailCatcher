@@ -86,6 +86,19 @@ from .visualization.shap_viz import (
     visualize_umap_with_labels,
 )
 
+# Evaluation metrics
+from .evaluation.evaluation import (
+    compute_auroc,
+    compute_roc_curve,
+    compute_aurc,
+    compute_augrc,
+    compute_all_metrics,
+    plot_risk_coverage_curve,
+    plot_roc_curve_failure_prediction,
+    plot_uncertainty_distributions,
+    save_all_evaluation_plots,
+)
+
 # Base classes
 from .core.base import UQMethod, UQResult
 
@@ -150,6 +163,16 @@ __all__ = [
     "plot_shap_importance",
     "plot_clustered_feature_heatmap",
     "visualize_umap_with_labels",
+    # Evaluation
+    "compute_auroc",
+    "compute_roc_curve",
+    "compute_aurc",
+    "compute_augrc",
+    "compute_all_metrics",
+    "plot_risk_coverage_curve",
+    "plot_roc_curve_failure_prediction",
+    "plot_uncertainty_distributions",
+    "save_all_evaluation_plots",
     # Base classes
     "UQMethod",
     "UQResult",
