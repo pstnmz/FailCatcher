@@ -25,7 +25,7 @@ Example:
     >>> results = detector.run_knn_shap(
     ...     calib_loader=calib_loader,
     ...     test_loader=test_loader,
-    ...     cv_generator=my_cv_generator
+    ...     train_loaders=train_loaders
     ... )
 """
 
@@ -394,31 +394,26 @@ class FailureDetector:
     def run_knn_raw(
         self,
         test_loader: DataLoader,
+        train_loaders: List[DataLoader],
         y_true: np.ndarray,
-        cv_generator: Callable,
         layer_name: str = 'avgpool',
-        k: int = 5,
-        batch_size: int = 4000
+        k: int = 5
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run KNN in raw latent space.
         
         Args:
-            test_loader: Test data loader
+            test_loader: Test data loader (or single DataLoader if 1 model)
+            train_loaders: List of train data loaders (one per model fold)
+                          Or single DataLoader if models is a single model
             y_true: True labels [N]
-            cv_generator: Function that returns CV train loaders for each model
-                         Signature: cv_generator(study_dataset, models, batch_size) -> List[DataLoader]
             layer_name: Layer name for feature extraction
             k: Number of nearest neighbors
-            batch_size: Batch size for CV loaders
         
         Returns:
             tuple: (uncertainties, metrics_dict)
         """
         with Timer("KNN-Raw computation"):
-            # Get CV train loaders matching model folds
-            train_loaders = cv_generator(self.study_dataset, self.models, batch_size)
-            
             # Fit and compute
             knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=k)
             knn_method.fit(self.models, train_loaders, self.device)
@@ -439,13 +434,12 @@ class FailureDetector:
         self,
         calib_loader: DataLoader,
         test_loader: DataLoader,
+        train_loaders: List[DataLoader],
         y_true: np.ndarray,
-        cv_generator: Callable,
         flag: str = 'dataset',
         layer_name: str = 'avgpool',
         k: int = 5,
         n_shap_features: int = 50,
-        batch_size: int = 4000,
         cache_dir: Optional[str] = None,
         parallel: bool = False,
         n_jobs: int = 2
@@ -455,14 +449,14 @@ class FailureDetector:
         
         Args:
             calib_loader: Calibration data loader (for SHAP)
-            test_loader: Test data loader
+            test_loader: Test data loader (or single DataLoader if 1 model)
+            train_loaders: List of train data loaders (one per model fold)
+                          Or single DataLoader if models is a single model
             y_true: True labels [N]
-            cv_generator: Function that returns CV train loaders
             flag: Dataset identifier (for caching)
             layer_name: Layer name for feature extraction
             k: Number of nearest neighbors
             n_shap_features: Number of top SHAP features
-            batch_size: Batch size for CV loaders
             cache_dir: Directory to cache SHAP values
             parallel: Enable parallel processing across folds
             n_jobs: Number of parallel workers
@@ -471,9 +465,6 @@ class FailureDetector:
             tuple: (uncertainties, metrics_dict)
         """
         with Timer("KNN-SHAP computation"):
-            # Get CV train loaders
-            train_loaders = cv_generator(self.study_dataset, self.models, batch_size)
-            
             # Create method with parallelization
             knn_method = uq.KNNLatentSHAPMethod(
                 layer_name=layer_name,

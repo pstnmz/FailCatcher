@@ -1,9 +1,5 @@
-**/savedpolicies/
-**/savedpolicies_testset/
-**/gps_augment_breastmnist/
-**/gps_augment_breastmnist_testset/
-**/medMNIST/gps_augment/
-**/medMNIST/ISIC_2018/
-**/medMNIST/AMOS_2022/amos22
+**/gps_augment/
+**/ISIC_2018/
+**/AMOS_2022/amos22
 **/runs/
 **/uq_benchmark_results/
