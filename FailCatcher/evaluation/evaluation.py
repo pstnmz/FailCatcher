@@ -298,7 +298,9 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
     
     # ===== Plot 1: Selective Risk (standard risk-coverage curve) =====
     ax1.plot(coverages, risks, 'b-', linewidth=2.5, 
-            label=f'UQ Method (AUROC_f={auroc_f:.3f})')
+            label=f'UQ Method (AURC={aurc:.6f})')
+    # Shade the area under the curve (this is AURC)
+    ax1.fill_between(coverages, 0, risks, alpha=0.3, color='blue')
     
     # Plot oracle baseline (perfect ranking of failures)
     if show_optimal and n_errors > 0 and n_errors < n_samples:
@@ -306,9 +308,14 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
         # At coverage (1 - error_rate): only correct predictions, risk = 0
         # At coverage 1.0: all predictions accepted, risk = error_rate
         cov_correct = (n_samples - n_errors) / n_samples
-        oracle_cov = [0.001, cov_correct, 1.0]  # Small epsilon to avoid division issues
-        oracle_risk = [0, 0, error_rate]
-        ax1.plot(oracle_cov, oracle_risk, 'g--', linewidth=2, label='Oracle (perfect ranking)')
+        oracle_cov = np.array([0.001, cov_correct, 1.0])  # Small epsilon to avoid division issues
+        oracle_risk = np.array([0, 0, error_rate])
+        
+        # Compute Oracle AURC using trapezoidal integration
+        oracle_aurc = np.trapz(oracle_risk, oracle_cov)
+        
+        ax1.plot(oracle_cov, oracle_risk, 'g--', linewidth=2, 
+                label=f'Oracle (AURC={oracle_aurc:.6f})')
     
     ax1.set_xlabel('Coverage (fraction of predictions accepted)', fontsize=13)
     ax1.set_ylabel('Selective Risk: P(fail | accept)', fontsize=13)
@@ -322,7 +329,10 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
     # ===== Plot 2: Generalized Risk (rate of silent failures) =====
     if ax2 is not None:
         ax2.plot(coverages, generalized_risks, 'b-', linewidth=2.5, 
-                label=f'UQ Method')
+                label=f'UQ Method (AUGRC={augrc:.6f})')
+        
+        # Shade the area under the curve (this is AUGRC)
+        ax2.fill_between(coverages, 0, generalized_risks, alpha=0.3, color='blue')
         
         # Oracle baseline for generalized risk
         if show_optimal and n_errors > 0 and n_errors < n_samples:
@@ -335,10 +345,6 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
             oracle_augrc = 0.5 * (1.0 - acc) ** 2
             ax2.plot(oracle_gen_cov, oracle_gen_risk, 'g--', linewidth=2, 
                     label=f'Oracle (AUGRC={oracle_augrc:.6f})')
-        
-        # Shade the area under the curve (this is AUGRC)
-        ax2.fill_between(coverages, 0, generalized_risks, alpha=0.3, color='blue',
-                        label=f'AUGRC = {augrc:.6f}')
         
         ax2.set_xlabel('Coverage (fraction of predictions accepted)', fontsize=13)
         ax2.set_ylabel('Generalized Risk: P(fail, accept)', fontsize=13)
@@ -406,17 +412,6 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
     ax.set_xlim([0, 1])
     ax.set_ylim([0, 1])
     ax.set_aspect('equal')
-    
-    # Add interpretive text
-    info_text = 'Baselines:\n'
-    info_text += '• Oracle: AUROC_f = 1.0\n'
-    info_text += '  (perfect separation)\n'
-    info_text += '• Random: AUROC_f = 0.5\n'
-    info_text += '  (diagonal, no skill)'
-    
-    ax.text(0.98, 0.02, info_text, transform=ax.transAxes,
-            fontsize=10, verticalalignment='bottom', horizontalalignment='right',
-            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
     
     plt.tight_layout()
     
