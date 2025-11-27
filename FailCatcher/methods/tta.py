@@ -8,7 +8,7 @@ import torch
 import numpy as np
 from torchvision import transforms
 from torch.utils.data import DataLoader, TensorDataset
-from gps_augment.utils.randaugment import BetterRandAugment
+from .gps_augment.utils.randaugment import BetterRandAugment
 
 from ..core.base import UQMethod
 from ..core.utils import (
