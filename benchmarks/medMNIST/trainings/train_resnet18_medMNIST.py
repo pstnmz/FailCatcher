@@ -1,7 +1,11 @@
+import sys
+import os
+# Add parent directory to path to import utils
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from utils import train_load_datasets_resnet as tr
 from torchvision import transforms
 import torch
-import os, json, time
+import json, time
 import argparse
 import gc
 
@@ -21,6 +25,8 @@ parser.add_argument("--flag", type=str, default=None, help="Dataset flag to run 
 parser.add_argument("--color", type=str2bool, nargs='?', const=True, default=False, help="Use color images (True/False)")
 parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
 parser.add_argument("--use_randaugment", type=str2bool, nargs='?', const=True, default=False, help="Use RandAugment (True/False)")
+parser.add_argument("--use_dropout", type=str2bool, nargs='?', const=True, default=False, help="Use Dropout layers for MC Dropout (True/False)")
+parser.add_argument("--dropout_rate", type=float, default=0.5, help="Dropout rate (default: 0.5)")
 parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device string")
 parser.add_argument("--num_epochs", type=int, default=2, help="Number of epochs")
 args = parser.parse_args()
@@ -41,6 +47,8 @@ cuda = args.cuda
 num_epochs = args.num_epochs
 batch_size_arg = args.batch_size
 use_randaugment_arg = args.use_randaugment
+use_dropout_arg = args.use_dropout
+dropout_rate_arg = args.dropout_rate
 color_arg = args.color
 
 def _clear_monai_cache(obj):
@@ -135,7 +143,7 @@ else:
     cuda = default_cuda
 
 for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, use_randaugments):
-    print(f"Training on {flag} with color={color} and batch_size={batch_size}")
+    print(f"Training on {flag} with color={color}, batch_size={batch_size}, use_dropout={use_dropout_arg}, dropout_rate={dropout_rate_arg}")
     
     randaugment_ops = 2            # number of ops per image
     randaugment_mag = 9            # magnitude (0-10 typical)
@@ -143,7 +151,12 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
     size = 224  # Image size for the models
 
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    exp_dir = os.path.join("/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/medMNIST/runs", flag, f"resnet18_{size}_{timestamp}_randaug{int(use_randaugment)}_numepochs{num_epochs}_bs{batch_size}")
+    dropout_suffix = f"_dropout{dropout_rate_arg}" if use_dropout_arg else ""
+    # Get the absolute path to benchmarks/medMNIST/runs
+    script_dir = os.path.dirname(os.path.abspath(__file__))  # trainings/
+    benchmarks_dir = os.path.dirname(script_dir)  # benchmarks/medMNIST/
+    runs_dir = os.path.join(benchmarks_dir, "runs")
+    exp_dir = os.path.join(runs_dir, flag, f"resnet18_{size}_{timestamp}_randaug{int(use_randaugment)}_numepochs{num_epochs}_bs{batch_size}{dropout_suffix}")
     os.makedirs(os.path.join(exp_dir, "figs"), exist_ok=True)
 
     if color is True:
@@ -227,7 +240,9 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
             random_seed=42,
             output_dir=exp_dir,
             run_name=f"fold_{fold_idx}",
-            scheduler=True
+            scheduler=True,
+            use_dropout=use_dropout_arg,
+            dropout_rate=dropout_rate_arg
         )
         models.append(model)
         results.append(res)
