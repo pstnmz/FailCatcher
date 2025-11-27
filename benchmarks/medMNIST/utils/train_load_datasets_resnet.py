@@ -4,7 +4,7 @@ from torchvision import models, transforms
 from torch.nn.functional import sigmoid, softmax
 from torch.utils.data import DataLoader, ConcatDataset, random_split
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
-from torchvision.models import resnet18, ResNet18_Weights
+from torchvision.models import resnet18, ResNet18_Weights, vit_b_16, ViT_B_16_Weights
 import medmnist
 from medmnist import INFO
 from .local_dermamnist_e import DERMAMNIST_E_INFO
@@ -44,6 +44,147 @@ def _clear_cache_dataset(ds):
 def _append_log(path, text):
     with open(path, 'a') as f:
         f.write(text.rstrip() + '\n')
+
+# --- ResNet18 with Dropout for MC Dropout ---
+class ResNet18WithDropout(nn.Module):
+    """
+    ResNet18 with dropout layers added after each residual block and before FC layer.
+    For Monte Carlo Dropout uncertainty quantification.
+    """
+    def __init__(self, num_classes, dropout_rate=0.5, pretrained=True):
+        super(ResNet18WithDropout, self).__init__()
+        
+        # Load pretrained ResNet18
+        if pretrained:
+            base_model = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+        else:
+            base_model = models.resnet18(weights=None)
+        
+        # Extract layers (exclude final FC layer and avgpool)
+        self.conv1 = base_model.conv1
+        self.bn1 = base_model.bn1
+        self.relu = base_model.relu
+        self.maxpool = base_model.maxpool
+        
+        self.layer1 = base_model.layer1
+        self.dropout1 = nn.Dropout(p=dropout_rate)
+        
+        self.layer2 = base_model.layer2
+        self.dropout2 = nn.Dropout(p=dropout_rate)
+        
+        self.layer3 = base_model.layer3
+        self.dropout3 = nn.Dropout(p=dropout_rate)
+        
+        self.layer4 = base_model.layer4
+        self.dropout4 = nn.Dropout(p=dropout_rate)
+        
+        self.avgpool = base_model.avgpool
+        self.dropout_fc = nn.Dropout(p=dropout_rate)
+        
+        # Replace FC layer based on num_classes
+        in_features = base_model.fc.in_features
+        if num_classes == 2:
+            self.fc = nn.Linear(in_features, 1)  # Binary classification
+        else:
+            self.fc = nn.Linear(in_features, num_classes)
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        
+        x = self.layer1(x)
+        x = self.dropout1(x)
+        
+        x = self.layer2(x)
+        x = self.dropout2(x)
+        
+        x = self.layer3(x)
+        x = self.dropout3(x)
+        
+        x = self.layer4(x)
+        x = self.dropout4(x)
+        
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.dropout_fc(x)
+        x = self.fc(x)
+        
+        return x
+
+# --- Vision Transformer with Dropout for MC Dropout ---
+class ViTWithDropout(nn.Module):
+    """
+    Vision Transformer (ViT-B/16) with dropout layers for Monte Carlo Dropout.
+    Adds dropout to attention and MLP layers in each transformer block.
+    """
+    def __init__(self, num_classes, dropout_rate=0.1, pretrained=True):
+        super(ViTWithDropout, self).__init__()
+        
+        # Load pretrained ViT-B/16
+        if pretrained:
+            base_model = vit_b_16(weights=ViT_B_16_Weights.DEFAULT)
+        else:
+            base_model = vit_b_16(weights=None)
+        
+        # Copy all layers except the final head
+        self.conv_proj = base_model.conv_proj
+        self.encoder = base_model.encoder
+        self.class_token = base_model.class_token
+        
+        # Add dropout after encoder
+        self.dropout_encoder = nn.Dropout(p=dropout_rate)
+        
+        # Inject dropout into each transformer block's attention and MLP
+        for block in self.encoder.layers:
+            # Add dropout after attention
+            if hasattr(block, 'self_attention'):
+                # Increase dropout in attention
+                block.self_attention.dropout = dropout_rate
+            # Add dropout in MLP
+            if hasattr(block, 'mlp'):
+                # Replace the MLP with dropout-enabled version
+                old_mlp = block.mlp
+                mlp_layers = []
+                for layer in old_mlp:
+                    mlp_layers.append(layer)
+                    if isinstance(layer, nn.Linear):
+                        mlp_layers.append(nn.Dropout(p=dropout_rate))
+                block.mlp = nn.Sequential(*mlp_layers)
+        
+        # Replace head
+        hidden_dim = base_model.hidden_dim
+        if num_classes == 2:
+            self.heads = nn.Sequential(
+                nn.Dropout(p=dropout_rate),
+                nn.Linear(hidden_dim, 1)
+            )
+        else:
+            self.heads = nn.Sequential(
+                nn.Dropout(p=dropout_rate),
+                nn.Linear(hidden_dim, num_classes)
+            )
+    
+    def forward(self, x):
+        # Reshape and permute input
+        n, c, h, w = x.shape
+        x = self.conv_proj(x)
+        x = x.flatten(2).transpose(1, 2)
+        
+        # Add class token
+        batch_class_token = self.class_token.expand(n, -1, -1)
+        x = torch.cat([batch_class_token, x], dim=1)
+        
+        # Encoder
+        x = self.encoder(x)
+        x = self.dropout_encoder(x)
+        
+        # Classifier head (use class token)
+        x = x[:, 0]
+        x = self.heads(x)
+        
+        return x
 
 # --- New: simple patience-based early stopper ---
 class EarlyStopper:
@@ -349,7 +490,10 @@ def _compute_class_weights_from_loader(train_loader, num_classes):
         return class_weight, None
 
 def train_resnet18(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
-                   train_loader=None, val_loader=None, test_loader=None, random_seed=None, output_dir=None, run_name="run", scheduler=False, early_stop=True, monitor='val_loss', patience=10, min_delta=0.001, restore_best=True, checkpoint_best=False, class_weighting=True):
+                   train_loader=None, val_loader=None, test_loader=None, random_seed=None, 
+                   output_dir=None, run_name="run", scheduler=False, early_stop=True, 
+                   monitor='val_loss', patience=10, min_delta=0.001, restore_best=True, 
+                   checkpoint_best=False, class_weighting=True, use_dropout=False, dropout_rate=0.5):
         # Optional seeding
     if random_seed is not None:
         import random
@@ -386,23 +530,32 @@ def train_resnet18(data_flag, info, num_epochs=10, learning_rate=0.001, device=N
         val_loader = PrefetchLoader(val_loader, device)
         test_loader = PrefetchLoader(test_loader, device)
 
-    model = models.resnet18(weights=ResNet18_Weights.DEFAULT)
-    in_features = model.fc.in_features
-
-    if num_classes == 2:
-            model.fc = torch.nn.Linear(in_features, 1)
-                    # Move pos_weight to device if available
-            if bce_pos_weight_cpu is not None:
-                criterion = BCEWithLogitsLoss(pos_weight=bce_pos_weight_cpu.to(device))
-            else:
-                criterion = BCEWithLogitsLoss()
+    # Create model with or without dropout
+    if use_dropout:
+        print(f"Using ResNet18 with Dropout (dropout_rate={dropout_rate})")
+        model = ResNet18WithDropout(num_classes=num_classes, dropout_rate=dropout_rate, pretrained=True)
     else:
-        model.fc = torch.nn.Linear(in_features, num_classes)
+        model = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+        in_features = model.fc.in_features
+        if num_classes == 2:
+            model.fc = torch.nn.Linear(in_features, 1)
+        else:
+            model.fc = torch.nn.Linear(in_features, num_classes)
+    
+    # Setup loss criterion with class weights
+    if num_classes == 2:
+        # Move pos_weight to device if available
+        if bce_pos_weight_cpu is not None:
+            criterion = BCEWithLogitsLoss(pos_weight=bce_pos_weight_cpu.to(device))
+        else:
+            criterion = BCEWithLogitsLoss()
+    else:
         # Move CE weights to device if available
         if ce_weight_cpu is not None:
             criterion = CrossEntropyLoss(weight=ce_weight_cpu.to(device))
         else:
             criterion = CrossEntropyLoss()
+    
     model = model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -539,6 +692,229 @@ def train_resnet18(data_flag, info, num_epochs=10, learning_rate=0.001, device=N
         "test": eval_result["metrics"],
         "confusion_matrix": eval_result["confusion_matrix"],
         "early_stop": {
+            "enabled": bool(early_stop),
+            "monitor": monitor,
+            "best_epoch": int(best_epoch),
+            "best_value": float(best_metric_val) if best_metric_val is not None else None
+        }
+    }
+
+
+def train_vit(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
+              train_loader=None, val_loader=None, test_loader=None, random_seed=None, 
+              output_dir=None, run_name="run", scheduler=False, early_stop=True, 
+              monitor='val_loss', patience=10, min_delta=0.001, restore_best=True, 
+              checkpoint_best=False, class_weighting=True, use_dropout=False, dropout_rate=0.1):
+    """
+    Train Vision Transformer (ViT-B/16) on medMNIST dataset.
+    Same training loop as train_resnet18 but for ViT architecture.
+    """
+    # Optional seeding
+    if random_seed is not None:
+        import random
+        np.random.seed(random_seed)
+        random.seed(random_seed)
+        torch.manual_seed(random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(random_seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    num_classes = len(info['label'])
+    
+    # Compute weights BEFORE wrapping loaders for CUDA prefetch
+    ce_weight_cpu, bce_pos_weight_cpu = (None, None)
+    if class_weighting:
+        try:
+            ce_weight_cpu, bce_pos_weight_cpu = _compute_class_weights_from_loader(train_loader, num_classes)
+            if ce_weight_cpu is not None:
+                print(f"Using CE class weights (mean=1): {ce_weight_cpu.tolist()}")
+            if bce_pos_weight_cpu is not None:
+                print(f"Using BCE pos_weight: {bce_pos_weight_cpu.item():.4f}")
+        except Exception as e:
+            print("Warning: failed to compute class weights, continuing unweighted:", e)
+
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Wrap loaders with PrefetchLoader to overlap copies (only for CUDA)
+    if device and 'cuda' in str(device).lower():
+        train_loader = PrefetchLoader(train_loader, device)
+        val_loader = PrefetchLoader(val_loader, device)
+        test_loader = PrefetchLoader(test_loader, device)
+
+    # Create ViT model with or without dropout
+    if use_dropout:
+        print(f"Using ViT-B/16 with Dropout (dropout_rate={dropout_rate})")
+        model = ViTWithDropout(num_classes=num_classes, dropout_rate=dropout_rate, pretrained=True)
+    else:
+        model = vit_b_16(weights=ViT_B_16_Weights.DEFAULT)
+        hidden_dim = model.hidden_dim
+        if num_classes == 2:
+            model.heads = nn.Linear(hidden_dim, 1)
+        else:
+            model.heads = nn.Linear(hidden_dim, num_classes)
+    
+    # Setup loss criterion with class weights
+    if num_classes == 2:
+        if bce_pos_weight_cpu is not None:
+            criterion = BCEWithLogitsLoss(pos_weight=bce_pos_weight_cpu.to(device))
+        else:
+            criterion = BCEWithLogitsLoss()
+    else:
+        if ce_weight_cpu is not None:
+            criterion = CrossEntropyLoss(weight=ce_weight_cpu.to(device))
+        else:
+            criterion = CrossEntropyLoss()
+    
+    model = model.to(device)
+
+    # ViT typically benefits from lower learning rate than ResNet
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    if scheduler is True:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
+    train_losses = []
+    val_losses = []
+    val_accs = []
+    epoch_times = []
+    if output_dir:
+        figs_dir = os.path.join(output_dir, "figs")
+        _ensure_dir(figs_dir)
+        log_path = os.path.join(output_dir, "metrics.log")
+        _append_log(log_path, f"=== {run_name} start: epochs={num_epochs}, lr={learning_rate}, model=ViT-B/16 ===")
+
+    # Setup early stopper
+    stopper = None
+    best_state = None
+    best_epoch = -1
+    best_metric_val = None
+    metric_mode = 'min' if monitor == 'val_loss' else 'max'
+    if early_stop:
+        stopper = EarlyStopper(mode=metric_mode, patience=patience, min_delta=min_delta)
+    best_ckpt_path = os.path.join(output_dir, f"best_{run_name}.pt") if (output_dir and checkpoint_best) else None
+
+    # Training loop (same as ResNet)
+    for epoch in range(num_epochs):
+        t0 = time.time()
+        model.train()
+        train_loss = 0.0
+        for batch in train_loader:
+            if isinstance(batch, dict):
+                images, labels = batch['image'], batch['label']
+            else:
+                images, labels = batch[0], batch[1]
+            
+            if not isinstance(images, torch.Tensor):
+                images = images.to(device)
+            if not isinstance(labels, torch.Tensor):
+                labels = labels.to(device)
+
+            labels = labels.squeeze()
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            if num_classes == 2:
+                outputs = outputs.squeeze()
+                loss = criterion(outputs, labels.float())
+            else:
+                loss = criterion(outputs, labels.long())
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item() * images.size(0)
+        
+        train_loss /= len(train_loader.dataset)
+        train_losses.append(train_loss)
+
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                if isinstance(batch, dict):
+                    images, labels = batch['image'], batch['label']
+                else:
+                    images, labels = batch[0], batch[1]
+                
+                if not isinstance(images, torch.Tensor):
+                    images = images.to(device)
+                if not isinstance(labels, torch.Tensor):
+                    labels = labels.to(device)
+
+                labels = labels.squeeze()
+                outputs = model(images)
+                
+                if num_classes == 2:
+                    outputs_sq = outputs.squeeze()
+                    loss = criterion(outputs_sq, labels.float())
+                    preds = (torch.sigmoid(outputs_sq) > 0.5).long()
+                else:
+                    loss = criterion(outputs, labels.long())
+                    preds = torch.argmax(outputs, dim=1)
+                
+                val_loss += loss.item() * images.size(0)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+
+        val_loss /= len(val_loader.dataset)
+        val_acc = correct / total
+        val_losses.append(val_loss)
+        val_accs.append(val_acc)
+
+        if scheduler:
+            scheduler.step()
+
+        t_epoch = time.time() - t0
+        epoch_times.append(t_epoch)
+
+        print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {train_loss:.4f} | "
+              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Time: {t_epoch:.2f}s")
+        
+        if output_dir:
+            _append_log(log_path, f"Epoch {epoch+1}/{num_epochs} | train_loss={train_loss:.4f} | "
+                       f"val_loss={val_loss:.4f} | val_acc={val_acc:.4f} | time={t_epoch:.2f}s")
+
+        # Early stopping
+        if stopper is not None:
+            current_metric = val_loss if monitor == 'val_loss' else val_acc
+            improved = stopper.step(current_metric)
+            if improved:
+                best_epoch = epoch
+                best_metric_val = current_metric
+                if restore_best:
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                if best_ckpt_path:
+                    torch.save(model.state_dict(), best_ckpt_path)
+                    print(f"  → Best model saved (epoch {epoch+1})")
+            
+            if stopper.should_stop():
+                print(f"Early stopping triggered at epoch {epoch+1}")
+                if output_dir:
+                    _append_log(log_path, f"Early stopping at epoch {epoch+1}")
+                break
+
+    # Restore best model if requested
+    if restore_best and best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"Restored best model from epoch {best_epoch+1}")
+
+    # Final test evaluation
+    test_results = evaluate_model(model, test_loader, data_flag, device, output_dir, prefix=run_name, display_cm=False)
+    
+    if output_dir:
+        _append_log(log_path, f"=== {run_name} end: test_acc={test_results['accuracy']:.4f} ===")
+
+    return model, {
+        "train_losses": [float(x) for x in train_losses],
+        "val_losses": [float(x) for x in val_losses],
+        "val_accs": [float(x) for x in val_accs],
+        "epoch_times": [float(x) for x in epoch_times],
+        "test_results": test_results,
+        "early_stopping": {
             "enabled": bool(early_stop),
             "monitor": monitor,
             "best_epoch": int(best_epoch),
