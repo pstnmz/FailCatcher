@@ -708,7 +708,7 @@ class KNNLatentSHAPMethod(UQMethod):
                 distances, _ = fitted['knn'].kneighbors(test_pca)
                 avg_distances = distances.mean(axis=1)
                 
-                # Debug
+                # Debug (before normalization)
                 class_labels = labels_test[class_mask]
                 n_correct = (class_labels == class_idx).sum()
                 n_incorrect = (class_labels != class_idx).sum()
@@ -721,7 +721,12 @@ class KNNLatentSHAPMethod(UQMethod):
                     incorrect_dists = avg_distances[class_labels != class_idx]
                     print(f"      Incorrect: {incorrect_dists.mean():.3f}±{incorrect_dists.std():.3f}")
                 
-                # Store
+                # Standardize distances within this class
+                # Each class uses different SHAP features + PCA space, so distances have different scales
+                if len(avg_distances) > 1:
+                    class_mean = avg_distances.mean()
+                    class_std = avg_distances.std()
+                    avg_distances = (avg_distances - class_mean) / class_std
                 indices = np.where(class_mask)[0]
                 distances_per_sample[indices] = avg_distances
             

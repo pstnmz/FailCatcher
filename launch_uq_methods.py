@@ -853,7 +853,7 @@ def run_uq_benchmark(flag, methods, output_dir, max_gps_iterations=5,
     print("\n" + "="*80)
     print("SUMMARY")
     print("="*80)
-    print(f"{'Method':<20} {'Time (s)':<12} {'AUROC_f':<10} {'AUGRC':<10} {'Bal. Acc':<10}")
+    print(f"{'Method':<20} {'Time (s)':<12} {'AUROC_f':<10} {'AURC':<10} {'AUGRC':<10} {'Bal. Acc':<10}")
     print("-"*80)
     for method_name, method_results in results['methods'].items():
         auroc = method_results.get('auroc', method_results.get('auc', 'N/A'))
