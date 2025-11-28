@@ -88,7 +88,7 @@ def create_cv_generator(n_splits=5, seed=42, batch_size=5000, num_workers=0):
 
 
 def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
-                           batch_size=4000, image_size=224):
+                           batch_size=4000, image_size=224, per_fold_eval=True):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -98,6 +98,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         output_dir: Output directory for results
         batch_size: Batch size for inference
         image_size: Image size
+        per_fold_eval: If True, compute per-fold metrics (mean±std). If False, use ensemble-based evaluation
     """
     print(f"\n{'='*80}")
     print(f"MedMNIST Benchmark: {flag}")
@@ -105,7 +106,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print(f"{'='*80}\n")
     
     # Setup
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     color = flag in ['dermamnist', 'dermamnist-e', 'pathmnist', 'bloodmnist']
     calib_method = 'platt' if flag in ['breastmnist', 'pneumoniamnist'] else 'temperature'
     
@@ -241,16 +242,32 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         y_scores_calib = calib_cache['y_scores']
         correct_idx_calib = calib_cache['correct_idx']
         incorrect_idx_calib = calib_cache['incorrect_idx']
-        indiv_scores_calib = calib_cache['indiv_scores']
-        logits_calib = calib_cache['logits']
+        indiv_scores_calib = calib_cache['indiv_scores']  # [N_calib, K, C]
+        logits_calib = calib_cache['logits']  # [N_calib, C]
         
         # Test
         y_true = test_cache['y_true']
         y_scores = test_cache['y_scores']
         correct_idx = test_cache['correct_idx']
         incorrect_idx = test_cache['incorrect_idx']
-        indiv_scores = test_cache['indiv_scores']
-        logits = test_cache['logits']
+        indiv_scores = test_cache['indiv_scores']  # [N, K, C]
+        logits = test_cache['logits']  # [N, C]
+        
+        # Check if per-fold logits are cached (new format)
+        if 'indiv_logits' in test_cache.files:
+            indiv_logits = test_cache['indiv_logits']  # [N, K, C]
+            indiv_logits_calib = calib_cache['indiv_logits']  # [N_calib, K, C]
+        else:
+            # Old cache format without per-fold logits
+            indiv_logits = None
+            indiv_logits_calib = None
+        
+        # Transpose to [K, N, C] format for per-fold evaluation
+        indiv_scores = np.transpose(indiv_scores, (1, 0, 2))  # [K, N, C]
+        indiv_scores_calib = np.transpose(indiv_scores_calib, (1, 0, 2))  # [K, N_calib, C]
+        if indiv_logits is not None:
+            indiv_logits = np.transpose(indiv_logits, (1, 0, 2))  # [K, N, C]
+            indiv_logits_calib = np.transpose(indiv_logits_calib, (1, 0, 2))  # [K, N_calib, C]
         
         # Compute y_pred from cached scores (for compatibility with old cache format)
         y_pred = np.argmax(y_scores, axis=1)
@@ -262,15 +279,56 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     else:
         # No cache - evaluate models
         print("\n📊 Evaluating ensemble predictions on test set...")
-        y_true, y_scores, y_pred, correct_idx, incorrect_idx, indiv_scores, logits = uq.evaluate_models_on_loader(
+        y_true, y_scores, y_pred, correct_idx, incorrect_idx, indiv_scores_raw, logits = uq.evaluate_models_on_loader(
             models, test_loader, device, return_logits=True
         )
         
         # Calibration set
-        y_true_calib, y_scores_calib, y_pred_calib, correct_idx_calib, incorrect_idx_calib, indiv_scores_calib, logits_calib = \
+        y_true_calib, y_scores_calib, y_pred_calib, correct_idx_calib, incorrect_idx_calib, indiv_scores_calib_raw, logits_calib = \
             uq.evaluate_models_on_loader(models, calib_loader, device, return_logits=True)
         
         print(f"  Test accuracy: {len(correct_idx)/len(y_true):.4f}")
+        
+        # Compute per-fold logits from models
+        print("\n📊 Computing per-fold logits for calibration...")
+        indiv_logits_raw = []  # Will be [N, K, C]
+        indiv_logits_calib_raw = []  # Will be [N_calib, K, C]
+        
+        for model in models:
+            model.eval()
+            # Test set
+            test_logits_fold = []
+            with torch.no_grad():
+                for batch in test_loader:
+                    if isinstance(batch, dict):
+                        images = batch["image"].to(device)
+                    else:
+                        images = batch[0].to(device)
+                    logits_batch = model(images)
+                    test_logits_fold.append(logits_batch.cpu().numpy())
+            indiv_logits_raw.append(np.concatenate(test_logits_fold, axis=0))  # [N, C]
+            
+            # Calibration set
+            calib_logits_fold = []
+            with torch.no_grad():
+                for batch in calib_loader:
+                    if isinstance(batch, dict):
+                        images = batch["image"].to(device)
+                    else:
+                        images = batch[0].to(device)
+                    logits_batch = model(images)
+                    calib_logits_fold.append(logits_batch.cpu().numpy())
+            indiv_logits_calib_raw.append(np.concatenate(calib_logits_fold, axis=0))  # [N_calib, C]
+        
+        # Stack to [K, N, C] and [K, N_calib, C]
+        indiv_logits_raw = np.stack(indiv_logits_raw, axis=1)  # [N, K, C]
+        indiv_logits_calib_raw = np.stack(indiv_logits_calib_raw, axis=1)  # [N_calib, K, C]
+        
+        # Transpose to [K, N, C] for per-fold evaluation
+        indiv_scores = np.transpose(indiv_scores_raw, (1, 0, 2))  # [K, N, C]
+        indiv_scores_calib = np.transpose(indiv_scores_calib_raw, (1, 0, 2))  # [K, N_calib, C]
+        indiv_logits = np.transpose(indiv_logits_raw, (1, 0, 2))  # [K, N, C]
+        indiv_logits_calib = np.transpose(indiv_logits_calib_raw, (1, 0, 2))  # [K, N_calib, C]
         
         # Save to cache for next time
         print("\n💾 Saving evaluation results to cache...")
@@ -281,8 +339,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             y_pred=y_pred_calib,
             correct_idx=correct_idx_calib,
             incorrect_idx=incorrect_idx_calib,
-            indiv_scores=indiv_scores_calib,
-            logits=logits_calib
+            indiv_scores=indiv_scores_calib_raw,  # Save as [N, K, C]
+            logits=logits_calib,
+            indiv_logits=indiv_logits_calib_raw  # Save as [N, K, C]
         )
         np.savez_compressed(
             test_cache_path,
@@ -291,8 +350,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             y_pred=y_pred,
             correct_idx=correct_idx,
             incorrect_idx=incorrect_idx,
-            indiv_scores=indiv_scores,
-            logits=logits
+            indiv_scores=indiv_scores_raw,  # Save as [N, K, C]
+            logits=logits,
+            indiv_logits=indiv_logits_raw  # Save as [N, K, C]
         )
         print(f"  ✓ Cached to {cache_dir}")
     
@@ -322,18 +382,40 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     if 'MSR' in methods:
         print("\n🔍 Running MSR...")
-        uncertainties, metrics = detector.run_msr(y_scores, y_true)
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
+        uncertainties, metrics = detector.run_msr(
+            y_scores, y_true, 
+            indiv_scores=indiv_scores if per_fold_eval else None,
+            per_fold_evaluation=per_fold_eval
+        )
         results['MSR'] = metrics
-        print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+        if 'auroc_f_mean' in metrics:
+            print(f"  AUROC: {metrics['auroc_f_mean']:.4f}±{metrics['auroc_f_std']:.4f}, "
+                  f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
+        else:
+            print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
     if 'MSR_calibrated' in methods:
         print(f"\n🔍 Running MSR-{calib_method}...")
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
         uncertainties, metrics = detector.run_msr_calibrated(
             y_scores, y_true, y_scores_calib, y_true_calib,
-            logits, logits_calib, method=calib_method
+            logits, logits_calib,
+            indiv_logits_test=indiv_logits if (per_fold_eval and indiv_logits is not None) else None,
+            indiv_logits_calib=indiv_logits_calib if (per_fold_eval and indiv_logits_calib is not None) else None,
+            indiv_scores_test=indiv_scores if per_fold_eval else None,
+            indiv_scores_calib=indiv_scores_calib if per_fold_eval else None,
+            method=calib_method,
+            per_fold_evaluation=per_fold_eval
         )
         results[f'MSR_{calib_method}'] = metrics
-        print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+        if 'auroc_f_mean' in metrics:
+            print(f"  AUROC: {metrics['auroc_f_mean']:.4f}±{metrics['auroc_f_std']:.4f}, "
+                  f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
+        else:
+            print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
     if 'Ensembling' in methods:
         print("\n🔍 Running Ensemble STD...")
@@ -369,18 +451,23 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     if 'KNN_Raw' in methods:
         print("\n🔍 Running KNN-Raw...")
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
         uncertainties, metrics = detector.run_knn_raw(
             test_loader=test_loader,
             train_loaders=train_loaders,
             y_true=y_true,
             layer_name='avgpool',
-            k=5
+            k=5,
+            per_fold_evaluation=per_fold_eval
         )
         results['KNN_Raw'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
     if 'KNN_SHAP' in methods:
         print("\n🔍 Running KNN-SHAP...")
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
         parallel_mode = torch.cuda.device_count() >= 3
         n_jobs = 3 if parallel_mode else 1
         
@@ -395,7 +482,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             n_shap_features=50,
             cache_dir=os.path.join(output_dir, 'shap_cache'),
             parallel=parallel_mode,
-            n_jobs=n_jobs
+            n_jobs=n_jobs,
+            per_fold_evaluation=per_fold_eval
         )
         results['KNN_SHAP'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
@@ -417,18 +505,30 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     # ========================================================================
     # PRINT SUMMARY
     # ========================================================================
-    print("\n" + "="*80)
+    print("\n" + "="*100)
     print("SUMMARY")
-    print("="*80)
-    print(f"{'Method':<20} {'AUROC_f':<10} {'AURC':<10} {'AUGRC':<10} {'Accuracy':<10}")
-    print("-"*80)
+    print("="*100)
+    print(f"{'Method':<20} {'AUROC_f':<20} {'AURC':<20} {'AUGRC':<20} {'Accuracy':<10}")
+    print("-"*100)
     for method_name, method_results in results.items():
+        # Check if per-fold metrics exist (mean and std)
+        if 'auroc_f_mean' in method_results and 'auroc_f_std' in method_results:
+            # Per-fold evaluation: show mean±std
+            auroc_str = f"{method_results['auroc_f_mean']:.4f}±{method_results['auroc_f_std']:.4f}"
+            aurc_str = f"{method_results['aurc_mean']:.6f}±{method_results['aurc_std']:.6f}"
+            augrc_str = f"{method_results['augrc_mean']:.6f}±{method_results['augrc_std']:.6f}"
+        else:
+            # Single evaluation: show just the value
+            auroc_str = f"{method_results['auroc_f']:.4f}"
+            aurc_str = f"{method_results['aurc']:.6f}"
+            augrc_str = f"{method_results['augrc']:.6f}"
+        
         print(f"{method_name:<20} "
-              f"{method_results['auroc_f']:<10.4f} "
-              f"{method_results['aurc']:<10.6f} "
-              f"{method_results['augrc']:<10.6f} "
+              f"{auroc_str:<20} "
+              f"{aurc_str:<20} "
+              f"{augrc_str:<20} "
               f"{method_results['accuracy']:<10.4f}")
-    print("="*80)
+    print("="*100)
     
     return results
 
@@ -457,6 +557,14 @@ if __name__ == '__main__':
         '--batch-size', type=int, default=4000,
         help='Batch size for inference'
     )
+    parser.add_argument(
+        '--per-fold-eval', action='store_true', default=False,
+        help='Use per-fold evaluation (mean±std). If not set, uses ensemble-based evaluation (default: False for backward compatibility)'
+    )
+    parser.add_argument(
+        '--ensemble-eval', dest='per_fold_eval', action='store_false',
+        help='Use ensemble-based evaluation (legacy mode)'
+    )
     
     args = parser.parse_args()
     
@@ -464,5 +572,6 @@ if __name__ == '__main__':
         flag=args.flag,
         methods=args.methods,
         output_dir=args.output_dir,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        per_fold_eval=args.per_fold_eval
     )
