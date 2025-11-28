@@ -253,8 +253,89 @@ def compute_all_metrics(uncertainties, predictions, labels, correct_idx=None, in
     }
 
 
+def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels):
+    """
+    Compute metrics independently for each fold, then aggregate with mean±std.
+    
+    This is the CORRECT way to evaluate UQ methods in a cross-validation setting:
+    - Each fold represents an independent model/experiment
+    - Compute metrics on each fold separately
+    - Report mean±std across folds to capture model variance
+    
+    Args:
+        uncertainties_per_fold: Array of uncertainty scores [num_folds, N]
+        predictions: Array of predicted labels [N] (ensemble predictions)
+        labels: Array of true labels [N]
+    
+    Returns:
+        dict: Aggregated metrics with mean and std:
+            - auroc_f_mean, auroc_f_std
+            - aurc_mean, aurc_std
+            - augrc_mean, augrc_std
+            - accuracy (same for all folds, uses ensemble)
+            - per_fold_metrics: List of dicts with metrics for each fold
+    """
+    num_folds = uncertainties_per_fold.shape[0]
+    
+    # Compute correct/incorrect for ensemble predictions (same for all folds)
+    errors = (predictions != labels)
+    correct_idx = np.where(~errors)[0]
+    incorrect_idx = np.where(errors)[0]
+    
+    # Compute metrics for each fold independently
+    per_fold_metrics = []
+    auroc_f_list = []
+    aurc_list = []
+    augrc_list = []
+    
+    for fold_idx in range(num_folds):
+        fold_uncertainties = uncertainties_per_fold[fold_idx]
+        
+        # Compute metrics for this fold
+        fold_metrics = compute_all_metrics(
+            fold_uncertainties, predictions, labels,
+            correct_idx, incorrect_idx
+        )
+        
+        per_fold_metrics.append(fold_metrics)
+        auroc_f_list.append(fold_metrics['auroc_f'])
+        aurc_list.append(fold_metrics['aurc'])
+        augrc_list.append(fold_metrics['augrc'])
+    
+    # Aggregate: mean and std across folds
+    auroc_f_array = np.array(auroc_f_list)
+    aurc_array = np.array(aurc_list)
+    augrc_array = np.array(augrc_list)
+    
+    # Filter out NaN values for statistics (edge cases)
+    auroc_f_valid = auroc_f_array[~np.isnan(auroc_f_array)]
+    aurc_valid = aurc_array[~np.isnan(aurc_array)]
+    augrc_valid = augrc_array[~np.isnan(augrc_array)]
+    
+    return {
+        'auroc_f_mean': float(np.mean(auroc_f_valid)) if len(auroc_f_valid) > 0 else np.nan,
+        'auroc_f_std': float(np.std(auroc_f_valid)) if len(auroc_f_valid) > 0 else np.nan,
+        'aurc_mean': float(np.mean(aurc_valid)) if len(aurc_valid) > 0 else np.nan,
+        'aurc_std': float(np.std(aurc_valid)) if len(aurc_valid) > 0 else np.nan,
+        'augrc_mean': float(np.mean(augrc_valid)) if len(augrc_valid) > 0 else np.nan,
+        'augrc_std': float(np.std(augrc_valid)) if len(augrc_valid) > 0 else np.nan,
+        'accuracy': float(len(correct_idx) / len(labels)),  # Ensemble accuracy
+        'error_rate': float(len(incorrect_idx) / len(labels)),
+        'n_correct': len(correct_idx),
+        'n_incorrect': len(incorrect_idx),
+        'n_total': len(labels),
+        'num_folds': num_folds,
+        'per_fold_metrics': per_fold_metrics,  # Full details per fold
+        # Keep old keys for backward compatibility (use mean values)
+        'auroc_f': float(np.mean(auroc_f_valid)) if len(auroc_f_valid) > 0 else np.nan,
+        'aurc': float(np.mean(aurc_valid)) if len(aurc_valid) > 0 else np.nan,
+        'augrc': float(np.mean(augrc_valid)) if len(augrc_valid) > 0 else np.nan,
+    }
+
+
 def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None, 
-                              show_optimal=True, save_path=None):
+                              show_optimal=True, save_path=None, 
+                              uncertainties_per_fold=None, ensemble_uncertainties=None):
     """
     Plot Risk-Coverage curve (Selective Risk) and Generalized Risk.
     
@@ -262,12 +343,14 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
     - Oracle: Perfect UQ that ranks ALL errors as most uncertain (AUROC_f=1.0)
     
     Args:
-        uncertainties: Array of uncertainty scores [N]
+        uncertainties: Array of uncertainty scores [N] (main uncertainties to plot)
         predictions: Array of predicted labels [N]
         labels: Array of true labels [N]
         ax: Matplotlib axis (creates new figure if None)
         show_optimal: Whether to show oracle baseline (perfect ranking)
         save_path: Path to save figure (optional)
+        uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
+        ensemble_uncertainties: Optional [N] array for ensemble reference (when per-fold provided)
     
     Returns:
         matplotlib figure and axis
@@ -280,7 +363,20 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
         ax1 = ax
         ax2 = None
     
-    # Compute curves
+    # ===== Plot 1: Selective Risk (standard risk-coverage curve) =====
+    
+    # Plot per-fold curves if provided (semi-transparent)
+    if uncertainties_per_fold is not None:
+        num_folds = uncertainties_per_fold.shape[0]
+        for fold_idx in range(num_folds):
+            fold_uncertainties = uncertainties_per_fold[fold_idx]
+            aurc_fold, metrics_fold = compute_aurc(fold_uncertainties, predictions, labels)
+            coverages_fold = metrics_fold['coverages']
+            risks_fold = metrics_fold['risks']
+            ax1.plot(coverages_fold, risks_fold, '-', alpha=0.3, linewidth=1.5, 
+                    color='cornflowerblue', label=f'Fold {fold_idx+1}' if fold_idx < 3 else '')
+    
+    # Compute curves for main uncertainties
     aurc, metrics = compute_aurc(uncertainties, predictions, labels)
     augrc, augrc_metrics = compute_augrc(uncertainties, predictions, labels)
     
@@ -296,11 +392,12 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
     # P(fail | accept) = risks, P(accept) = coverages
     generalized_risks = risks * coverages
     
-    # ===== Plot 1: Selective Risk (standard risk-coverage curve) =====
+    # Plot main curve (averaged or ensemble)
+    label_main = 'Average' if uncertainties_per_fold is not None else 'UQ Method'
     ax1.plot(coverages, risks, 'b-', linewidth=2.5, 
-            label=f'UQ Method (AURC={aurc:.6f})')
+            label=f'{label_main} (AURC={aurc:.6f})')
     # Shade the area under the curve (this is AURC)
-    ax1.fill_between(coverages, 0, risks, alpha=0.3, color='blue')
+    ax1.fill_between(coverages, 0, risks, alpha=0.2, color='blue')
     
     # Plot oracle baseline (perfect ranking of failures)
     if show_optimal and n_errors > 0 and n_errors < n_samples:
@@ -328,11 +425,24 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
     
     # ===== Plot 2: Generalized Risk (rate of silent failures) =====
     if ax2 is not None:
+        # Plot per-fold curves if provided (semi-transparent)
+        if uncertainties_per_fold is not None:
+            num_folds = uncertainties_per_fold.shape[0]
+            for fold_idx in range(num_folds):
+                fold_uncertainties = uncertainties_per_fold[fold_idx]
+                aurc_fold, metrics_fold = compute_aurc(fold_uncertainties, predictions, labels)
+                coverages_fold = metrics_fold['coverages']
+                risks_fold = metrics_fold['risks']
+                gen_risks_fold = risks_fold * coverages_fold
+                ax2.plot(coverages_fold, gen_risks_fold, '-', alpha=0.3, linewidth=1.5,
+                        color='cornflowerblue', label=f'Fold {fold_idx+1}' if fold_idx < 3 else '')
+        
+        # Plot main curve
         ax2.plot(coverages, generalized_risks, 'b-', linewidth=2.5, 
-                label=f'UQ Method (AUGRC={augrc:.6f})')
+                label=f'{label_main} (AUGRC={augrc:.6f})')
         
         # Shade the area under the curve (this is AUGRC)
-        ax2.fill_between(coverages, 0, generalized_risks, alpha=0.3, color='blue')
+        ax2.fill_between(coverages, 0, generalized_risks, alpha=0.2, color='blue')
         
         # Oracle baseline for generalized risk
         if show_optimal and n_errors > 0 and n_errors < n_samples:
@@ -367,7 +477,8 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
 
 
 def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
-                                       method_name='UQ Method', save_path=None):
+                                       method_name='UQ Method', save_path=None,
+                                       uncertainties_per_fold=None, ensemble_uncertainties=None):
     """
     Plot ROC curve for failure prediction (AUROC_f).
     
@@ -383,6 +494,8 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
         labels: Array of true labels [N]
         method_name: Name of the UQ method for plot title
         save_path: Path to save figure (optional)
+        uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
+        ensemble_uncertainties: Optional [N] array for ensemble reference
     
     Returns:
         matplotlib figure
@@ -391,17 +504,29 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
     correct_idx = np.where(~errors)[0]
     incorrect_idx = np.where(errors)[0]
     
-    # Compute ROC curve
+    # Compute ROC curve for main uncertainties
     fpr, tpr, thresholds, auroc_f = compute_roc_curve(uncertainties, correct_idx, incorrect_idx)
     
     # Create figure
     fig, ax = plt.subplots(figsize=(8, 8))
     
-    # Plot ROC curve
-    ax.plot(fpr, tpr, 'b-', linewidth=2.5, label=f'AUROC_f = {auroc_f:.4f}')
+    # Plot per-fold curves if provided (semi-transparent)
+    if uncertainties_per_fold is not None:
+        num_folds = uncertainties_per_fold.shape[0]
+        for fold_idx in range(num_folds):
+            fold_uncertainties = uncertainties_per_fold[fold_idx]
+            fpr_fold, tpr_fold, _, auroc_fold = compute_roc_curve(fold_uncertainties, correct_idx, incorrect_idx)
+            ax.plot(fpr_fold, tpr_fold, '-', alpha=0.3, linewidth=1.5,
+                   color='cornflowerblue', label=f'Fold {fold_idx+1}' if fold_idx < 3 else '')
+    
+    # Determine label for main curve
+    label_main = 'Average' if uncertainties_per_fold is not None else method_name
+    
+    # Plot main ROC curve
+    ax.plot(fpr, tpr, 'b-', linewidth=2.5, label=f'{label_main}: AUROC_f = {auroc_f:.4f}')
     
     # Plot diagonal (random baseline)
-    ax.plot([0, 1], [0, 1], 'r--', linewidth=2, alpha=0.7)
+    ax.plot([0, 1], [0, 1], 'r--', linewidth=2, alpha=0.7, label='Random')
     
     # Styling
     ax.set_xlabel('False Positive Rate\n(Fraction of correct predictions flagged as uncertain)', fontsize=12)
@@ -424,13 +549,14 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
 
 
 def plot_uncertainty_distributions(uncertainties, predictions, labels, 
-                                   method_name='UQ Method', save_path=None):
+                                   method_name='UQ Method', save_path=None,
+                                   uncertainties_per_fold=None, ensemble_uncertainties=None):
     """
     Plot uncertainty score distributions for correct vs incorrect predictions.
     
     Creates:
-    1. Boxplot comparing distributions
-    2. Histogram overlays
+    1. Boxplot comparing distributions (with per-fold overlays if provided)
+    2. Histogram overlays (with per-fold overlays if provided)
     3. Summary statistics
     
     Args:
@@ -439,6 +565,8 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
         labels: Array of true labels [N]
         method_name: Name of the UQ method for plot title
         save_path: Path to save figure (optional)
+        uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
+        ensemble_uncertainties: Optional [N] array for ensemble reference
     
     Returns:
         matplotlib figure
@@ -475,8 +603,24 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
     
+    # Add per-fold scatter points if provided
+    if uncertainties_per_fold is not None:
+        num_folds = uncertainties_per_fold.shape[0]
+        for fold_idx in range(num_folds):
+            fold_unc = uncertainties_per_fold[fold_idx]
+            fold_correct = fold_unc[correct_idx]
+            fold_incorrect = fold_unc[incorrect_idx]
+            
+            # Jitter x-positions for visibility
+            x_correct = np.random.normal(1, 0.04, size=len(fold_correct))
+            x_incorrect = np.random.normal(2, 0.04, size=len(fold_incorrect))
+            
+            ax1.scatter(x_correct, fold_correct, alpha=0.1, s=5, color='green')
+            ax1.scatter(x_incorrect, fold_incorrect, alpha=0.1, s=5, color='red')
+    
     ax1.set_ylabel('Uncertainty Score', fontsize=13)
-    ax1.set_title(f'{method_name}\nUncertainty Distribution by Prediction Outcome', 
+    title_suffix = ' (Average)' if uncertainties_per_fold is not None else ''
+    ax1.set_title(f'{method_name}\nUncertainty Distribution by Prediction Outcome{title_suffix}', 
                  fontsize=14, fontweight='bold')
     ax1.grid(True, axis='y', alpha=0.3)
     
@@ -498,10 +642,27 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
     bins = np.linspace(min(uncertainties.min(), 0), 
                       uncertainties.max(), 50)
     
+    # Plot per-fold histograms if provided (very transparent)
+    if uncertainties_per_fold is not None:
+        num_folds = uncertainties_per_fold.shape[0]
+        for fold_idx in range(num_folds):
+            fold_unc = uncertainties_per_fold[fold_idx]
+            fold_correct = fold_unc[correct_idx]
+            fold_incorrect = fold_unc[incorrect_idx]
+            
+            ax2.hist(fold_correct, bins=bins, alpha=0.15, color='green', 
+                    density=True, edgecolor=None, linewidth=0)
+            ax2.hist(fold_incorrect, bins=bins, alpha=0.15, color='red', 
+                    density=True, edgecolor=None, linewidth=0)
+    
+    # Plot main histograms
+    label_correct = f'Correct (n={len(unc_correct)}, avg)' if uncertainties_per_fold is not None else f'Correct (n={len(unc_correct)})'
+    label_incorrect = f'Incorrect (n={len(unc_incorrect)}, avg)' if uncertainties_per_fold is not None else f'Incorrect (n={len(unc_incorrect)})'
+    
     ax2.hist(unc_correct, bins=bins, alpha=0.6, color='green', 
-            label=f'Correct (n={len(unc_correct)})', density=True, edgecolor='black')
+            label=label_correct, density=True, edgecolor='black')
     ax2.hist(unc_incorrect, bins=bins, alpha=0.6, color='red', 
-            label=f'Incorrect (n={len(unc_incorrect)})', density=True, edgecolor='black')
+            label=label_incorrect, density=True, edgecolor='black')
     
     # Add vertical lines for means
     ax2.axvline(unc_correct.mean(), color='darkgreen', linestyle='--', 
@@ -527,7 +688,8 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
 
 
 def save_all_evaluation_plots(uncertainties, predictions, labels, 
-                               method_name='UQ Method', output_dir='./figures'):
+                               method_name='UQ Method', output_dir='./figures',
+                               uncertainties_per_fold=None, ensemble_uncertainties=None):
     """
     Generate and save all evaluation plots for a UQ method.
     
@@ -542,6 +704,8 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
         labels: Array of true labels [N]
         method_name: Name of the UQ method
         output_dir: Directory to save figures
+        uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
+        ensemble_uncertainties: Optional [N] array for ensemble reference
     
     Returns:
         dict: Paths to saved figures
@@ -556,20 +720,26 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
     roc_path = output_dir / f'{safe_name}_roc_curve.png'
     fig_roc = plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
                                                 method_name=method_name,
-                                                save_path=roc_path)
+                                                save_path=roc_path,
+                                                uncertainties_per_fold=uncertainties_per_fold,
+                                                ensemble_uncertainties=ensemble_uncertainties)
     plt.close(fig_roc)
     
     # Save risk-coverage curves
     rc_path = output_dir / f'{safe_name}_risk_coverage.png'
     fig_rc, _ = plot_risk_coverage_curve(uncertainties, predictions, labels, 
-                                         save_path=rc_path)
+                                         save_path=rc_path,
+                                         uncertainties_per_fold=uncertainties_per_fold,
+                                         ensemble_uncertainties=ensemble_uncertainties)
     plt.close(fig_rc)
     
     # Save uncertainty distributions
     dist_path = output_dir / f'{safe_name}_distributions.png'
     fig_dist = plot_uncertainty_distributions(uncertainties, predictions, labels,
                                               method_name=method_name,
-                                              save_path=dist_path)
+                                              save_path=dist_path,
+                                              uncertainties_per_fold=uncertainties_per_fold,
+                                              ensemble_uncertainties=ensemble_uncertainties)
     plt.close(fig_dist)
     
     return {

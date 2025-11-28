@@ -298,8 +298,21 @@ class KNNLatentMethod(UQMethod):
         print(f"  ✓ Fitted {len(models)} fold(s)")
         return self
     
-    def compute(self, models, data_loader, device):
-        """Compute KNN distances, averaged across folds."""
+    def compute(self, models, data_loader, device, return_per_fold=True):
+        """
+        Compute KNN distances per fold (or averaged for backward compatibility).
+        
+        Args:
+            models: List of models (one per fold)
+            data_loader: Test data loader
+            device: torch device
+            return_per_fold: If True, return [num_folds, N]. If False, return [N] (averaged, legacy)
+        
+        Returns:
+            np.ndarray: 
+                - If return_per_fold=True: [num_folds, N] distances per fold
+                - If return_per_fold=False: [N] averaged distances (backward compatible)
+        """
         if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
         
@@ -326,11 +339,16 @@ class KNNLatentMethod(UQMethod):
             avg_distances = distances.mean(axis=1)
             all_distances.append(avg_distances)
         
-        # Average across folds
-        final_distances = np.mean(all_distances, axis=0)
+        all_distances = np.array(all_distances)  # [num_folds, N]
         
-        print(f"  ✓ Computed KNN distances (averaged over {len(models)} folds)")
-        return final_distances
+        if return_per_fold:
+            print(f"  ✓ Computed KNN distances for {len(models)} folds (per-fold mode)")
+            return all_distances  # [num_folds, N]
+        else:
+            # Legacy mode: average across folds
+            final_distances = np.mean(all_distances, axis=0)
+            print(f"  ✓ Computed KNN distances (averaged over {len(models)} folds)")
+            return final_distances
 
 
 class KNNLatentSHAPMethod(UQMethod):
@@ -638,9 +656,20 @@ class KNNLatentSHAPMethod(UQMethod):
         
         return model_knns
     
-    def compute(self, models, data_loader, device):
+    def compute(self, models, data_loader, device, return_per_fold=True):
         """
-        Compute KNN distances for test samples.
+        Compute KNN-SHAP distances per fold (or averaged for backward compatibility).
+        
+        Args:
+            models: List of models (one per fold)
+            data_loader: Test data loader
+            device: torch device
+            return_per_fold: If True, return [num_folds, N]. If False, return [N] (averaged, legacy)
+        
+        Returns:
+            np.ndarray: 
+                - If return_per_fold=True: [num_folds, N] distances per fold
+                - If return_per_fold=False: [N] averaged distances (backward compatible)
         """
         if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
@@ -732,12 +761,16 @@ class KNNLatentSHAPMethod(UQMethod):
             
             all_distances.append(distances_per_sample)
         
-        # Average across models
-        final_distances = np.mean(all_distances, axis=0)
+        all_distances = np.array(all_distances)  # [num_folds, N]
         
-        print(f"\n  ✓ Final averaged distances: {final_distances.mean():.3f}±{final_distances.std():.3f}")
-        
-        return final_distances
+        if return_per_fold:
+            print(f"\n  ✓ Computed KNN-SHAP distances for {len(self.fitted_models)} folds (per-fold mode)")
+            return all_distances  # [num_folds, N]
+        else:
+            # Legacy mode: average across models
+            final_distances = np.mean(all_distances, axis=0)
+            print(f"\n  ✓ Final averaged distances: {final_distances.mean():.3f}±{final_distances.std():.3f}")
+            return final_distances
 
 class HyperplaneDistanceMethod(UQMethod):
     """

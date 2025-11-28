@@ -141,21 +141,38 @@ class FailureDetector:
     def run_msr(
         self,
         y_scores: np.ndarray,
-        y_true: np.ndarray
+        y_true: np.ndarray,
+        indiv_scores: Optional[np.ndarray] = None,
+        per_fold_evaluation: bool = True
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run Maximum Softmax Response (MSR).
         
         Args:
-            y_scores: Probability scores [N, num_classes]
+            y_scores: Ensemble probability scores [N, num_classes]
             y_true: True labels [N]
+            indiv_scores: Optional individual model scores [num_models, N, num_classes]
+            per_fold_evaluation: If True and indiv_scores provided, compute per-fold metrics.
+                                If False, use ensemble predictions (legacy behavior)
         
         Returns:
             tuple: (uncertainties, metrics_dict)
+                If per_fold_evaluation=True and indiv_scores provided: uncertainties is [num_folds, N]
+                Otherwise: uncertainties is [N]
         """
         timer = Timer("MSR computation")
         with timer:
-            uncertainties = uq.distance_to_hard_labels_computation(y_scores)
+            if indiv_scores is not None and per_fold_evaluation:
+                # Compute MSR per-fold
+                uncertainties_per_fold = []
+                for fold_idx in range(indiv_scores.shape[0]):
+                    fold_scores = indiv_scores[fold_idx]  # [N, num_classes]
+                    fold_uncertainties = uq.distance_to_hard_labels_computation(fold_scores)
+                    uncertainties_per_fold.append(fold_uncertainties)
+                uncertainties = np.array(uncertainties_per_fold)  # [num_folds, N]
+            else:
+                # Ensemble-based: single uncertainty from ensemble
+                uncertainties = uq.distance_to_hard_labels_computation(y_scores)
         
         # Use cached predictions if available
         if self._test_predictions_cache is not None:
@@ -171,7 +188,14 @@ class FailureDetector:
         metrics['time_seconds'] = timer.elapsed
         
         # Store results
-        self._uncertainties['MSR'] = uncertainties
+        if uncertainties.ndim == 2:
+            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots), and ensemble (for reference)
+            self._uncertainties['MSR'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['MSR_per_fold'] = uncertainties  # [num_folds, N] for plotting all curves
+            self._uncertainties['MSR_ensemble'] = uq.distance_to_hard_labels_computation(y_scores)  # [N]
+        else:
+            # Ensemble: store single uncertainty
+            self._uncertainties['MSR'] = uncertainties
         self._results['MSR'] = metrics
         
         return uncertainties, metrics
@@ -184,66 +208,164 @@ class FailureDetector:
         y_true_calib: np.ndarray,
         logits_test: Optional[np.ndarray] = None,
         logits_calib: Optional[np.ndarray] = None,
-        method: str = 'temperature'
+        indiv_logits_test: Optional[np.ndarray] = None,
+        indiv_logits_calib: Optional[np.ndarray] = None,
+        indiv_scores_test: Optional[np.ndarray] = None,
+        indiv_scores_calib: Optional[np.ndarray] = None,
+        method: str = 'temperature',
+        per_fold_evaluation: bool = True
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run calibrated MSR using post-hoc calibration.
         
         Args:
-            y_scores_test: Test probabilities [N, C]
+            y_scores_test: Ensemble test probabilities [N, C]
             y_true_test: Test labels [N]
-            y_scores_calib: Calibration probabilities [N_calib, C]
+            y_scores_calib: Ensemble calibration probabilities [N_calib, C]
             y_true_calib: Calibration labels [N_calib]
-            logits_test: Test logits (for temperature) [N, C]
-            logits_calib: Calibration logits (for temperature) [N_calib, C]
+            logits_test: Ensemble test logits (for temperature) [N, C]
+            logits_calib: Ensemble calibration logits (for temperature) [N_calib, C]
+            indiv_logits_test: Per-fold test logits [num_folds, N, C]
+            indiv_logits_calib: Per-fold calibration logits [num_folds, N_calib, C]
+            indiv_scores_test: Per-fold test scores [num_folds, N, C]
+            indiv_scores_calib: Per-fold calibration scores [num_folds, N_calib, C]
             method: 'temperature', 'platt', or 'isotonic'
+            per_fold_evaluation: If True and indiv_* provided, compute per-fold metrics.
+                                If False, use ensemble predictions (legacy behavior)
         
         Returns:
             tuple: (uncertainties, metrics_dict)
+                If per_fold_evaluation=True and indiv_* provided: uncertainties is [num_folds, N]
+                Otherwise: uncertainties is [N]
         """
         from .methods.distance import posthoc_calibration
         from .core.utils import apply_calibration
         
         timer = Timer(f"MSR-{method} calibration")
         with timer:
-            # Fit calibration on calibration set
-            if method == 'temperature':
-                if logits_calib is None:
-                    raise ValueError("Temperature scaling requires logits")
-                _, calibration_model = posthoc_calibration(logits_calib, y_true_calib, method)
+            if per_fold_evaluation and method == 'temperature' and indiv_logits_test is not None and indiv_logits_calib is not None:
+                # Per-fold calibration with temperature scaling
+                uncertainties_per_fold = []
+                num_folds = indiv_logits_test.shape[0]
+                
+                for fold_idx in range(num_folds):
+                    fold_logits_calib = indiv_logits_calib[fold_idx]
+                    fold_logits_test = indiv_logits_test[fold_idx]
+                    
+                    # Fit calibration on this fold's calibration set
+                    _, calibration_model = posthoc_calibration(
+                        fold_logits_calib, y_true_calib, method
+                    )
+                    
+                    # Get fold's test scores
+                    fold_scores_test = indiv_scores_test[fold_idx] if indiv_scores_test is not None else None
+                    if fold_scores_test is None:
+                        # Compute from logits if not provided
+                        import torch
+                        fold_scores_test = torch.softmax(torch.from_numpy(fold_logits_test), dim=1).numpy()
+                    
+                    # Apply calibration
+                    calibrated_scores = apply_calibration(
+                        fold_scores_test, calibration_model, method, logits=fold_logits_test
+                    )
+                    
+                    # Compute uncertainty
+                    fold_uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
+                    uncertainties_per_fold.append(fold_uncertainties)
+                
+                uncertainties = np.array(uncertainties_per_fold)  # [num_folds, N]
+                
+            elif per_fold_evaluation and method != 'temperature' and indiv_scores_test is not None and indiv_scores_calib is not None:
+                # Per-fold calibration with Platt/Isotonic
+                uncertainties_per_fold = []
+                num_folds = indiv_scores_test.shape[0]
+                
+                for fold_idx in range(num_folds):
+                    fold_scores_calib = indiv_scores_calib[fold_idx]
+                    fold_scores_test = indiv_scores_test[fold_idx]
+                    
+                    # Fit calibration on this fold's calibration set
+                    _, calibration_model = posthoc_calibration(
+                        fold_scores_calib, y_true_calib, method
+                    )
+                    
+                    # Apply calibration
+                    calibrated_scores = apply_calibration(
+                        fold_scores_test, calibration_model, method
+                    )
+                    
+                    # Compute uncertainty
+                    fold_uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
+                    uncertainties_per_fold.append(fold_uncertainties)
+                
+                uncertainties = np.array(uncertainties_per_fold)  # [num_folds, N]
+                
             else:
-                _, calibration_model = posthoc_calibration(y_scores_calib, y_true_calib, method)
-            
-            # Apply calibration to test set
-            if method == 'temperature':
-                calibrated_scores = apply_calibration(
-                    y_scores_test, calibration_model, method, logits=logits_test
-                )
-            else:
-                calibrated_scores = apply_calibration(
-                    y_scores_test, calibration_model, method
-                )
-            
-            # Compute uncertainty
-            uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
+                # Legacy: single calibration on ensemble
+                if method == 'temperature':
+                    if logits_calib is None:
+                        raise ValueError("Temperature scaling requires logits")
+                    _, calibration_model = posthoc_calibration(logits_calib, y_true_calib, method)
+                else:
+                    _, calibration_model = posthoc_calibration(y_scores_calib, y_true_calib, method)
+                
+                # Apply calibration to test set
+                if method == 'temperature':
+                    calibrated_scores = apply_calibration(
+                        y_scores_test, calibration_model, method, logits=logits_test
+                    )
+                else:
+                    calibrated_scores = apply_calibration(
+                        y_scores_test, calibration_model, method
+                    )
+                
+                # Compute uncertainty
+                uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
         
-        # Handle both 1D (binary) and 2D (multiclass) calibrated scores
-        if calibrated_scores.ndim == 1:
-            # Binary classification: calibrated_scores is [N] (prob of positive class)
-            y_pred_calibrated = (calibrated_scores > 0.5).astype(int)
+        # Handle both 1D (binary) and 2D (multiclass) calibrated scores for y_pred for y_pred
+        # Use ensemble predictions for computing correct/incorrect indices
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache['correct_idx']
+            incorrect_idx = self._test_predictions_cache['incorrect_idx']
+            y_pred_calibrated = self._test_predictions_cache['y_pred']
         else:
-            # Multiclass: calibrated_scores is [N, C]
-            y_pred_calibrated = np.argmax(calibrated_scores, axis=1)
-        
-        correct_idx = np.where(y_pred_calibrated == y_true_test)[0]
-        incorrect_idx = np.where(y_pred_calibrated != y_true_test)[0]
+            if y_scores_test.ndim == 1:
+                # Binary classification: y_scores_test is [N] (prob of positive class)
+                y_pred_calibrated = (y_scores_test > 0.5).astype(int)
+            else:
+                # Multiclass: y_scores_test is [N, C]
+                y_pred_calibrated = np.argmax(y_scores_test, axis=1)
+            
+            correct_idx = np.where(y_pred_calibrated == y_true_test)[0]
+            incorrect_idx = np.where(y_pred_calibrated != y_true_test)[0]
         
         metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
                                        y_pred_calibrated, y_true_test)
         metrics['time_seconds'] = timer.elapsed
         
         # Store results
-        self._uncertainties['MSR_calibrated'] = uncertainties
+        if uncertainties.ndim == 2:
+            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots), and ensemble (for reference)
+            self._uncertainties['MSR_calibrated'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['MSR_calibrated_per_fold'] = uncertainties  # [num_folds, N]
+            
+            # Compute ensemble calibration for reference
+            from .methods.distance import posthoc_calibration
+            from .core.utils import apply_calibration
+            
+            if method == 'temperature':
+                if logits_calib is None:
+                    raise ValueError("Temperature scaling requires ensemble logits")
+                _, calib_model = posthoc_calibration(logits_calib, y_true_calib, method)
+                calibrated_ensemble = apply_calibration(y_scores_test, calib_model, method, logits=logits_test)
+            else:
+                _, calib_model = posthoc_calibration(y_scores_calib, y_true_calib, method)
+                calibrated_ensemble = apply_calibration(y_scores_test, calib_model, method)
+            
+            self._uncertainties['MSR_calibrated_ensemble'] = uq.distance_to_hard_labels_computation(calibrated_ensemble)
+        else:
+            # Ensemble: store single uncertainty
+            self._uncertainties['MSR_calibrated'] = uncertainties
         self._results['MSR_calibrated'] = metrics
         
         return uncertainties, metrics
@@ -491,7 +613,8 @@ class FailureDetector:
         train_loaders: List[DataLoader],
         y_true: np.ndarray,
         layer_name: str = 'avgpool',
-        k: int = 5
+        k: int = 5,
+        per_fold_evaluation: bool = True
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run KNN in raw latent space.
@@ -503,16 +626,20 @@ class FailureDetector:
             y_true: True labels [N]
             layer_name: Layer name for feature extraction
             k: Number of nearest neighbors
+            per_fold_evaluation: If True, compute per-fold metrics. If False, average uncertainties
         
         Returns:
             tuple: (uncertainties, metrics_dict)
+                If per_fold_evaluation=True: uncertainties is [num_folds, N]
+                Otherwise: uncertainties is [N] (averaged)
         """
         timer = Timer("KNN-Raw computation")
         with timer:
-            # Fit and compute
+            # Fit and compute uncertainties
             knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=k)
             knn_method.fit(self.models, train_loaders, self.device)
-            uncertainties = knn_method.compute(self.models, test_loader, self.device)
+            uncertainties = knn_method.compute(self.models, test_loader, self.device, 
+                                              return_per_fold=per_fold_evaluation)
         
         # Use cached predictions if available, otherwise compute
         if self._test_predictions_cache is not None:
@@ -529,7 +656,14 @@ class FailureDetector:
         metrics['time_seconds'] = timer.elapsed
         
         # Store results
-        self._uncertainties['KNN_Raw'] = uncertainties
+        if uncertainties.ndim == 2:
+            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots), and ensemble averaged
+            self._uncertainties['KNN_Raw'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['KNN_Raw_per_fold'] = uncertainties  # [num_folds, N]
+            # Note: KNN_Raw doesn't compute ensemble separately, so no _ensemble key
+        else:
+            # Ensemble: store single uncertainty
+            self._uncertainties['KNN_Raw'] = uncertainties
         self._results['KNN_Raw'] = metrics
         
         return uncertainties, metrics
@@ -546,7 +680,8 @@ class FailureDetector:
         n_shap_features: int = 50,
         cache_dir: Optional[str] = None,
         parallel: bool = False,
-        n_jobs: int = 2
+        n_jobs: int = 2,
+        per_fold_evaluation: bool = True
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run KNN in SHAP-selected latent space.
@@ -564,9 +699,12 @@ class FailureDetector:
             cache_dir: Directory to cache SHAP values
             parallel: Enable parallel processing across folds
             n_jobs: Number of parallel workers
+            per_fold_evaluation: If True, compute per-fold metrics. If False, average uncertainties
         
         Returns:
             tuple: (uncertainties, metrics_dict)
+                If per_fold_evaluation=True: uncertainties is [num_folds, N]
+                Otherwise: uncertainties is [N] (averaged)
         """
         timer = Timer("KNN-SHAP computation")
         with timer:
@@ -580,9 +718,10 @@ class FailureDetector:
                 n_jobs=n_jobs
             )
             
-            # Fit and compute
+            # Fit and compute uncertainties
             knn_method.fit(self.models, train_loaders, calib_loader, self.device, flag=flag)
-            uncertainties = knn_method.compute(self.models, test_loader, self.device)
+            uncertainties = knn_method.compute(self.models, test_loader, self.device,
+                                              return_per_fold=per_fold_evaluation)
         
         # Use cached predictions if available, otherwise compute
         if self._test_predictions_cache is not None:
@@ -599,7 +738,14 @@ class FailureDetector:
         metrics['time_seconds'] = timer.elapsed
         
         # Store results
-        self._uncertainties['KNN_SHAP'] = uncertainties
+        if uncertainties.ndim == 2:
+            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots)
+            self._uncertainties['KNN_SHAP'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['KNN_SHAP_per_fold'] = uncertainties  # [num_folds, N]
+            # Note: KNN_SHAP doesn't compute ensemble separately, so no _ensemble key
+        else:
+            # Ensemble: store single uncertainty
+            self._uncertainties['KNN_SHAP'] = uncertainties
         self._results['KNN_SHAP'] = metrics
         
         return uncertainties, metrics
@@ -649,9 +795,17 @@ class FailureDetector:
         labels: np.ndarray
     ) -> Dict[str, Any]:
         """Compute all evaluation metrics."""
-        metrics = uq.compute_all_metrics(
-            uncertainties, predictions, labels, correct_idx, incorrect_idx
-        )
+        # Check if uncertainties are per-fold [num_folds, N] or averaged [N]
+        if uncertainties.ndim == 2:
+            # Per-fold uncertainties: compute metrics per fold, then aggregate
+            metrics = uq.compute_all_metrics_per_fold(
+                uncertainties, predictions, labels
+            )
+        else:
+            # Single uncertainty array: compute standard metrics
+            metrics = uq.compute_all_metrics(
+                uncertainties, predictions, labels, correct_idx, incorrect_idx
+            )
         return metrics
     
     def save_results(
@@ -703,13 +857,32 @@ class FailureDetector:
             
             print(f"\n📊 Generating evaluation plots...")
             for method_name, metric_values in self._uncertainties.items():
+                # Skip per-fold entries (they're paired with main entries)
+                if method_name.endswith('_per_fold') or method_name.endswith('_ensemble'):
+                    continue
+                
                 try:
+                    # Check if per-fold data exists
+                    per_fold_key = f'{method_name}_per_fold'
+                    ensemble_key = f'{method_name}_ensemble'
+                    
+                    uncertainties_per_fold = None
+                    ensemble_uncertainties = None
+                    
+                    if per_fold_key in self._uncertainties:
+                        uncertainties_per_fold = self._uncertainties[per_fold_key]
+                    
+                    if ensemble_key in self._uncertainties:
+                        ensemble_uncertainties = self._uncertainties[ensemble_key]
+                    
                     fig_paths = uq.save_all_evaluation_plots(
                         uncertainties=metric_values,
                         predictions=y_pred,
                         labels=y_true,
                         method_name=method_name,
-                        output_dir=figures_dir
+                        output_dir=figures_dir,
+                        uncertainties_per_fold=uncertainties_per_fold,
+                        ensemble_uncertainties=ensemble_uncertainties
                     )
                     print(f"  ✓ {method_name}: {len(fig_paths)} plots saved")
                 except Exception as e:
