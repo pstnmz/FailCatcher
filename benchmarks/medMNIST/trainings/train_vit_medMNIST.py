@@ -149,6 +149,7 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
     device = torch.device(cuda if torch.cuda.is_available() else 'cpu')
     size = 224  # Image size for ViT (required: 224x224)
 
+
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     dropout_suffix = f"_dropout{dropout_rate_arg}" if use_dropout_arg else ""
     # Get the absolute path to benchmarks/medMNIST/runs

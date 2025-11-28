@@ -11,7 +11,8 @@
     "interpolation": "bilinear",
     "slice_selection": "best_axial_slice_with_maximum_organ_area",
     "bounding_box": "square_2D_bbox_after_slice_selection",
-    "note": "Process: 1) Find slice with max organ area, 2) Create square bbox in 2D, 3) Resize to 224x224"
+    "note": "Process: 0) HU\u2192grayscale on ENTIRE volume, 1) Find slice with max organ area, 2) Crop square bbox in 2D, 3) Resize to 224x224",
+    "important": "HU windowing applied to entire image BEFORE cropping for consistent intensity across all organs"
   },
   "modality": "CT",
   "id_filter": "ID < 500 (CT scans only, MRI excluded)",
