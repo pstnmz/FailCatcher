@@ -15,6 +15,7 @@ from torchvision.transforms.functional import to_pil_image
 from PIL import Image
 from torchvision import transforms as T
 from torchvision.models import ResNet18_Weights
+from torchvision.transforms import autoaugment
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, roc_auc_score, accuracy_score
 from sklearn.metrics import confusion_matrix
@@ -28,6 +29,26 @@ from monai.data import CacheDataset as MONAI_CacheDataset
 MONAI_AVAILABLE = True
 
 torch.backends.cudnn.benchmark=True
+
+# Custom RandAugment without flip operations for anatomical consistency
+class RandAugmentNoFlip(T.RandAugment):
+    """
+    RandAugment without horizontal/vertical flip operations.
+    Use this for datasets where left/right orientation matters (e.g., OrganaMNIST).
+    
+    Note: Standard torchvision RandAugment doesn't include flips by default,
+    but this class explicitly ensures no flip operations are ever added.
+    """
+    def __init__(self, num_ops=2, magnitude=9, num_magnitude_bins=31, interpolation=T.InterpolationMode.BILINEAR, fill=None):
+        super().__init__(num_ops=num_ops, magnitude=magnitude, num_magnitude_bins=num_magnitude_bins, 
+                         interpolation=interpolation, fill=fill)
+        
+        # Standard RandAugment operations (no flips by design):
+        # Identity, ShearX, ShearY, TranslateX, TranslateY, Rotate, 
+        # Brightness, Color, Contrast, Sharpness, Posterize, Solarize, 
+        # AutoContrast, Equalize
+        # 
+        # This class exists to be explicit about no flips and allow future customization
 
 def _clear_cache_dataset(ds):
     if ds is None:
@@ -902,11 +923,46 @@ def train_vit(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
         model.load_state_dict(best_state)
         print(f"Restored best model from epoch {best_epoch+1}")
 
-    # Final test evaluation
-    test_results = evaluate_model(model, test_loader, data_flag, device, output_dir, prefix=run_name, display_cm=False)
+    # Save loss curves and training history
+    if output_dir:
+        # Loss curve
+        plt.figure(figsize=(8, 5))
+        plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
+        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Val Loss')
+        plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title(f'Losses - {run_name}')
+        plt.legend(); plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "figs", f"loss_curve_{run_name}.png"), dpi=200)
+        plt.close()
+
+        # Val accuracy curve
+        plt.figure(figsize=(8, 5))
+        plt.plot(range(1, len(val_accs) + 1), val_accs, label='Val Acc')
+        plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title(f'Val Acc - {run_name}')
+        plt.legend(); plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "figs", f"val_acc_{run_name}.png"), dpi=200)
+        plt.close()
+
+        # Save training history
+        history = {
+            "run_name": run_name,
+            "train_losses": [float(x) for x in train_losses],
+            "val_losses": [float(x) for x in val_losses],
+            "val_accs": [float(x) for x in val_accs],
+            "epoch_times_sec": [float(x) for x in epoch_times],
+            "early_stop": {
+                "enabled": bool(early_stop),
+                "monitor": monitor,
+                "best_epoch": int(best_epoch),
+                "best_value": float(best_metric_val) if best_metric_val is not None else None
+            }
+        }
+        _save_json(history, os.path.join(output_dir, f"history_{run_name}.json"))
+
+    # Final test evaluation with confusion matrix
+    test_results = evaluate_model(model, test_loader, data_flag, device, output_dir, prefix=run_name, display_cm=True)
     
     if output_dir:
-        _append_log(log_path, f"=== {run_name} end: test_acc={test_results['accuracy']:.4f} ===")
+        _append_log(log_path, f"=== {run_name} end: test_acc={test_results['metrics']['accuracy']:.4f} ===")
 
     return model, {
         "train_losses": [float(x) for x in train_losses],
