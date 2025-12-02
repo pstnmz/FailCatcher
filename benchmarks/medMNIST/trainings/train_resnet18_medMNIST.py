@@ -246,6 +246,11 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
         )
         models.append(model)
         results.append(res)
+        
+        # Save model immediately after training this fold
+        model_path = os.path.join(exp_dir, f'resnet18_{flag}_224_{fold_idx}.pt')
+        tr.save_model(model, path=model_path)
+        print(f"Saved fold {fold_idx}: {model_path}")
 
         # Shutdown dataloader workers and clear MONAI cache to free memory
         shutdown_dataloader_workers_and_clear_MONAI_cache(train_loader)
@@ -261,8 +266,4 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
     with open(os.path.join(exp_dir, "results_ensemble.json"), "w") as f:
         json.dump(ensemble_res, f, indent=2)
 
-    # Save models
-    for i, model in enumerate(models):
-        path = os.path.join(exp_dir, f'resnet18_{flag}_224_{i}.pt')
-        tr.save_model(model, path=path)
-        print(f"Saved: {path}")
+    print(f"All models saved in: {exp_dir}")
