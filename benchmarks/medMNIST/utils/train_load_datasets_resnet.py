@@ -920,8 +920,10 @@ def train_vit(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
 
     # Restore best model if requested
     if restore_best and best_state is not None:
-        model.load_state_dict(best_state)
-        print(f"Restored best model from epoch {best_epoch+1}")
+        # Move state dict back to model's device before loading
+        best_state_device = {k: v.to(device) for k, v in best_state.items()}
+        model.load_state_dict(best_state_device)
+        print(f"Restored best model from epoch {best_epoch+1} (metric={best_metric_val:.4f})")
 
     # Save loss curves and training history
     if output_dir:
