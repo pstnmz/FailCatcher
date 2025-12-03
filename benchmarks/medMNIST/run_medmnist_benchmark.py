@@ -29,7 +29,7 @@ from FailCatcher import failure_detection
 from FailCatcher import UQ_toolbox as uq
 
 # Import medMNIST-specific utilities
-from utils import train_load_datasets_resnet as tr
+from benchmarks.medMNIST.utils import train_models_load_datasets as tr
 
 
 class RepeatGrayToRGB:

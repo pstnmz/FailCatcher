@@ -14,8 +14,6 @@ import torch.optim as optim
 from torchvision.transforms.functional import to_pil_image
 from PIL import Image
 from torchvision import transforms as T
-from torchvision.models import ResNet18_Weights
-from torchvision.transforms import autoaugment
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, roc_auc_score, accuracy_score
 from sklearn.metrics import confusion_matrix
@@ -813,6 +811,8 @@ def train_vit(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
     best_metric_val = None
     metric_mode = 'min' if monitor == 'val_loss' else 'max'
     if early_stop:
+        if data_flag == 'tissuemnist':
+            patience = 5
         stopper = EarlyStopper(mode=metric_mode, patience=patience, min_delta=min_delta)
     best_ckpt_path = os.path.join(output_dir, f"best_{run_name}.pt") if (output_dir and checkpoint_best) else None
 
@@ -1390,6 +1390,209 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
     loader_type = "DataLoader w persistent workers + MONAI CacheDataset" if use_monai_local else "torch DataLoader"
     print(f"CV loaders created: {n_splits} folds using {loader_type} (num_workers={num_workers}, cache_rate={cache_rate})")
     return train_loaders, val_loaders
+
+def get_single_CV_fold(study_dataset_aug, study_dataset_plain, batch_size, fold_index,
+                       n_splits=5, seed=42, use_monai=False, cache_rate=1.0,
+                       train_augment_transform=None, num_workers=None, pin_memory=True, prewarm_cache=False):
+    """
+    Get loaders for a single CV fold without iterating through all folds.
+    This avoids caching all folds when you only need one.
+    
+    Returns: (train_loader, val_loader) for the specified fold_index
+    """
+    if fold_index < 0 or fold_index >= n_splits:
+        raise ValueError(f"fold_index must be in [0, {n_splits-1}], got {fold_index}")
+    
+    if num_workers is None:
+        try:
+            env_n = os.environ.get("NUM_WORKERS")
+            if env_n is not None:
+                num_workers = int(env_n)
+            else:
+                n_cpu = os.cpu_count() or 1
+                n_users = int(os.environ.get("SHARED_USERS", "4"))
+                per_user = max(2, n_cpu // (n_users * 8))
+                num_workers = int(min(max(per_user, 2), 16))
+        except Exception:
+            num_workers = 4
+
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    labels = [label for _, label in study_dataset_plain]
+    use_monai_local = bool(use_monai) and MONAI_AVAILABLE
+    normalize = transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
+
+    def _build_data_list_from_subset(ds):
+        data_list = []
+        if isinstance(ds, torch.utils.data.Subset):
+            base = ds.dataset
+            indices = ds.indices
+        else:
+            base = ds
+            indices = range(len(ds))
+        for i in indices:
+            item = base[i]
+            if isinstance(item, dict) and 'image' in item and 'label' in item:
+                img, lbl = item['image'], item['label']
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                img, lbl = item[0], item[1]
+            else:
+                raise RuntimeError("Unsupported dataset item format for caching.")
+            if torch.is_tensor(img):
+                data_list.append({'image_tensor': img.detach().cpu(), 'label': int(lbl)})
+            else:
+                data_list.append({'image_numpy': np.asarray(img), 'label': int(lbl)})
+        return data_list
+
+    # Find the target fold's indices
+    for current_fold_idx, (train_index, val_index) in enumerate(skf.split(np.zeros(len(labels)), labels)):
+        if current_fold_idx != fold_index:
+            continue
+        
+        # Build subsets for this fold only
+        if study_dataset_aug is not None:
+            train_subset = torch.utils.data.Subset(study_dataset_aug, train_index)
+        else:
+            train_subset = torch.utils.data.Subset(study_dataset_plain, train_index)
+        val_subset = torch.utils.data.Subset(study_dataset_plain, val_index)
+
+        # Build loaders (same logic as CV_fold_generator)
+        if use_monai_local:
+            try:
+                train_list = _build_data_list_from_subset(train_subset)
+                val_list = _build_data_list_from_subset(val_subset)
+
+                def _to_tensor_tuple(d):
+                    if 'image_tensor' in d:
+                        img = d['image_tensor']
+                        if not isinstance(img, torch.Tensor):
+                            img = torch.as_tensor(img)
+                        img = img.float()
+                    else:
+                        img = torch.from_numpy(d['image_numpy']).float()
+                    if train_augment_transform is not None:
+                        img = normalize(img)
+                    lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                    return img, lbl
+
+                def _to_train_cached(d):
+                    if 'image_tensor' in d:
+                        img = d['image_tensor']
+                        if not isinstance(img, torch.Tensor):
+                            img = torch.as_tensor(img)
+                        img = img.float()
+                    else:
+                        img = torch.from_numpy(d['image_numpy']).float()
+
+                    if train_augment_transform is not None:
+                        img_pil = to_pil_image(torch.clamp(img, 0., 1.))
+                        lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                        return img_pil, lbl
+                    else:
+                        lbl = torch.tensor(int(d['label']), dtype=torch.long)
+                        return img, lbl
+
+                train_cache_ds = MONAI_CacheDataset(data=train_list, transform=_to_train_cached, cache_rate=float(cache_rate))
+                val_cache_ds = MONAI_CacheDataset(data=val_list, transform=_to_tensor_tuple, cache_rate=float(cache_rate))
+
+                # runtime augment wrapper if requested
+                if train_augment_transform is not None:
+                    class AugmentCachedDataset(torch.utils.data.Dataset):
+                        def __init__(self, cache_ds, augment):
+                            self.cache_ds = cache_ds
+                            self.augment = augment
+
+                        def __len__(self):
+                            return len(self.cache_ds)
+
+                        def __getitem__(self, idx):
+                            x, y = self.cache_ds[idx]
+                            if train_augment_transform is not None and isinstance(x, Image.Image):
+                                aug = self.augment(x)
+                                x_aug = aug if torch.is_tensor(aug) else T.ToTensor()(aug)
+                            else:
+                                x = x.detach().cpu().float()
+                                try:
+                                    x_aug = self.augment(x)
+                                    if not torch.is_tensor(x_aug):
+                                        x_aug = T.ToTensor()(x_aug)
+                                except Exception:
+                                    x_aug = self.augment(to_pil_image(torch.clamp(x, 0., 1.)))
+                                    if not torch.is_tensor(x_aug):
+                                        x_aug = T.ToTensor()(x_aug)
+                            if train_augment_transform is not None:
+                                x_aug = x_aug.float()
+                            return x_aug, y
+                    train_ds_wrapped = AugmentCachedDataset(train_cache_ds, train_augment_transform)
+                else:
+                    train_ds_wrapped = train_cache_ds
+
+                val_ds_wrapped = val_cache_ds
+                persistent = True if (num_workers and num_workers > 0) else False
+                train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
+                                          num_workers=num_workers, pin_memory=pin_memory,
+                                          persistent_workers=persistent, prefetch_factor=2, drop_last=True)
+                val_loader = DataLoader(dataset=val_ds_wrapped, batch_size=batch_size, shuffle=False,
+                                        num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent, prefetch_factor=3)
+
+                if prewarm_cache:
+                    print(f"Prewarming cache for fold {fold_index}...")
+                    try:
+                        for _ in train_loader:
+                            pass
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                print(f"Warning: MONAI caching failed for fold {fold_index}, falling back to plain DataLoader: {e}")
+                # fallback to plain DataLoader
+                persistent = True if (num_workers and num_workers > 0) else False
+                train_loader = DataLoader(dataset=train_subset, batch_size=batch_size, shuffle=True,
+                                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
+                val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
+                                        num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
+        else:
+            if train_augment_transform is not None:
+                class AugmentDataset(torch.utils.data.Dataset):
+                    def __init__(self, ds, augment):
+                        self.ds = ds
+                        self.augment = augment
+                    def __len__(self):
+                        return len(self.ds)
+                    def __getitem__(self, idx):
+                        item = self.ds[idx]
+                        if isinstance(item, dict) and 'image' in item and 'label' in item:
+                            x, y = item['image'], item['label']
+                        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                            x, y = item[0], item[1]
+                        else:
+                            raise RuntimeError("Unsupported dataset item format in AugmentDataset.")
+                        try:
+                            x_aug = self.augment(x)
+                        except Exception:
+                            from torchvision.transforms.functional import to_pil_image, to_tensor
+                            if torch.is_tensor(x):
+                                x_pil = to_pil_image(x)
+                            else:
+                                x_pil = x
+                            x_aug = self.augment(x_pil)
+                            if not torch.is_tensor(x_aug):
+                                x_aug = to_tensor(x_aug)
+                        return x_aug, y
+                train_ds_wrapped = AugmentDataset(train_subset, train_augment_transform)
+            else:
+                train_ds_wrapped = train_subset
+
+            persistent = True if (num_workers and num_workers > 0) else False
+            train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
+                                      num_workers=num_workers, pin_memory=pin_memory, drop_last=True, persistent_workers=persistent)
+            val_loader = DataLoader(dataset=val_subset, batch_size=batch_size, shuffle=False,
+                                    num_workers=max(0, num_workers), pin_memory=pin_memory, persistent_workers=persistent)
+
+        loader_type = "MONAI CacheDataset" if use_monai_local else "torch DataLoader"
+        print(f"Created fold {fold_index}/{n_splits-1} loaders: {loader_type} (num_workers={num_workers}, cache_rate={cache_rate})")
+        return train_loader, val_loader
+
+    raise RuntimeError(f"Fold {fold_index} not found (should not happen)")
 
 def CV_fold_generator(study_dataset_aug, study_dataset_plain, batch_size,
                       n_splits=5, seed=42, use_monai=False, cache_rate=1.0,
