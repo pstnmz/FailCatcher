@@ -2,7 +2,7 @@ import sys
 import os
 # Add parent directory to path to import utils
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from utils import train_load_datasets_resnet as tr
+from utils import train_models_load_datasets as tr
 from torchvision import transforms
 import torch
 import json, time
@@ -224,7 +224,6 @@ for flag, color, batch_size, use_randaugment in zip(flags, colors, batch_sizes, 
         pin_memory=True,
         prewarm_cache=True
     )
-
 
     for fold_idx, train_loader, val_loader in fold_gen:
         print('MODEL ' + str(fold_idx))

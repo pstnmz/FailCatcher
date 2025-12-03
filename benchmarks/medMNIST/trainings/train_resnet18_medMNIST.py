@@ -2,7 +2,7 @@ import sys
 import os
 # Add parent directory to path to import utils
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from utils import train_load_datasets_resnet as tr
+from benchmarks.medMNIST.utils import train_models_load_datasets as tr
 from torchvision import transforms
 import torch
 import json, time
@@ -84,7 +84,7 @@ def shutdown_dataloader_workers_and_clear_MONAI_cache(dl):
         # best-effort clear MONAI caches
         _clear_monai_cache(dl)
     except Exception:
-        print("Warning: failed to clear MONAI cache for fold", i)
+        print("Warning: failed to clear MONAI cache for dataloader")
         pass
 
     # try to shutdown data loader workers so they don't keep references
@@ -123,7 +123,7 @@ def shutdown_dataloader_workers_and_clear_MONAI_cache(dl):
     try:
         torch.cuda.empty_cache()
     except Exception:
-        print("Warning: failed to empty CUDA cache for fold", i)
+        print("Warning: failed to empty CUDA cache for dataloader")
         pass
 
 
