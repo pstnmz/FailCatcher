@@ -109,6 +109,13 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print(f"Using FailCatcher v{FailCatcher.__version__}")
     print(f"{'='*80}\n")
     
+    # Get absolute path to workspace root (UQ_Toolbox/)
+    workspace_root = Path(__file__).parent.parent.parent.absolute()
+    
+    # Make output_dir absolute if it's relative
+    if not Path(output_dir).is_absolute():
+        output_dir = str(workspace_root / output_dir)
+    
     # Setup
     device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
     color = flag in ['dermamnist', 'dermamnist-e', 'pathmnist', 'bloodmnist']
@@ -443,7 +450,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     if 'TTA_calib' in methods:
         print("\n🔍 Running TTA Calibration Caching (BetterRandAugment)...")
-        aug_folder = f'./uq_benchmark_results/gps_augment_cache/{flag}_{model_backbone}_{setup}_calibration_set'
+        setup_name = setup if setup else 'standard'
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set')
         
         # Determine normalization parameters based on color
         # Note: nb_channels should always be 3 because models expect 3-channel input
@@ -451,6 +459,10 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         nb_channels = 3
         mean = [.5, .5, .5] if color else [.5]
         std = [.5, .5, .5] if color else [.5]
+        
+        # Use smaller batch size for augmentation caching to avoid OOM
+        # Each batch gets multiplied by num_policies, so memory usage is much higher
+        aug_batch_size = min(batch_size, 128)  # Cap at 128 for safety
         
         # Cache augmentation predictions on calibration dataset
         aug_folder = detector.run_augmentation_calibration_caching(
@@ -460,7 +472,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             M=45,                     # Magnitude parameter
             num_policies=500,         # Number of random policies to generate
             image_size=image_size,
-            batch_size=batch_size,
+            batch_size=aug_batch_size,
             nb_channels=nb_channels,
             image_normalization=True,
             mean=mean,
@@ -478,7 +490,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
 
     if 'GPS' in methods:
         print("\n🔍 Running GPS...")
-        aug_folder = f'./uq_benchmark_results/gps_augment_cache/{flag}_{model_backbone}_{setup}_calibration_set'
+        setup_name = setup if setup else 'standard'
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set')
         uncertainties, metrics = detector.run_gps(
             test_dataset_tta, y_true,
             aug_folder=aug_folder,

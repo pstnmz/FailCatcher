@@ -115,8 +115,8 @@ def main():
     )
     
     parser.add_argument(
-        '--batch-size', type=int, default=400,
-        help='Batch size for inference (default: 4000)'
+        '--batch-size', type=int, default=128,
+        help='Batch size for augmentation inference (default: 128, capped internally for memory safety)'
     )
     
     parser.add_argument(
