@@ -508,7 +508,7 @@ def apply_randaugment_and_store_results(
     # Streaming mode with cached dataset (memory-efficient)
     if cached_dataset is not None:
         print(f"Streaming {num_policies} policies in chunks to avoid RAM overload")
-        policy_chunk_size = min(25, num_policies)
+        policy_chunk_size = min(10, num_policies)  # Reduced from 25 to 10 for memory safety
         num_samples = len(cached_dataset)
 
         def build_augmentations_chunk(k_chunk):
