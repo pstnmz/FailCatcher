@@ -1116,29 +1116,90 @@ def save_model(model, path):
     print(f"Model saved to {path}")
 
 
-def load_models(flag, device, waugmentation=False, size=224):
-
-    # Load organAMNIST dataset
+def load_models(flag, device, waugmentation=False, size=224, model_backbone='resnet18', setup=''):
+    """
+    Load trained models for a dataset.
+    
+    Args:
+        flag: Dataset name (e.g., 'breastmnist')
+        device: Device to load models on
+        waugmentation: Legacy parameter (use setup='DA' instead)
+        size: Image size (default: 224)
+        model_backbone: 'resnet18' or 'vit_b_16'
+        setup: Training setup - '' (standard), 'DA' (data augmentation), 'DO' (dropout), 'DADO' (both)
+    
+    Returns:
+        List of 5 trained models (one per CV fold)
+    """
+    # Load dataset info
     data_flag = flag
     info = INFO[data_flag]
     num_classes = len(info['label'])
+    
+    # Determine filename pattern based on setup
+    # Pattern: {flag}_{backbone}_224_randaug{0|1}_dropout{rate}_fold_{i}.pt
+    if waugmentation and not setup:  # Legacy support
+        setup = 'DA'
+    
+    if setup == 'DA':
+        randaug = 1
+        dropout_suffix = ''
+    elif setup == 'DO':
+        randaug = 0
+        dropout_suffix = '_dropout03' if model_backbone == 'resnet18' else '_dropout01'
+    elif setup == 'DADO':
+        randaug = 1
+        dropout_suffix = '_dropout03' if model_backbone == 'resnet18' else '_dropout01'
+    else:  # Standard training
+        randaug = 0
+        dropout_suffix = ''
+    
     # Load saved models
     models = []
     for i in range(5):
-        # Initialize the model
-        model = resnet18(weights=ResNet18_Weights.DEFAULT)
-        if num_classes == 2:
-            model.fc = nn.Linear(model.fc.in_features, 1)  # Output 1 value for binary classification
+        # Initialize the model architecture
+        if model_backbone == 'resnet18':
+            if setup in ['DO', 'DADO']:
+                # ResNet with dropout
+                dropout_rate = 0.3
+                model = ResNet18WithDropout(num_classes=num_classes, dropout_rate=dropout_rate, pretrained=True)
+            else:
+                # Standard ResNet
+                model = resnet18(weights=ResNet18_Weights.DEFAULT)
+                if num_classes == 2:
+                    model.fc = nn.Linear(model.fc.in_features, 1)
+                else:
+                    model.fc = nn.Linear(model.fc.in_features, num_classes)
+        
+        elif model_backbone == 'vit_b_16':
+            if setup in ['DO', 'DADO']:
+                # ViT with dropout
+                dropout_rate = 0.1
+                model = ViTWithDropout(num_classes=num_classes, dropout_rate=dropout_rate, pretrained=True)
+            else:
+                # Standard ViT
+                model = vit_b_16(weights=ViT_B_16_Weights.DEFAULT)
+                hidden_dim = model.hidden_dim
+                if num_classes == 2:
+                    model.heads = nn.Linear(hidden_dim, 1)
+                else:
+                    model.heads = nn.Linear(hidden_dim, num_classes)
         else:
-            model.fc = nn.Linear(model.fc.in_features, num_classes)  # Output logits for each class
+            raise ValueError(f"Unknown model_backbone: {model_backbone}")
+        
+        # Construct filename
+        model_filename = f"{flag}_{model_backbone}_{size}_randaug{randaug}{dropout_suffix}_fold_{i}.pt"
+        model_path = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/models/{size}*{size}/{model_filename}'
         
         # Load the state dictionary
-        if waugmentation:
-            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}_augmented.pt')
-        else:
-            # Load the state dictionary
-            state_dict = torch.load(f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/models/{size}*{size}/resnet18_{flag}_{size}_{i}.pt')
-            
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}\n"
+                f"Expected pattern: {flag}_{model_backbone}_{size}_randaug{randaug}{dropout_suffix}_fold_{{0-4}}.pt"
+            )
+        
+        state_dict = torch.load(model_path, map_location=device)
+        
         # Remove the 'model.' prefix from the state_dict keys if necessary
         state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}
 
@@ -1147,6 +1208,8 @@ def load_models(flag, device, waugmentation=False, size=224):
         model = model.to(device)
         model.eval()
         models.append(model)
+    
+    print(f"Loaded {len(models)} models: {model_backbone} with setup '{setup or 'standard'}' from {model_filename.rsplit('_', 1)[0]}_*")
     return models
 
 def load_datasets(dataflag, color, im_size, transform, batch_size, cache_test=False, transform_test=None):    
