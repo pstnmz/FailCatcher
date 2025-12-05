@@ -21,6 +21,18 @@ Example:
     >>> # Run ensemble
     >>> results = detector.run_ensemble(indiv_scores_test)
     >>> 
+    >>> # Cache augmentations for GPS
+    >>> aug_folder = detector.run_augmentation_calibration_caching(
+    ...     aug_folder='gps_augment/dataset_calib',
+    ...     N=2, M=45, num_policies=500
+    ... )
+    >>> 
+    >>> # Run GPS with cached augmentations
+    >>> results = detector.run_gps(
+    ...     test_dataset, y_true, aug_folder, 
+    ...     correct_idx_calib, incorrect_idx_calib
+    ... )
+    >>> 
     >>> # Run KNN-SHAP
     >>> results = detector.run_knn_shap(
     ...     calib_loader=calib_loader,
@@ -478,6 +490,105 @@ class FailureDetector:
         
         return uncertainties, metrics
     
+    def run_augmentation_calibration_caching(
+        self,
+        dataset: torch.utils.data.Dataset,
+        aug_folder: str,
+        N: int = 2,
+        M: int = 45,
+        num_policies: int = 500,
+        image_size: int = 224,
+        batch_size: int = 128,
+        nb_channels: int = 3,
+        image_normalization: bool = True,
+        mean: float = 0.5,
+        std: float = 0.5,
+        use_monai_cache: bool = True,
+        cache_rate: float = 1.0,
+        cache_num_workers: int = 8,
+        dataloader_workers: int = 8,
+        dataloader_prefetch: int = 8
+    ) -> str:
+        """
+        Run BetterRandAugment on calibration dataset and cache results for GPS.
+        
+        This function applies random augmentation policies to the calibration dataset,
+        computes model predictions for each augmented version, and saves them to disk
+        as .npz files. These cached predictions are then used by GPS for greedy policy search.
+        
+        Args:
+            dataset: Calibration dataset (should use transform WITHOUT normalization, e.g., calib_dataset_tta)
+            aug_folder: Output directory for cached augmentation predictions
+            N: Number of augmentation operations per policy (BetterRandAugment)
+            M: Magnitude parameter for augmentations (0-100 typical)
+            num_policies: Number of random augmentation policies to generate
+            image_size: Input image size
+            batch_size: Batch size for inference
+            nb_channels: Number of image channels (1 for grayscale, 3 for RGB)
+            image_normalization: Whether to apply normalization
+            mean: Normalization mean (single value or per-channel)
+            std: Normalization std (single value or per-channel)
+            use_monai_cache: Whether to use MONAI CacheDataset for faster loading
+            cache_rate: Fraction of dataset to cache in memory (0-1)
+            cache_num_workers: Number of workers for cache building
+            dataloader_workers: Number of workers for DataLoader
+            dataloader_prefetch: Prefetch factor for DataLoader
+        
+        Returns:
+            str: Path to the output folder containing cached predictions
+        
+        Example:
+            >>> detector = FailureDetector(models, train_data, calib_data, test_data, device)
+            >>> aug_folder = detector.run_augmentation_calibration_caching(
+            ...     dataset=calib_dataset_tta,  # Use unnormalized dataset!
+            ...     aug_folder='gps_augment/breastmnist_calib',
+            ...     N=2, M=45, num_policies=500,
+            ...     use_monai_cache=True, batch_size=128
+            ... )
+            >>> # Later use for GPS:
+            >>> uncertainties, metrics = detector.run_gps(
+            ...     test_dataset, y_true, aug_folder, correct_idx, incorrect_idx
+            ... )
+        """
+        print(f"\n🔄 Caching augmentation predictions for GPS...")
+        print(f"  Output folder: {aug_folder}")
+        print(f"  Calibration set size: {len(dataset)}")
+        print(f"  Policies: {num_policies}, N={N}, M={M}")
+        print(f"  MONAI cache: {use_monai_cache}, Cache rate: {cache_rate}")
+        
+        timer = Timer("Augmentation caching")
+        with timer:
+            uq.apply_randaugment_and_store_results(
+                dataset=dataset,
+                models=self.models,
+                N=N,
+                M=M,
+                num_policies=num_policies,
+                device=self.device,
+                folder_name=aug_folder,
+                image_normalization=image_normalization,
+                mean=mean,
+                std=std,
+                nb_channels=nb_channels,
+                image_size=image_size,
+                batch_size=batch_size,
+                use_monai_cache=use_monai_cache,
+                cache_rate=cache_rate,
+                cache_num_workers=cache_num_workers,
+                dataloader_workers=dataloader_workers,
+                dataloader_prefetch=dataloader_prefetch
+            )
+        
+        # Verify files were created
+        import glob
+        npz_files = glob.glob(os.path.join(aug_folder, f"N{N}_M{M}_*.npz"))
+        print(f"✓ Cached {len(npz_files)} augmentation prediction files")
+        
+        if len(npz_files) == 0:
+            raise RuntimeError(f"No .npz files created in {aug_folder}")
+        
+        return aug_folder
+    
     def run_gps(
         self,
         test_dataset: torch.utils.data.Dataset,
@@ -812,7 +923,9 @@ class FailureDetector:
         self, 
         output_dir: str,
         flag: str = None,
-        timestamp: str = None
+        timestamp: str = None,
+        model_backbone: str = None,
+        setup: str = None
     ) -> Dict[str, str]:
         """
         Save all computed uncertainties, evaluation plots, and results summary.
@@ -821,6 +934,8 @@ class FailureDetector:
             output_dir: Base directory for saving results
             flag: Dataset/experiment identifier (optional, for filenames)
             timestamp: Timestamp string (optional, will generate if not provided)
+            model_backbone: Model architecture identifier (e.g., 'resnet18', 'vit_b_16')
+            setup: Training setup identifier (e.g., '', 'DA', 'DO', 'DADO')
             
         Returns:
             Dictionary with paths to saved files:
@@ -837,12 +952,19 @@ class FailureDetector:
         if flag is None:
             flag = 'results'
         
+        # Build filename suffix with model configuration
+        config_suffix = ''
+        if model_backbone:
+            config_suffix += f'_{model_backbone}'
+        if setup:
+            config_suffix += f'_{setup}'
+        
         os.makedirs(output_dir, exist_ok=True)
         saved_paths = {}
         
         # Save all metric values (uncertainties) to .npz
         if self._uncertainties:
-            metrics_file = os.path.join(output_dir, f'all_metrics_{flag}_{timestamp}.npz')
+            metrics_file = os.path.join(output_dir, f'all_metrics_{flag}{config_suffix}_{timestamp}.npz')
             np.savez_compressed(metrics_file, **self._uncertainties)
             saved_paths['metrics_file'] = metrics_file
             print(f"\n💾 All metric values saved to: {metrics_file}")
@@ -898,6 +1020,8 @@ class FailureDetector:
             
             summary = {
                 'flag': flag,
+                'model_backbone': model_backbone,
+                'setup': setup,
                 'timestamp': timestamp,
                 'test_accuracy': float(len(correct_idx) / len(y_true)),
                 'test_size': len(y_true),
@@ -906,7 +1030,7 @@ class FailureDetector:
                 'figures_dir': saved_paths.get('figures_dir')
             }
             
-            summary_file = os.path.join(output_dir, f'uq_benchmark_{flag}_{timestamp}.json')
+            summary_file = os.path.join(output_dir, f'uq_benchmark_{flag}{config_suffix}_{timestamp}.json')
             with open(summary_file, 'w') as f:
                 json.dump(summary, f, indent=2)
             

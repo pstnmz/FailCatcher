@@ -88,7 +88,8 @@ def create_cv_generator(n_splits=5, seed=42, batch_size=5000, num_workers=0):
 
 
 def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
-                           batch_size=4000, image_size=224, per_fold_eval=True):
+                           batch_size=4000, image_size=224, gpu_id=0, per_fold_eval=True,
+                           model_backbone='resnet18', setup=''):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -98,7 +99,10 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         output_dir: Output directory for results
         batch_size: Batch size for inference
         image_size: Image size
+        gpu_id: GPU device ID to use
         per_fold_eval: If True, compute per-fold metrics (mean±std). If False, use ensemble-based evaluation
+        model_backbone: Model architecture ('resnet18' or 'vit_b_16')
+        setup: Training setup - '' (standard), 'DA', 'DO', or 'DADO'
     """
     print(f"\n{'='*80}")
     print(f"MedMNIST Benchmark: {flag}")
@@ -106,7 +110,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print(f"{'='*80}\n")
     
     # Setup
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
     color = flag in ['dermamnist', 'dermamnist-e', 'pathmnist', 'bloodmnist']
     calib_method = 'platt' if flag in ['breastmnist', 'pneumoniamnist'] else 'temperature'
     
@@ -137,17 +141,19 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     if flag != 'amos2022':
         # Load datasets and models
-        models = tr.load_models(flag, device=device)
+        models = tr.load_models(flag, device=device, size=image_size, 
+                               model_backbone=model_backbone, setup=setup)
         [study_dataset, calib_dataset, test_dataset], \
         [_, calib_loader, test_loader], info = \
             tr.load_datasets(flag, color, image_size, transform, batch_size)
         
-        [_, _, test_dataset_tta], \
+        [_, calib_dataset_tta, test_dataset_tta], \
         [_, _, _], _ = \
             tr.load_datasets(flag, color, image_size, transform_tta, batch_size)
     else:
         # Load datasets and models of organamnist and amos2022 as test set
-        models = tr.load_models('organamnist', device=device)
+        models = tr.load_models('organamnist', device=device, size=image_size,
+                               model_backbone=model_backbone, setup=setup)
         [study_dataset, calib_dataset, _], \
         [_, calib_loader, _], info = \
             tr.load_datasets('organamnist', color, image_size, transform, batch_size)
@@ -225,11 +231,12 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     # EVALUATE MODELS (or load from cache)
     # ========================================================================
     
-    # Cache file paths
+    # Cache file paths - include model backbone and setup to avoid mixing different model results
     cache_dir = os.path.join(output_dir, 'cache')
     os.makedirs(cache_dir, exist_ok=True)
-    calib_cache_path = os.path.join(cache_dir, f'{flag}_calib_results.npz')
-    test_cache_path = os.path.join(cache_dir, f'{flag}_test_results.npz')
+    setup_suffix = f"_{setup}" if setup else ""
+    calib_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}_calib_results.npz')
+    test_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}_test_results.npz')
     
     # Try to load cached results FIRST
     if os.path.exists(calib_cache_path) and os.path.exists(test_cache_path):
@@ -434,9 +441,44 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         results['TTA'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
+    if 'TTA_calib' in methods:
+        print("\n🔍 Running TTA Calibration Caching (BetterRandAugment)...")
+        aug_folder = f'./uq_benchmark_results/gps_augment_cache/{flag}_{model_backbone}_{setup}_calibration_set'
+        
+        # Determine normalization parameters based on color
+        # Note: nb_channels should always be 3 because models expect 3-channel input
+        # (grayscale is converted via RepeatGrayToRGB in the dataset)
+        nb_channels = 3
+        mean = [.5, .5, .5] if color else [.5]
+        std = [.5, .5, .5] if color else [.5]
+        
+        # Cache augmentation predictions on calibration dataset
+        aug_folder = detector.run_augmentation_calibration_caching(
+            dataset=calib_dataset_tta,  # Use unnormalized dataset for augmentation!
+            aug_folder=aug_folder,
+            N=2,                      # Number of augmentation ops per policy
+            M=45,                     # Magnitude parameter
+            num_policies=500,         # Number of random policies to generate
+            image_size=image_size,
+            batch_size=batch_size,
+            nb_channels=nb_channels,
+            image_normalization=True,
+            mean=mean,
+            std=std,
+            use_monai_cache=True,
+            cache_rate=1.0,
+            cache_num_workers=8,
+            dataloader_workers=8,
+            dataloader_prefetch=8
+        )
+        print(f"  ✓ Augmentation predictions cached in: {aug_folder}")
+        # Note: TTA_calib doesn't produce uncertainty scores, it only caches predictions
+        # The cached predictions are used by GPS method
+    
+
     if 'GPS' in methods:
         print("\n🔍 Running GPS...")
-        aug_folder = f'./medMNIST/gps_augment/{image_size}*{image_size}/{flag}_calibration_set'
+        aug_folder = f'./uq_benchmark_results/gps_augment_cache/{flag}_{model_backbone}_{setup}_calibration_set'
         uncertainties, metrics = detector.run_gps(
             test_dataset_tta, y_true,
             aug_folder=aug_folder,
@@ -499,7 +541,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     saved_paths = detector.save_results(
         output_dir=output_dir,
         flag=flag,
-        timestamp=timestamp
+        timestamp=timestamp,
+        model_backbone=model_backbone,
+        setup=setup
     )
     
     # ========================================================================
@@ -543,10 +587,22 @@ if __name__ == '__main__':
                 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'amos2022'],
         help='MedMNIST dataset to benchmark'
     )
+    
+    parser.add_argument(
+        '--model', type=str, default='resnet18 ', choices=['resnet18', 'vit_b_16'],
+        help='Model backbone to use (default: resnet18)'
+    )
+    
+    parser.add_argument(
+        '--setup', type=str,
+        choices=['DA', 'DO', 'DADO'], default='',
+        help='Load models trained under different setups (DA: data augmentation, DO: dropout, DADO: both). Default is standard training.'
+    )
+    
     parser.add_argument(
         '--methods', nargs='+',
         default=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP'],
-        choices=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP'],
+        choices=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP'],
         help='UQ methods to run'
     )
     parser.add_argument(
@@ -556,6 +612,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--batch-size', type=int, default=4000,
         help='Batch size for inference'
+    )
+    parser.add_argument(
+        '--gpu', type=int, default=0,
+        help='GPU device ID to use (default: 0)'
     )
     parser.add_argument(
         '--per-fold-eval', action='store_true', default=False,
@@ -573,5 +633,8 @@ if __name__ == '__main__':
         methods=args.methods,
         output_dir=args.output_dir,
         batch_size=args.batch_size,
-        per_fold_eval=args.per_fold_eval
+        gpu_id=args.gpu,
+        per_fold_eval=args.per_fold_eval,
+        model_backbone=args.model,
+        setup=args.setup
     )

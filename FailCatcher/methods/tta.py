@@ -575,7 +575,10 @@ def apply_randaugment_and_store_results(
             memmaps, memmap_paths = [], []
             for idx in range(K_actual):
                 mmap_path = os.path.join(folder_name, f"tmp_policy_{start+idx}.mmap")
-                mem = np.memmap(mmap_path, dtype='float32', mode='w+', shape=(num_samples, nc))
+                # Pre-create the file with correct size
+                with open(mmap_path, 'wb') as f:
+                    f.write(b'\0' * (num_samples * nc * 4))  # 4 bytes per float32
+                mem = np.memmap(mmap_path, dtype='float32', mode='r+', shape=(num_samples, nc))
                 memmaps.append(mem)
                 memmap_paths.append(mmap_path)
 
@@ -586,7 +589,7 @@ def apply_randaugment_and_store_results(
                 """Process a batch and return predictions."""
                 B, K, C, H, W = imgs_stacked_local.shape
                 imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float()
-                batch_predictions = get_batch_predictions(models, imgs_flat, device, use_amp=True)
+                batch_predictions = get_batch_predictions(models, imgs_flat, device)
                 avg_preds = average_predictions(batch_predictions).view(B, K, -1).cpu().numpy()
                 return B, K, avg_preds
 
