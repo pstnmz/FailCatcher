@@ -508,7 +508,7 @@ def apply_randaugment_and_store_results(
     # Streaming mode with cached dataset (memory-efficient)
     if cached_dataset is not None:
         print(f"Streaming {num_policies} policies in chunks to avoid RAM overload")
-        policy_chunk_size = min(10, num_policies)  # Reduced from 25 to 10 for memory safety
+        policy_chunk_size = min(15, num_policies)  # Conservative chunk size for memory safety
         num_samples = len(cached_dataset)
 
         def build_augmentations_chunk(k_chunk):
@@ -547,15 +547,20 @@ def apply_randaugment_and_store_results(
             augmentations = build_augmentations_chunk(K_chunk)
             worker_count = dataloader_workers or 0
             aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            
+            # Conservative prefetch to avoid OOM - with K policies, memory multiplies fast
+            # prefetch_factor * num_workers * batch_size * K_chunk can easily exceed GPU memory
+            safe_prefetch = min(2, dataloader_prefetch) if worker_count > 0 else None
+            
             loader = DataLoader(
                 dataset=aug_dataset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=worker_count,
-                pin_memory=True,
+                pin_memory=False,  # Disable to save GPU memory
                 worker_init_fn=_dl_worker_init,
-                persistent_workers=False,
-                prefetch_factor=(int(dataloader_prefetch) if worker_count > 0 else None),
+                persistent_workers=(worker_count > 0),  # Keep workers alive for speed
+                prefetch_factor=safe_prefetch,
             )
 
             # Get first batch to determine actual K
@@ -588,9 +593,11 @@ def apply_randaugment_and_store_results(
             def _process_batch(imgs_stacked_local):
                 """Process a batch and return predictions."""
                 B, K, C, H, W = imgs_stacked_local.shape
-                imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float()
+                imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float().to(device)
                 batch_predictions = get_batch_predictions(models, imgs_flat, device)
                 avg_preds = average_predictions(batch_predictions).view(B, K, -1).cpu().numpy()
+                # Explicitly free GPU tensors
+                del imgs_flat, batch_predictions
                 return B, K, avg_preds
 
             # Process first batch
@@ -598,6 +605,7 @@ def apply_randaugment_and_store_results(
             for local_k in range(K):
                 memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
             sample_ptr += B
+            del imgs_stacked, avg_preds  # Free after use
             
             # Process remaining batches
             for batch in it:
@@ -606,11 +614,12 @@ def apply_randaugment_and_store_results(
                 for local_k in range(K):
                     memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
                 sample_ptr += B
+                del imgs_stacked, avg_preds  # Free after each batch
 
             if sample_ptr != num_samples:
                 raise RuntimeError(f"Expected {num_samples} samples but wrote {sample_ptr}")
 
-            # Compress each memmap to .npz and cleanup
+            # Cleanup memmaps and free memory
             for local_k, (mem, mempath) in enumerate(zip(memmaps, memmap_paths)):
                 # Extract policy key for filename
                 rand_transform = None
@@ -633,15 +642,26 @@ def apply_randaugment_and_store_results(
                 arr = np.asarray(mem)
                 np.savez_compressed(out_fname, predictions=arr)
                 print(f"Saved policy {start + local_k} -> {out_fname}")
+                del arr, mem  # Free memory immediately after saving
 
-            # Cleanup memmaps
+            # Cleanup memmap files
             try:
                 for mempath in memmap_paths:
                     os.remove(mempath)
             except Exception as e:
                 print(f"Warning: Failed to remove memmap files: {e}")
             
-            del memmaps
+            # Shutdown persistent workers explicitly
+            if hasattr(loader, '_iterator'):
+                loader._iterator = None
+            
+            # Aggressive cleanup to free GPU memory
+            del memmaps, memmap_paths, augmentations, loader, aug_dataset
+            
+            # Clear GPU cache and synchronize to ensure memory is freed
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Wait for all operations to complete
 
     else:
         # Fallback: no cache (process one policy at a time)

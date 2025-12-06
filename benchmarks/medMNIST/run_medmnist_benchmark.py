@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import torch
 import numpy as np
 import torchvision.transforms as transforms
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Subset
 
 # Import FailCatcher library
@@ -36,6 +36,64 @@ class RepeatGrayToRGB:
     """Transform for converting grayscale to RGB."""
     def __call__(self, x):
         return x.repeat(3, 1, 1)
+
+
+def subsample_dataset_stratified(dataset, max_samples=1000, seed=42):
+    """
+    Subsample a dataset to a maximum number of samples using stratified sampling.
+    
+    This ensures each class is proportionally represented in the subsample.
+    Uses fixed seed for reproducibility across GPS calibration and search phases.
+    
+    Args:
+        dataset: PyTorch dataset with labels
+        max_samples: Maximum number of samples to keep (default: 1000)
+        seed: Random seed for reproducibility (default: 42)
+    
+    Returns:
+        Subset: Subsampled dataset
+    """
+    if len(dataset) <= max_samples:
+        return dataset
+    
+    # Extract labels from dataset
+    labels = []
+    for i in range(len(dataset)):
+        _, label = dataset[i]
+        if isinstance(label, torch.Tensor):
+            label = label.item()
+        labels.append(label)
+    labels = np.array(labels)
+    
+    # Perform stratified sampling
+    indices = np.arange(len(dataset))
+    try:
+        # Use stratified sampling to maintain class distribution
+        _, selected_indices = train_test_split(
+            indices,
+            train_size=max_samples,
+            stratify=labels,
+            random_state=seed
+        )
+        selected_indices = sorted(selected_indices)  # Keep order for consistency
+        
+        # Count samples per class
+        selected_labels = labels[selected_indices]
+        unique, counts = np.unique(selected_labels, return_counts=True)
+        class_dist = dict(zip(unique, counts))
+        
+        print(f"  Subsampled calibration: {len(dataset)} → {len(selected_indices)} samples (stratified)")
+        print(f"  Class distribution: {class_dist}")
+        
+        return Subset(dataset, selected_indices.tolist())
+    
+    except ValueError as e:
+        # If stratification fails (e.g., too few samples per class), fall back to random sampling
+        print(f"  Warning: Stratified sampling failed ({e}), using random sampling")
+        np.random.seed(seed)
+        selected_indices = np.random.choice(indices, size=max_samples, replace=False)
+        selected_indices = sorted(selected_indices)
+        return Subset(dataset, selected_indices.tolist())
 
 
 def create_cv_generator(n_splits=5, seed=42, batch_size=5000, num_workers=0):
@@ -89,7 +147,7 @@ def create_cv_generator(n_splits=5, seed=42, batch_size=5000, num_workers=0):
 
 def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                            batch_size=4000, image_size=224, gpu_id=0, per_fold_eval=True,
-                           model_backbone='resnet18', setup=''):
+                           model_backbone='resnet18', setup='', gps_calib_samples=1000):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -100,6 +158,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         batch_size: Batch size for inference
         image_size: Image size
         gpu_id: GPU device ID to use
+        gps_calib_samples: Max samples for GPS calibration (default: 1000)
         per_fold_eval: If True, compute per-fold metrics (mean±std). If False, use ensemble-based evaluation
         model_backbone: Model architecture ('resnet18' or 'vit_b_16')
         setup: Training setup - '' (standard), 'DA', 'DO', or 'DADO'
@@ -453,6 +512,36 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         setup_name = setup if setup else 'standard'
         aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set')
         
+        # Subsample calibration dataset (stratified)
+        # This matches the approach used for SHAP background samples
+        # Using fixed seed ensures consistency between TTA_calib and GPS search
+        calib_dataset_tta_subsampled = subsample_dataset_stratified(
+            calib_dataset_tta, 
+            max_samples=gps_calib_samples, 
+            seed=42
+        )
+        
+        # Compute correct/incorrect indices for the subsampled calibration set
+        # These will be used by GPS for policy search
+        if isinstance(calib_dataset_tta_subsampled, Subset):
+            # Extract the indices that were selected in the subsample
+            subsample_indices = calib_dataset_tta_subsampled.indices
+            # Map from full calib indices to subsampled indices
+            correct_idx_calib_subsampled = []
+            incorrect_idx_calib_subsampled = []
+            for new_idx, orig_idx in enumerate(subsample_indices):
+                if orig_idx in correct_idx_calib:
+                    correct_idx_calib_subsampled.append(new_idx)
+                elif orig_idx in incorrect_idx_calib:
+                    incorrect_idx_calib_subsampled.append(new_idx)
+            correct_idx_calib_subsampled = np.array(correct_idx_calib_subsampled)
+            incorrect_idx_calib_subsampled = np.array(incorrect_idx_calib_subsampled)
+            print(f"  Subsampled correct: {len(correct_idx_calib_subsampled)}, incorrect: {len(incorrect_idx_calib_subsampled)}")
+        else:
+            # No subsampling occurred (dataset already ≤ 1000)
+            correct_idx_calib_subsampled = correct_idx_calib
+            incorrect_idx_calib_subsampled = incorrect_idx_calib
+        
         # Determine normalization parameters based on color
         # Note: nb_channels should always be 3 because models expect 3-channel input
         # (grayscale is converted via RepeatGrayToRGB in the dataset)
@@ -462,11 +551,17 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         
         # Use smaller batch size for augmentation caching to avoid OOM
         # Each batch gets multiplied by num_policies, so memory usage is much higher
-        aug_batch_size = min(batch_size, 128)  # Cap at 128 for safety
+        aug_batch_size = min(batch_size, 256)  # Conservative for memory safety
+        
+        # Use MONAI cache with full rate for speed
+        # Cache is stored in RAM (CPU memory), not GPU, so it's safe
+        print(f"  Original calibration set size: {len(calib_dataset_tta)}")
+        print(f"  Subsampled calibration set size: {len(calib_dataset_tta_subsampled)}")
+        print(f"  Batch size: {aug_batch_size}")
         
         # Cache augmentation predictions on calibration dataset
         aug_folder = detector.run_augmentation_calibration_caching(
-            dataset=calib_dataset_tta,  # Use unnormalized dataset for augmentation!
+            dataset=calib_dataset_tta_subsampled,  # Use subsampled dataset!
             aug_folder=aug_folder,
             N=2,                      # Number of augmentation ops per policy
             M=45,                     # Magnitude parameter
@@ -478,10 +573,10 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             mean=mean,
             std=std,
             use_monai_cache=True,
-            cache_rate=1.0,
+            cache_rate=1.0,  # Full cache in RAM for speed
             cache_num_workers=8,
-            dataloader_workers=8,
-            dataloader_prefetch=8
+            dataloader_workers=6,  # More workers with persistent mode for speed
+            dataloader_prefetch=2  # Conservative prefetch to avoid OOM
         )
         print(f"  ✓ Augmentation predictions cached in: {aug_folder}")
         # Note: TTA_calib doesn't produce uncertainty scores, it only caches predictions
@@ -492,11 +587,43 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         print("\n🔍 Running GPS...")
         setup_name = setup if setup else 'standard'
         aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set')
+        
+        # If TTA_calib was run, use the subsampled indices
+        # Otherwise, compute them now (GPS can run independently of TTA_calib)
+        if 'TTA_calib' in methods:
+            # Use the subsampled indices computed during TTA_calib
+            gps_correct_idx = correct_idx_calib_subsampled.tolist()
+            gps_incorrect_idx = incorrect_idx_calib_subsampled.tolist()
+            print(f"  Using subsampled calibration indices from TTA_calib")
+        else:
+            # GPS running independently - need to subsample and compute indices
+            print(f"  TTA_calib not run - computing subsampled calibration indices...")
+            calib_dataset_tta_subsampled = subsample_dataset_stratified(
+                calib_dataset_tta, 
+                max_samples=gps_calib_samples, 
+                seed=42
+            )
+            
+            # Compute correct/incorrect for subsampled set
+            if isinstance(calib_dataset_tta_subsampled, Subset):
+                subsample_indices = calib_dataset_tta_subsampled.indices
+                gps_correct_idx = []
+                gps_incorrect_idx = []
+                for new_idx, orig_idx in enumerate(subsample_indices):
+                    if orig_idx in correct_idx_calib:
+                        gps_correct_idx.append(new_idx)
+                    elif orig_idx in incorrect_idx_calib:
+                        gps_incorrect_idx.append(new_idx)
+                print(f"  Subsampled correct: {len(gps_correct_idx)}, incorrect: {len(gps_incorrect_idx)}")
+            else:
+                gps_correct_idx = correct_idx_calib.tolist()
+                gps_incorrect_idx = incorrect_idx_calib.tolist()
+        
         uncertainties, metrics = detector.run_gps(
             test_dataset_tta, y_true,
             aug_folder=aug_folder,
-            correct_idx_calib=correct_idx_calib.tolist(),
-            incorrect_idx_calib=incorrect_idx_calib.tolist(),
+            correct_idx_calib=gps_correct_idx,
+            incorrect_idx_calib=gps_incorrect_idx,
             image_size=image_size,
             batch_size=batch_size,
             cache_dir=os.path.join(output_dir, 'gps_cache')
@@ -638,6 +765,10 @@ if __name__ == '__main__':
         '--ensemble-eval', dest='per_fold_eval', action='store_false',
         help='Use ensemble-based evaluation (legacy mode)'
     )
+    parser.add_argument(
+        '--gps-calib-samples', type=int, default=1000,
+        help='Maximum number of calibration samples for GPS augmentation caching (default: 1000). Higher values = better coverage but slower.'
+    )
     
     args = parser.parse_args()
     
@@ -649,5 +780,6 @@ if __name__ == '__main__':
         gpu_id=args.gpu,
         per_fold_eval=args.per_fold_eval,
         model_backbone=args.model,
-        setup=args.setup
+        setup=args.setup,
+        gps_calib_samples=args.gps_calib_samples
     )

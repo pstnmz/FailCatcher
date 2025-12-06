@@ -1243,6 +1243,9 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
     - use_cache: build MONAI CacheDataset per-fold (only when MONAI available)
     - cache_rate: fraction to cache in MONAI CacheDataset
     - train_augment_transform: callable applied on-the-fly to training items (RandAugment)
+    
+    NOTE: When using MONAI CacheDataset, persistent_workers is automatically set to False
+          to avoid multiprocessing conflicts (CacheDataset has internal multiprocessing).
     """
     # decide num_workers if not provided
     if num_workers is None:
@@ -1381,14 +1384,15 @@ def CV_train_val_loaders(study_dataset_aug, study_dataset_plain, batch_size,
 
                 
                 val_ds_wrapped = val_cache_ds
-                persistent = True if (num_workers and num_workers>0) else False
+                # CRITICAL: persistent_workers=False when using MONAI CacheDataset
+                # CacheDataset uses internal multiprocessing - persistent workers cause conflicts
                 train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
                                           num_workers=num_workers, pin_memory=pin_memory,
-                                          persistent_workers=persistent, prefetch_factor=2, drop_last=True)
+                                          persistent_workers=False, prefetch_factor=2, drop_last=True)
                 
                 val_loader = DataLoader(val_ds_wrapped, batch_size=batch_size, shuffle=False,
-                        num_workers=num_workers, pin_memory=True, persistent_workers=persistent, prefetch_factor=3)
-                print('train/val loaders using torch DataLoader for cached val dataset')
+                        num_workers=num_workers, pin_memory=True, persistent_workers=False, prefetch_factor=3)
+                print('train/val loaders using torch DataLoader for cached dataset (persistent_workers=False)')
 
                 if prewarm_cache and use_monai_local:
                     try:
@@ -1460,6 +1464,9 @@ def get_single_CV_fold(study_dataset_aug, study_dataset_plain, batch_size, fold_
     """
     Get loaders for a single CV fold without iterating through all folds.
     This avoids caching all folds when you only need one.
+    
+    NOTE: When using MONAI CacheDataset, persistent_workers is automatically set to False
+          to avoid multiprocessing conflicts (CacheDataset has internal multiprocessing).
     
     Returns: (train_loader, val_loader) for the specified fold_index
     """
@@ -1590,12 +1597,13 @@ def get_single_CV_fold(study_dataset_aug, study_dataset_plain, batch_size, fold_
                     train_ds_wrapped = train_cache_ds
 
                 val_ds_wrapped = val_cache_ds
-                persistent = True if (num_workers and num_workers > 0) else False
+                # CRITICAL: persistent_workers=False when using MONAI CacheDataset
+                # CacheDataset uses internal multiprocessing - persistent workers cause conflicts
                 train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
                                           num_workers=num_workers, pin_memory=pin_memory,
-                                          persistent_workers=persistent, prefetch_factor=2, drop_last=True)
+                                          persistent_workers=False, prefetch_factor=2, drop_last=True)
                 val_loader = DataLoader(dataset=val_ds_wrapped, batch_size=batch_size, shuffle=False,
-                                        num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent, prefetch_factor=3)
+                                        num_workers=num_workers, pin_memory=pin_memory, persistent_workers=False, prefetch_factor=3)
 
                 if prewarm_cache:
                     print(f"Prewarming cache for fold {fold_index}...")
@@ -1664,6 +1672,9 @@ def CV_fold_generator(study_dataset_aug, study_dataset_plain, batch_size,
     Generator that yields (train_loader, val_loader, fold_index) for each CV fold.
     Build and return one fold at a time so caller can free memory after training that fold.
     Same parameters/behavior as CV_train_val_loaders but lazily constructs per-fold loaders.
+    
+    NOTE: When using MONAI CacheDataset, persistent_workers is automatically set to False
+          to avoid multiprocessing conflicts (CacheDataset has internal multiprocessing).
     """
     if num_workers is None:
         try:
@@ -1792,12 +1803,13 @@ def CV_fold_generator(study_dataset_aug, study_dataset_plain, batch_size,
                         train_ds_wrapped = train_cache_ds
 
                     val_ds_wrapped = val_cache_ds
-                    persistent = True if (num_workers and num_workers > 0) else False
+                    # CRITICAL: persistent_workers=False when using MONAI CacheDataset
+                    # CacheDataset uses internal multiprocessing - persistent workers cause conflicts
                     train_loader = DataLoader(dataset=train_ds_wrapped, batch_size=batch_size, shuffle=True,
                                               num_workers=num_workers, pin_memory=pin_memory,
-                                              persistent_workers=persistent, prefetch_factor=2, drop_last=True)
+                                              persistent_workers=False, prefetch_factor=2, drop_last=True)
                     val_loader = DataLoader(dataset=val_ds_wrapped, batch_size=batch_size, shuffle=False,
-                                            num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent, prefetch_factor=3)
+                                            num_workers=num_workers, pin_memory=pin_memory, persistent_workers=False, prefetch_factor=3)
 
                     if prewarm_cache:
                         try:

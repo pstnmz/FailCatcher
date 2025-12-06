@@ -23,7 +23,7 @@ import sys
 from datetime import datetime
 
 
-def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, dry_run=False):
+def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples=1000, dry_run=False):
     """
     Run TTA_calib for a specific model configuration.
     
@@ -33,6 +33,7 @@ def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, dry_run=False):
         setup: Training setup ('', 'DA', 'DO', 'DADO')
         gpu_id: GPU device ID
         batch_size: Batch size for inference
+        gps_calib_samples: Max calibration samples for GPS
         dry_run: If True, only print the command without executing
     """
     setup_str = setup if setup else "standard"
@@ -47,6 +48,7 @@ def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, dry_run=False):
         "--methods", "TTA_calib",
         "--batch-size", str(batch_size),
         "--gpu", str(gpu_id),
+        "--gps-calib-samples", str(gps_calib_samples),
     ]
     
     # Add setup if not standard
@@ -115,8 +117,13 @@ def main():
     )
     
     parser.add_argument(
-        '--batch-size', type=int, default=128,
-        help='Batch size for augmentation inference (default: 128, capped internally for memory safety)'
+        '--batch-size', type=int, default=256,
+        help='Batch size for augmentation inference (default: 256, conservative for memory safety)'
+    )
+    
+    parser.add_argument(
+        '--gps-calib-samples', type=int, default=1000,
+        help='Maximum calibration samples for GPS augmentation (default: 1000). Use 2000-3000 for large datasets.'
     )
     
     parser.add_argument(
@@ -169,6 +176,7 @@ def main():
             setup=setup,
             gpu_id=args.gpu,
             batch_size=args.batch_size,
+            gps_calib_samples=args.gps_calib_samples,
             dry_run=args.dry_run
         )
         
