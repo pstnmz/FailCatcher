@@ -23,7 +23,7 @@ import sys
 from datetime import datetime
 
 
-def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples=1000, dry_run=False):
+def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples=None, dry_run=False):
     """
     Run TTA_calib for a specific model configuration.
     
@@ -33,7 +33,7 @@ def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples
         setup: Training setup ('', 'DA', 'DO', 'DADO')
         gpu_id: GPU device ID
         batch_size: Batch size for inference
-        gps_calib_samples: Max calibration samples for GPS
+        gps_calib_samples: Max calibration samples for GPS (None = use all)
         dry_run: If True, only print the command without executing
     """
     setup_str = setup if setup else "standard"
@@ -48,8 +48,11 @@ def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples
         "--methods", "TTA_calib",
         "--batch-size", str(batch_size),
         "--gpu", str(gpu_id),
-        "--gps-calib-samples", str(gps_calib_samples),
     ]
+    
+    # Only add --gps-calib-samples if explicitly set
+    if gps_calib_samples is not None:
+        cmd.extend(["--gps-calib-samples", str(gps_calib_samples)])
     
     # Add setup if not standard
     if setup:
@@ -122,8 +125,8 @@ def main():
     )
     
     parser.add_argument(
-        '--gps-calib-samples', type=int, default=1000,
-        help='Maximum calibration samples for GPS augmentation (default: 1000). Use 2000-3000 for large datasets.'
+        '--gps-calib-samples', type=int, default=None,
+        help='Maximum calibration samples for GPS augmentation (default: None = use all). Use 1000-3000 to subsample large datasets.'
     )
     
     parser.add_argument(

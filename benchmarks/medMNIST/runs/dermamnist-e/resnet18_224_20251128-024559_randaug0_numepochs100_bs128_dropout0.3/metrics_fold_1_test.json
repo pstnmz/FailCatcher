@@ -1,0 +1,92 @@
+{
+  "data_flag": "dermamnist-e",
+  "num_classes": 7,
+  "class_names": [
+    "actinic keratoses and intraepithelial carcinoma",
+    "basal cell carcinoma",
+    "benign keratosis-like lesions",
+    "dermatofibroma",
+    "melanoma",
+    "melanocytic nevi",
+    "vascular lesions"
+  ],
+  "is_ensemble": false,
+  "metrics": {
+    "accuracy": 0.7253474520185308,
+    "balanced_accuracy": 0.5711834155911378,
+    "auc": 0.9285108316640079
+  },
+  "confusion_matrix": [
+    [
+      17,
+      10,
+      6,
+      3,
+      5,
+      2,
+      0
+    ],
+    [
+      4,
+      69,
+      8,
+      3,
+      3,
+      6,
+      0
+    ],
+    [
+      4,
+      19,
+      133,
+      6,
+      22,
+      33,
+      0
+    ],
+    [
+      3,
+      4,
+      1,
+      25,
+      2,
+      8,
+      1
+    ],
+    [
+      1,
+      6,
+      27,
+      1,
+      81,
+      53,
+      2
+    ],
+    [
+      2,
+      20,
+      75,
+      10,
+      41,
+      758,
+      2
+    ],
+    [
+      1,
+      14,
+      1,
+      1,
+      1,
+      4,
+      13
+    ]
+  ],
+  "counts": {
+    "n_samples": 1511
+  },
+  "timing": {
+    "eval_wall_sec": 0.7144134044647217,
+    "throughput_img_per_s": 2115.0219054640015,
+    "latency_ms_per_img": 0.47280834180325726
+  }
+}

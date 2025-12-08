@@ -1,0 +1,1397 @@
+[
+  {
+    "dataset": "bloodmnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-191200_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9900613855597779,
+        "ensemble_balanced_accuracy": 0.9913966379331962,
+        "ensemble_auc": 0.9994382997670421,
+        "counts": {
+          "n_samples": 3421
+        },
+        "timing": {
+          "eval_wall_sec": 3.6070337295532227,
+          "throughput_img_per_s": 948.4247324805956,
+          "latency_ms_per_img": 1.0543799267913543
+        },
+        "num_classes": 8,
+        "data_flag": "bloodmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.005782316370892385,
+        "fold_balanced_accuracy_std": 0.006241423995772506,
+        "fold_auc_std": 9.347579660523635e-05,
+        "fold_acc_values": [
+          0.9783688979830459,
+          0.9894767611809413,
+          0.9859690149079217,
+          0.9751534638994446,
+          0.9839228295819936
+        ],
+        "fold_bacc_values": [
+          0.9786083512409625,
+          0.9908637576147661,
+          0.9874728505588315,
+          0.9757372410371686,
+          0.9847746545452128
+        ],
+        "fold_auc_values": [
+          0.9991923209016541,
+          0.9993022302987961,
+          0.9994105619332316,
+          0.9991977862934152,
+          0.9992141143547126
+        ],
+        "n_samples": 3421,
+        "fold_epoch_counts": [
+          12,
+          13,
+          24,
+          32,
+          48
+        ],
+        "best_epoch_counts": [
+          2,
+          3,
+          14,
+          22,
+          38
+        ],
+        "mean_fold_nb_epochs": 15.8,
+        "std_fold_nb_epochs": 14.906374475371267,
+        "mean_fold_nb_epochs_kept": 15.8,
+        "std_fold_nb_epochs_kept": 14.906374475371267,
+        "mean_fold_nb_epochs_trained": 25.8,
+        "std_fold_nb_epochs_trained": 14.906374475371267,
+        "mean_time_per_epoch_s": 7.635581395348837,
+        "n_epoch_lines": 129,
+        "fold_train_secs": [
+          92.8,
+          395.97,
+          246.98,
+          101.82,
+          211.38
+        ],
+        "mean_fold_train_sec": 209.78999999999996,
+        "std_fold_train_sec": 123.88785009031356
+      },
+      {
+        "exp_dir": "resnet18_224_20251101-033502_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9918152586962876,
+        "ensemble_balanced_accuracy": 0.9929404205661336,
+        "ensemble_auc": 0.9994484513546431,
+        "counts": {
+          "n_samples": 3421
+        },
+        "timing": {
+          "eval_wall_sec": 3.715217113494873,
+          "throughput_img_per_s": 920.8075586144936,
+          "latency_ms_per_img": 1.0860032486100184
+        },
+        "num_classes": 8,
+        "data_flag": "bloodmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.0034314014828013225,
+        "fold_balanced_accuracy_std": 0.0035892345907905725,
+        "fold_auc_std": 9.021107249676954e-05,
+        "fold_acc_values": [
+          0.9856767027185034,
+          0.983338205203157,
+          0.9818766442560655,
+          0.9792458345513008,
+          0.9769073370359544
+        ],
+        "fold_bacc_values": [
+          0.9865716051797757,
+          0.9854475306536635,
+          0.9841070962725557,
+          0.9823712808003674,
+          0.9774031319323662
+        ],
+        "fold_auc_values": [
+          0.9993253912749329,
+          0.9993344332877139,
+          0.9992888402806366,
+          0.9992712398141798,
+          0.9991117497962083
+        ],
+        "n_samples": 3421,
+        "fold_epoch_counts": [
+          17,
+          17,
+          18,
+          21,
+          25
+        ],
+        "best_epoch_counts": [
+          7,
+          7,
+          8,
+          11,
+          15
+        ],
+        "mean_fold_nb_epochs": 9.6,
+        "std_fold_nb_epochs": 3.4351128074635335,
+        "mean_fold_nb_epochs_kept": 9.6,
+        "std_fold_nb_epochs_kept": 3.4351128074635335,
+        "mean_fold_nb_epochs_trained": 19.6,
+        "std_fold_nb_epochs_trained": 3.4351128074635335,
+        "mean_time_per_epoch_s": 8.000408163265307,
+        "n_epoch_lines": 98,
+        "fold_train_secs": [
+          198.77,
+          167.91,
+          145.26,
+          137.02,
+          137.67
+        ],
+        "mean_fold_train_sec": 157.326,
+        "std_fold_train_sec": 26.333944444385846
+      }
+    ]
+  },
+  {
+    "dataset": "breastmnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-144155_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9102564102564102,
+        "ensemble_balanced_accuracy": 0.8784461152882206,
+        "ensemble_auc": 0.9519632414369257,
+        "counts": {
+          "n_samples": 156
+        },
+        "timing": {
+          "eval_wall_sec": 0.3427596092224121,
+          "throughput_img_per_s": 455.12947209241827,
+          "latency_ms_per_img": 2.1971769821949496
+        },
+        "num_classes": 2,
+        "data_flag": "breastmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.02027101064210501,
+        "fold_balanced_accuracy_std": 0.009641796522141033,
+        "fold_auc_std": 0.021338345635707277,
+        "fold_acc_values": [
+          0.8974358974358975,
+          0.8846153846153846,
+          0.8461538461538461,
+          0.8910256410256411,
+          0.8717948717948718
+        ],
+        "fold_bacc_values": [
+          0.8696741854636592,
+          0.8458646616541353,
+          0.849624060150376,
+          0.850250626566416,
+          0.8596491228070176
+        ],
+        "fold_auc_values": [
+          0.9204260651629073,
+          0.9356725146198831,
+          0.8964076858813701,
+          0.9546783625730995,
+          0.9279448621553885
+        ],
+        "n_samples": 156,
+        "fold_epoch_counts": [
+          19,
+          23,
+          24,
+          24,
+          29
+        ],
+        "best_epoch_counts": [
+          9,
+          13,
+          14,
+          14,
+          19
+        ],
+        "mean_fold_nb_epochs": 13.8,
+        "std_fold_nb_epochs": 3.5637059362410923,
+        "mean_fold_nb_epochs_kept": 13.8,
+        "std_fold_nb_epochs_kept": 3.5637059362410923,
+        "mean_fold_nb_epochs_trained": 23.8,
+        "std_fold_nb_epochs_trained": 3.5637059362410923,
+        "mean_time_per_epoch_s": 0.6648739495798317,
+        "n_epoch_lines": 119,
+        "fold_train_secs": [
+          16.2,
+          19.57,
+          16.48,
+          16.1,
+          13.34
+        ],
+        "mean_fold_train_sec": 16.338,
+        "std_fold_train_sec": 2.209619876811394
+      },
+      {
+        "exp_dir": "resnet18_224_20251031-220033_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9166666666666666,
+        "ensemble_balanced_accuracy": 0.8903508771929824,
+        "ensemble_auc": 0.9440267335004175,
+        "counts": {
+          "n_samples": 156
+        },
+        "timing": {
+          "eval_wall_sec": 0.3478281497955322,
+          "throughput_img_per_s": 448.4973401137983,
+          "latency_ms_per_img": 2.2296676268944373
+        },
+        "num_classes": 2,
+        "data_flag": "breastmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.03737789676182887,
+        "fold_balanced_accuracy_std": 0.03215207721705434,
+        "fold_auc_std": 0.04157362471720487,
+        "fold_acc_values": [
+          0.8333333333333334,
+          0.8461538461538461,
+          0.7948717948717948,
+          0.8974358974358975,
+          0.8589743589743589
+        ],
+        "fold_bacc_values": [
+          0.818295739348371,
+          0.8270676691729324,
+          0.7994987468671679,
+          0.8771929824561404,
+          0.7982456140350878
+        ],
+        "fold_auc_values": [
+          0.8819966583124479,
+          0.8993316624895572,
+          0.8492063492063492,
+          0.9563492063492063,
+          0.8636173767752715
+        ],
+        "n_samples": 156,
+        "fold_epoch_counts": [
+          16,
+          18,
+          22,
+          24,
+          30
+        ],
+        "best_epoch_counts": [
+          6,
+          8,
+          12,
+          14,
+          20
+        ],
+        "mean_fold_nb_epochs": 12.0,
+        "std_fold_nb_epochs": 5.477225575051661,
+        "mean_fold_nb_epochs_kept": 12.0,
+        "std_fold_nb_epochs_kept": 5.477225575051661,
+        "mean_fold_nb_epochs_trained": 22.0,
+        "std_fold_nb_epochs_trained": 5.477225575051661,
+        "mean_time_per_epoch_s": 0.9836363636363636,
+        "n_epoch_lines": 110,
+        "fold_train_secs": [
+          22.24,
+          23.86,
+          17.25,
+          28.84,
+          18.03
+        ],
+        "mean_fold_train_sec": 22.044,
+        "std_fold_train_sec": 4.7068173960756114
+      }
+    ]
+  },
+  {
+    "dataset": "dermamnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-154651_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.7197007481296758,
+        "ensemble_balanced_accuracy": 0.7515287875785218,
+        "ensemble_auc": 0.9534945758293133,
+        "counts": {
+          "n_samples": 2005
+        },
+        "timing": {
+          "eval_wall_sec": 2.193577289581299,
+          "throughput_img_per_s": 914.0320742392014,
+          "latency_ms_per_img": 1.0940535110131167
+        },
+        "num_classes": 7,
+        "data_flag": "dermamnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.07270941249286814,
+        "fold_balanced_accuracy_std": 0.04929237276875333,
+        "fold_auc_std": 0.014593569254604232,
+        "fold_acc_values": [
+          0.6538653366583541,
+          0.654364089775561,
+          0.5182044887780549,
+          0.6309226932668329,
+          0.7172069825436409
+        ],
+        "fold_bacc_values": [
+          0.6176148881619872,
+          0.7013574333670798,
+          0.5742535513934754,
+          0.6728985717490935,
+          0.6500156463225535
+        ],
+        "fold_auc_values": [
+          0.9087878010759549,
+          0.9425151060678933,
+          0.9082058256208354,
+          0.9214500937757002,
+          0.9301310010545617
+        ],
+        "n_samples": 2005,
+        "fold_epoch_counts": [
+          13,
+          13,
+          15,
+          19,
+          21
+        ],
+        "best_epoch_counts": [
+          3,
+          3,
+          5,
+          9,
+          11
+        ],
+        "mean_fold_nb_epochs": 6.2,
+        "std_fold_nb_epochs": 3.6331804249169903,
+        "mean_fold_nb_epochs_kept": 6.2,
+        "std_fold_nb_epochs_kept": 3.6331804249169903,
+        "mean_fold_nb_epochs_trained": 16.2,
+        "std_fold_nb_epochs_trained": 3.63318042491699,
+        "mean_time_per_epoch_s": 4.8150617283950625,
+        "n_epoch_lines": 81,
+        "fold_train_secs": [
+          64.26,
+          90.81,
+          62.74,
+          72.61,
+          101.64
+        ],
+        "mean_fold_train_sec": 78.412,
+        "std_fold_train_sec": 17.123115078746622
+      },
+      {
+        "exp_dir": "resnet18_224_20251031-231119_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.7351620947630922,
+        "ensemble_balanced_accuracy": 0.7604459377741682,
+        "ensemble_auc": 0.953017733011521,
+        "counts": {
+          "n_samples": 2005
+        },
+        "timing": {
+          "eval_wall_sec": 2.208437919616699,
+          "throughput_img_per_s": 907.8815311901508,
+          "latency_ms_per_img": 1.1014652965669323
+        },
+        "num_classes": 7,
+        "data_flag": "dermamnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.050415281525690255,
+        "fold_balanced_accuracy_std": 0.02168048735141674,
+        "fold_auc_std": 0.00979887851019682,
+        "fold_acc_values": [
+          0.602493765586035,
+          0.6478802992518703,
+          0.7391521197007481,
+          0.687780548628429,
+          0.6748129675810474
+        ],
+        "fold_bacc_values": [
+          0.6591259126611541,
+          0.6463019595420662,
+          0.6426426774095352,
+          0.6970242108495318,
+          0.6669958068151216
+        ],
+        "fold_auc_values": [
+          0.917655071911516,
+          0.9310571072492569,
+          0.9337042067590365,
+          0.9448615653235132,
+          0.9284260701051064
+        ],
+        "n_samples": 2005,
+        "fold_epoch_counts": [
+          18,
+          20,
+          24,
+          30,
+          30
+        ],
+        "best_epoch_counts": [
+          8,
+          10,
+          14,
+          20,
+          20
+        ],
+        "mean_fold_nb_epochs": 14.4,
+        "std_fold_nb_epochs": 5.549774770204643,
+        "mean_fold_nb_epochs_kept": 14.4,
+        "std_fold_nb_epochs_kept": 5.549774770204643,
+        "mean_fold_nb_epochs_trained": 24.4,
+        "std_fold_nb_epochs_trained": 5.5497747702046425,
+        "mean_time_per_epoch_s": 5.122459016393442,
+        "n_epoch_lines": 122,
+        "fold_train_secs": [
+          157.22,
+          92.22,
+          123.52,
+          153.59,
+          101.48
+        ],
+        "mean_fold_train_sec": 125.606,
+        "std_fold_train_sec": 29.510970502509743
+      }
+    ]
+  },
+  {
+    "dataset": "dermamnist-e",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-214939_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.7028457974851092,
+        "ensemble_balanced_accuracy": 0.6629927374422183,
+        "ensemble_auc": 0.936665957040379,
+        "counts": {
+          "n_samples": 1511
+        },
+        "timing": {
+          "eval_wall_sec": 1.744016408920288,
+          "throughput_img_per_s": 866.3909308831862,
+          "latency_ms_per_img": 1.1542133745336123
+        },
+        "num_classes": 7,
+        "data_flag": "dermamnist-e",
+        "folds_found": 5,
+        "fold_acc_std": 0.032713268119143026,
+        "fold_balanced_accuracy_std": 0.030702471245658926,
+        "fold_auc_std": 0.012724251327717682,
+        "fold_acc_values": [
+          0.6121773659827928,
+          0.6168100595632032,
+          0.6207809397749835,
+          0.6909331568497684,
+          0.6240900066181337
+        ],
+        "fold_bacc_values": [
+          0.5722580805917074,
+          0.560204700316885,
+          0.5601314768895512,
+          0.5223579786308657,
+          0.6080539531484966
+        ],
+        "fold_auc_values": [
+          0.9099476598038915,
+          0.8862226926943155,
+          0.8983774472319592,
+          0.9186903478160039,
+          0.9112708899342145
+        ],
+        "n_samples": 1511,
+        "fold_epoch_counts": [
+          14,
+          16,
+          18,
+          19,
+          19
+        ],
+        "best_epoch_counts": [
+          4,
+          6,
+          8,
+          9,
+          9
+        ],
+        "mean_fold_nb_epochs": 7.2,
+        "std_fold_nb_epochs": 2.16794833886788,
+        "mean_fold_nb_epochs_kept": 7.2,
+        "std_fold_nb_epochs_kept": 2.16794833886788,
+        "mean_fold_nb_epochs_trained": 17.2,
+        "std_fold_nb_epochs_trained": 2.16794833886788,
+        "mean_time_per_epoch_s": 5.867325581395349,
+        "n_epoch_lines": 86,
+        "fold_train_secs": [
+          106.49,
+          111.58,
+          94.2,
+          111.63,
+          82.92
+        ],
+        "mean_fold_train_sec": 101.364,
+        "std_fold_train_sec": 12.525347500169403
+      },
+      {
+        "exp_dir": "resnet18_224_20251101-064041_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.6598279285241562,
+        "ensemble_balanced_accuracy": 0.6594743853619659,
+        "ensemble_auc": 0.9283041246301212,
+        "counts": {
+          "n_samples": 1511
+        },
+        "timing": {
+          "eval_wall_sec": 1.683332920074463,
+          "throughput_img_per_s": 897.6239827432117,
+          "latency_ms_per_img": 1.1140522303603329
+        },
+        "num_classes": 7,
+        "data_flag": "dermamnist-e",
+        "folds_found": 5,
+        "fold_acc_std": 0.058898787113728174,
+        "fold_balanced_accuracy_std": 0.02351178865543621,
+        "fold_auc_std": 0.010038429496503316,
+        "fold_acc_values": [
+          0.6796823295830576,
+          0.5320979483785573,
+          0.6611515552614163,
+          0.5982792852415619,
+          0.5943084050297816
+        ],
+        "fold_bacc_values": [
+          0.5750652679997926,
+          0.6190134971410625,
+          0.6287124847092764,
+          0.6149532700577868,
+          0.5835489221847003
+        ],
+        "fold_auc_values": [
+          0.9207573397219176,
+          0.8924773778986425,
+          0.90855225743728,
+          0.9063969718642727,
+          0.9066207939280131
+        ],
+        "n_samples": 1511,
+        "fold_epoch_counts": [
+          23,
+          23,
+          24,
+          28,
+          29
+        ],
+        "best_epoch_counts": [
+          13,
+          13,
+          14,
+          18,
+          19
+        ],
+        "mean_fold_nb_epochs": 15.4,
+        "std_fold_nb_epochs": 2.8809720581775866,
+        "mean_fold_nb_epochs_kept": 15.4,
+        "std_fold_nb_epochs_kept": 2.8809720581775866,
+        "mean_fold_nb_epochs_trained": 25.4,
+        "std_fold_nb_epochs_trained": 2.8809720581775866,
+        "mean_time_per_epoch_s": 6.2076377952755895,
+        "n_epoch_lines": 127,
+        "fold_train_secs": [
+          176.9,
+          142.06,
+          180.99,
+          149.19,
+          142.77
+        ],
+        "mean_fold_train_sec": 158.382,
+        "std_fold_train_sec": 19.030719114106017
+      }
+    ]
+  },
+  {
+    "dataset": "octmnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-155534_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.922,
+        "ensemble_balanced_accuracy": 0.922,
+        "ensemble_auc": 0.9905586666666666,
+        "counts": {
+          "n_samples": 1000
+        },
+        "timing": {
+          "eval_wall_sec": 1.2483100891113281,
+          "throughput_img_per_s": 801.0830071171658,
+          "latency_ms_per_img": 1.2483100891113281
+        },
+        "num_classes": 4,
+        "data_flag": "octmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.006024948132556832,
+        "fold_balanced_accuracy_std": 0.006024948132556833,
+        "fold_auc_std": 0.0036073007883703698,
+        "fold_acc_values": [
+          0.899,
+          0.899,
+          0.912,
+          0.909,
+          0.908
+        ],
+        "fold_bacc_values": [
+          0.8989999999999999,
+          0.899,
+          0.912,
+          0.9089999999999999,
+          0.9079999999999999
+        ],
+        "fold_auc_values": [
+          0.9851673333333333,
+          0.9838366666666667,
+          0.9888106666666666,
+          0.9875813333333333,
+          0.97957
+        ],
+        "n_samples": 1000,
+        "fold_epoch_counts": [
+          13,
+          15,
+          16,
+          17,
+          17
+        ],
+        "best_epoch_counts": [
+          3,
+          5,
+          6,
+          7,
+          7
+        ],
+        "mean_fold_nb_epochs": 5.6,
+        "std_fold_nb_epochs": 1.6733200530681511,
+        "mean_fold_nb_epochs_kept": 5.6,
+        "std_fold_nb_epochs_kept": 1.6733200530681511,
+        "mean_fold_nb_epochs_trained": 15.6,
+        "std_fold_nb_epochs_trained": 1.6733200530681511,
+        "mean_time_per_epoch_s": 56.14525641025642,
+        "n_epoch_lines": 78,
+        "fold_train_secs": [
+          843.29,
+          895.41,
+          958.42,
+          729.38,
+          955.47
+        ],
+        "mean_fold_train_sec": 876.394,
+        "std_fold_train_sec": 94.9366600950339
+      },
+      {
+        "exp_dir": "resnet18_224_20251031-232354_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.933,
+        "ensemble_balanced_accuracy": 0.933,
+        "ensemble_auc": 0.9943986666666667,
+        "counts": {
+          "n_samples": 1000
+        },
+        "timing": {
+          "eval_wall_sec": 1.1389153003692627,
+          "throughput_img_per_s": 878.0284185099426,
+          "latency_ms_per_img": 1.1389153003692627
+        },
+        "num_classes": 4,
+        "data_flag": "octmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.017767948671695306,
+        "fold_balanced_accuracy_std": 0.017767948671695347,
+        "fold_auc_std": 0.0027231855284247843,
+        "fold_acc_values": [
+          0.91,
+          0.899,
+          0.908,
+          0.945,
+          0.922
+        ],
+        "fold_bacc_values": [
+          0.91,
+          0.8989999999999999,
+          0.9079999999999999,
+          0.945,
+          0.922
+        ],
+        "fold_auc_values": [
+          0.989908,
+          0.9906253333333334,
+          0.9897193333333334,
+          0.9949133333333333,
+          0.9874646666666667
+        ],
+        "n_samples": 1000,
+        "fold_epoch_counts": [
+          17,
+          20,
+          22,
+          25,
+          26
+        ],
+        "best_epoch_counts": [
+          7,
+          10,
+          12,
+          15,
+          16
+        ],
+        "mean_fold_nb_epochs": 12.0,
+        "std_fold_nb_epochs": 3.6742346141747673,
+        "mean_fold_nb_epochs_kept": 12.0,
+        "std_fold_nb_epochs_kept": 3.6742346141747673,
+        "mean_fold_nb_epochs_trained": 22.0,
+        "std_fold_nb_epochs_trained": 3.6742346141747673,
+        "mean_time_per_epoch_s": 55.54827272727273,
+        "n_epoch_lines": 110,
+        "fold_train_secs": [
+          1382.36,
+          1109.03,
+          1443.59,
+          951.4,
+          1227.2
+        ],
+        "mean_fold_train_sec": 1222.716,
+        "std_fold_train_sec": 200.51715345575795
+      }
+    ]
+  },
+  {
+    "dataset": "organamnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-144406_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9756440544493193,
+        "ensemble_balanced_accuracy": 0.9705946622953917,
+        "ensemble_auc": 0.9993764069217452,
+        "counts": {
+          "n_samples": 17778
+        },
+        "timing": {
+          "eval_wall_sec": 18.149996042251587,
+          "throughput_img_per_s": 979.5043458199323,
+          "latency_ms_per_img": 1.020924515820204
+        },
+        "num_classes": 11,
+        "data_flag": "organamnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.0018704900009442105,
+        "fold_balanced_accuracy_std": 0.0028288644943171796,
+        "fold_auc_std": 0.00028629903041215565,
+        "fold_acc_values": [
+          0.9656879289008887,
+          0.9669254134323321,
+          0.9697941275734053,
+          0.9700753740578243,
+          0.9679379007762403
+        ],
+        "fold_bacc_values": [
+          0.9595282739105891,
+          0.9611888874495115,
+          0.9630322579199654,
+          0.9669837295170267,
+          0.9614549890103411
+        ],
+        "fold_auc_values": [
+          0.9985478423738201,
+          0.9988846310531446,
+          0.999176987409463,
+          0.9991198916648323,
+          0.99925390846985
+        ],
+        "n_samples": 17778,
+        "fold_epoch_counts": [
+          16,
+          18,
+          29,
+          32,
+          39
+        ],
+        "best_epoch_counts": [
+          6,
+          8,
+          19,
+          22,
+          29
+        ],
+        "mean_fold_nb_epochs": 16.8,
+        "std_fold_nb_epochs": 9.67987603226405,
+        "mean_fold_nb_epochs_kept": 16.8,
+        "std_fold_nb_epochs_kept": 9.67987603226405,
+        "mean_fold_nb_epochs_trained": 26.8,
+        "std_fold_nb_epochs_trained": 9.67987603226405,
+        "mean_time_per_epoch_s": 21.64082089552239,
+        "n_epoch_lines": 134,
+        "fold_train_secs": [
+          347.67,
+          627.04,
+          844.83,
+          392.94,
+          691.22
+        ],
+        "mean_fold_train_sec": 580.74,
+        "std_fold_train_sec": 208.37677017844382
+      },
+      {
+        "exp_dir": "resnet18_224_20251031-220314_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9745753178085274,
+        "ensemble_balanced_accuracy": 0.9728561131136725,
+        "ensemble_auc": 0.9988199684920995,
+        "counts": {
+          "n_samples": 17778
+        },
+        "timing": {
+          "eval_wall_sec": 18.113831520080566,
+          "throughput_img_per_s": 981.4599401728855,
+          "latency_ms_per_img": 1.018890286875946
+        },
+        "num_classes": 11,
+        "data_flag": "organamnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.0052307914551713375,
+        "fold_balanced_accuracy_std": 0.004451159154717825,
+        "fold_auc_std": 0.0003095281430896583,
+        "fold_acc_values": [
+          0.9606817414782315,
+          0.9644504443694454,
+          0.962425469681629,
+          0.9512881088986388,
+          0.9628192147598155
+        ],
+        "fold_bacc_values": [
+          0.9590164837283713,
+          0.9609391637903729,
+          0.9587029112794861,
+          0.9494737434335065,
+          0.9566330997336877
+        ],
+        "fold_auc_values": [
+          0.9978639701472051,
+          0.9983959420558179,
+          0.998509143805967,
+          0.9981091556995912,
+          0.9986220886746353
+        ],
+        "n_samples": 17778,
+        "fold_epoch_counts": [
+          18,
+          20,
+          32,
+          32,
+          42
+        ],
+        "best_epoch_counts": [
+          8,
+          10,
+          22,
+          22,
+          32
+        ],
+        "mean_fold_nb_epochs": 18.8,
+        "std_fold_nb_epochs": 9.85900603509299,
+        "mean_fold_nb_epochs_kept": 18.8,
+        "std_fold_nb_epochs_kept": 9.85900603509299,
+        "mean_fold_nb_epochs_trained": 28.8,
+        "std_fold_nb_epochs_trained": 9.85900603509299,
+        "mean_time_per_epoch_s": 21.793611111111108,
+        "n_epoch_lines": 144,
+        "fold_train_secs": [
+          694.69,
+          917.9,
+          694.26,
+          439.7,
+          395.36
+        ],
+        "mean_fold_train_sec": 628.3820000000001,
+        "std_fold_train_sec": 213.57521138933703
+      }
+    ]
+  },
+  {
+    "dataset": "pathmnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-172326_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9337047353760446,
+        "ensemble_balanced_accuracy": 0.9288473294256256,
+        "ensemble_auc": 0.9952348399986091,
+        "counts": {
+          "n_samples": 7180
+        },
+        "timing": {
+          "eval_wall_sec": 7.360657453536987,
+          "throughput_img_per_s": 975.4563427686509,
+          "latency_ms_per_img": 1.0251612052279926
+        },
+        "num_classes": 9,
+        "data_flag": "pathmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.02070679845832479,
+        "fold_balanced_accuracy_std": 0.019698117291613446,
+        "fold_auc_std": 0.0025544884418863775,
+        "fold_acc_values": [
+          0.9214484679665739,
+          0.8767409470752089,
+          0.9306406685236769,
+          0.9061281337047353,
+          0.9013927576601671
+        ],
+        "fold_bacc_values": [
+          0.9208322101761013,
+          0.8754826253490157,
+          0.9213397092668362,
+          0.891974388257286,
+          0.8973616768983574
+        ],
+        "fold_auc_values": [
+          0.9936184861651939,
+          0.9884477818495654,
+          0.9941517530142119,
+          0.9936291239093357,
+          0.994815717495086
+        ],
+        "n_samples": 7180,
+        "fold_epoch_counts": [
+          17,
+          17,
+          21,
+          25,
+          26
+        ],
+        "best_epoch_counts": [
+          7,
+          7,
+          11,
+          15,
+          16
+        ],
+        "mean_fold_nb_epochs": 11.2,
+        "std_fold_nb_epochs": 4.266145801540309,
+        "mean_fold_nb_epochs_kept": 11.2,
+        "std_fold_nb_epochs_kept": 4.266145801540309,
+        "mean_fold_nb_epochs_trained": 21.2,
+        "std_fold_nb_epochs_trained": 4.266145801540309,
+        "mean_time_per_epoch_s": 51.59905660377358,
+        "n_epoch_lines": 106,
+        "fold_train_secs": [
+          1297.42,
+          876.88,
+          884.7,
+          1345.03,
+          1097.92
+        ],
+        "mean_fold_train_sec": 1100.3899999999999,
+        "std_fold_train_sec": 220.88149967799475
+      },
+      {
+        "exp_dir": "resnet18_224_20251101-011915_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9750696378830084,
+        "ensemble_balanced_accuracy": 0.9640456101465575,
+        "ensemble_auc": 0.9972782190131402,
+        "counts": {
+          "n_samples": 7180
+        },
+        "timing": {
+          "eval_wall_sec": 7.361465692520142,
+          "throughput_img_per_s": 975.3492442809961,
+          "latency_ms_per_img": 1.025273773331496
+        },
+        "num_classes": 9,
+        "data_flag": "pathmnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.006988396631499047,
+        "fold_balanced_accuracy_std": 0.007820863186647958,
+        "fold_auc_std": 0.0004863529589580517,
+        "fold_acc_values": [
+          0.9640668523676881,
+          0.9618384401114206,
+          0.9603064066852368,
+          0.9495821727019499,
+          0.9683844011142061
+        ],
+        "fold_bacc_values": [
+          0.9461343959368175,
+          0.9457576533773039,
+          0.9454204248313458,
+          0.9352026660703577,
+          0.9572993524157855
+        ],
+        "fold_auc_values": [
+          0.9956197576573127,
+          0.9968005195037853,
+          0.9959703951048802,
+          0.9964492539682581,
+          0.9966198664960184
+        ],
+        "n_samples": 7180,
+        "fold_epoch_counts": [
+          16,
+          27,
+          27,
+          30,
+          41
+        ],
+        "best_epoch_counts": [
+          6,
+          17,
+          17,
+          20,
+          31
+        ],
+        "mean_fold_nb_epochs": 18.2,
+        "std_fold_nb_epochs": 8.927485648266257,
+        "mean_fold_nb_epochs_kept": 18.2,
+        "std_fold_nb_epochs_kept": 8.927485648266257,
+        "mean_fold_nb_epochs_trained": 28.2,
+        "std_fold_nb_epochs_trained": 8.927485648266257,
+        "mean_time_per_epoch_s": 51.14283687943262,
+        "n_epoch_lines": 141,
+        "fold_train_secs": [
+          1375.87,
+          2095.11,
+          1387.11,
+          824.55,
+          1533.29
+        ],
+        "mean_fold_train_sec": 1443.1860000000001,
+        "std_fold_train_sec": 453.7372848686782
+      }
+    ]
+  },
+  {
+    "dataset": "pneumoniamnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-153956_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9118589743589743,
+        "ensemble_balanced_accuracy": 0.8824786324786325,
+        "ensemble_auc": 0.9905982905982906,
+        "counts": {
+          "n_samples": 624
+        },
+        "timing": {
+          "eval_wall_sec": 0.824059009552002,
+          "throughput_img_per_s": 757.2273256732383,
+          "latency_ms_per_img": 1.3206073871025672
+        },
+        "num_classes": 2,
+        "data_flag": "pneumoniamnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.012045910559593682,
+        "fold_balanced_accuracy_std": 0.016386534670836242,
+        "fold_auc_std": 0.0058038362619606265,
+        "fold_acc_values": [
+          0.9134615384615384,
+          0.9086538461538461,
+          0.9102564102564102,
+          0.9166666666666666,
+          0.8862179487179487
+        ],
+        "fold_bacc_values": [
+          0.8846153846153846,
+          0.879059829059829,
+          0.882051282051282,
+          0.8897435897435897,
+          0.8482905982905983
+        ],
+        "fold_auc_values": [
+          0.988231426692965,
+          0.9843852728468113,
+          0.977865439403901,
+          0.9914968222660531,
+          0.9791913214990138
+        ],
+        "n_samples": 624,
+        "fold_epoch_counts": [
+          14,
+          16,
+          19,
+          20,
+          26
+        ],
+        "best_epoch_counts": [
+          4,
+          6,
+          9,
+          10,
+          16
+        ],
+        "mean_fold_nb_epochs": 9.0,
+        "std_fold_nb_epochs": 4.58257569495584,
+        "mean_fold_nb_epochs_kept": 9.0,
+        "std_fold_nb_epochs_kept": 4.58257569495584,
+        "mean_fold_nb_epochs_trained": 19.0,
+        "std_fold_nb_epochs_trained": 4.58257569495584,
+        "mean_time_per_epoch_s": 3.3463157894736844,
+        "n_epoch_lines": 95,
+        "fold_train_secs": [
+          68.2,
+          86.9,
+          63.98,
+          54.63,
+          47.42
+        ],
+        "mean_fold_train_sec": 64.22600000000001,
+        "std_fold_train_sec": 15.037356150600411
+      },
+      {
+        "exp_dir": "resnet18_224_20251031-230305_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.9342948717948718,
+        "ensemble_balanced_accuracy": 0.9132478632478633,
+        "ensemble_auc": 0.992713127328512,
+        "counts": {
+          "n_samples": 624
+        },
+        "timing": {
+          "eval_wall_sec": 0.8433189392089844,
+          "throughput_img_per_s": 739.9335779003126,
+          "latency_ms_per_img": 1.351472658988757
+        },
+        "num_classes": 2,
+        "data_flag": "pneumoniamnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.020851816258748903,
+        "fold_balanced_accuracy_std": 0.028136084880603124,
+        "fold_auc_std": 0.005092511691209103,
+        "fold_acc_values": [
+          0.9358974358974359,
+          0.9375,
+          0.9166666666666666,
+          0.9487179487179487,
+          0.8958333333333334
+        ],
+        "fold_bacc_values": [
+          0.9162393162393163,
+          0.9192307692307693,
+          0.8905982905982905,
+          0.9341880341880342,
+          0.8628205128205129
+        ],
+        "fold_auc_values": [
+          0.992132369055446,
+          0.9885930309007231,
+          0.9911461757615603,
+          0.9912886259040106,
+          0.9797939951786105
+        ],
+        "n_samples": 624,
+        "fold_epoch_counts": [
+          18,
+          19,
+          22,
+          22,
+          29
+        ],
+        "best_epoch_counts": [
+          8,
+          9,
+          12,
+          12,
+          19
+        ],
+        "mean_fold_nb_epochs": 12.0,
+        "std_fold_nb_epochs": 4.301162633521313,
+        "mean_fold_nb_epochs_kept": 12.0,
+        "std_fold_nb_epochs_kept": 4.301162633521313,
+        "mean_fold_nb_epochs_trained": 22.0,
+        "std_fold_nb_epochs_trained": 4.301162633521313,
+        "mean_time_per_epoch_s": 3.7197272727272734,
+        "n_epoch_lines": 110,
+        "fold_train_secs": [
+          110.01,
+          82.46,
+          70.8,
+          67.52,
+          81.29
+        ],
+        "mean_fold_train_sec": 82.416,
+        "std_fold_train_sec": 16.729621334626795
+      }
+    ]
+  },
+  {
+    "dataset": "tissuemnist",
+    "experiments": [
+      {
+        "exp_dir": "resnet18_224_20251031-193238_randaug0_numepochs100_bs128",
+        "aug_label": "no aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.6760998307952623,
+        "ensemble_balanced_accuracy": 0.669303792694254,
+        "ensemble_auc": 0.9420286782341418,
+        "counts": {
+          "n_samples": 47280
+        },
+        "timing": {
+          "eval_wall_sec": 47.557323694229126,
+          "throughput_img_per_s": 994.1686438031672,
+          "latency_ms_per_img": 1.0058655603686364
+        },
+        "num_classes": 8,
+        "data_flag": "tissuemnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.023350706892842982,
+        "fold_balanced_accuracy_std": 0.017017439156954677,
+        "fold_auc_std": 0.004259040370187561,
+        "fold_acc_values": [
+          0.6273477157360406,
+          0.6285744500846023,
+          0.6439932318104907,
+          0.5815566835871404,
+          0.6211505922165821
+        ],
+        "fold_bacc_values": [
+          0.6260400942443809,
+          0.6216424634273202,
+          0.6285042375802752,
+          0.5872998402962184,
+          0.6083100108229293
+        ],
+        "fold_auc_values": [
+          0.9308902288789106,
+          0.9302857501611064,
+          0.9307689710952162,
+          0.9216750750564573,
+          0.9245378583394945
+        ],
+        "n_samples": 47280,
+        "fold_epoch_counts": [
+          13,
+          14,
+          14,
+          14,
+          14
+        ],
+        "best_epoch_counts": [
+          3,
+          4,
+          4,
+          4,
+          4
+        ],
+        "mean_fold_nb_epochs": 3.8,
+        "std_fold_nb_epochs": 0.44721359549995787,
+        "mean_fold_nb_epochs_kept": 3.8,
+        "std_fold_nb_epochs_kept": 0.44721359549995787,
+        "mean_fold_nb_epochs_trained": 13.8,
+        "std_fold_nb_epochs_trained": 0.4472135954999579,
+        "mean_time_per_epoch_s": 96.72231884057972,
+        "n_epoch_lines": 69,
+        "fold_train_secs": [
+          1367.19,
+          1349.26,
+          1350.33,
+          1258.22,
+          1354.48
+        ],
+        "mean_fold_train_sec": 1335.896,
+        "std_fold_train_sec": 44.00334453197847
+      },
+      {
+        "exp_dir": "resnet18_224_20251101-035102_randaug1_numepochs100_bs128",
+        "aug_label": "aug",
+        "batch_size": 128,
+        "ensemble_accuracy": 0.6963409475465313,
+        "ensemble_balanced_accuracy": 0.6717817926532375,
+        "ensemble_auc": 0.9435547915406203,
+        "counts": {
+          "n_samples": 47280
+        },
+        "timing": {
+          "eval_wall_sec": 47.451756954193115,
+          "throughput_img_per_s": 996.3803878882942,
+          "latency_ms_per_img": 1.0036327612985008
+        },
+        "num_classes": 8,
+        "data_flag": "tissuemnist",
+        "folds_found": 5,
+        "fold_acc_std": 0.020975594785681263,
+        "fold_balanced_accuracy_std": 0.01393012251281959,
+        "fold_auc_std": 0.005756021751996634,
+        "fold_acc_values": [
+          0.6414340101522843,
+          0.6166032148900169,
+          0.6737098138747885,
+          0.6315989847715736,
+          0.6380287648054146
+        ],
+        "fold_bacc_values": [
+          0.621073190439435,
+          0.6134560408222066,
+          0.6230425525136734,
+          0.5925048573150953,
+          0.6279638182687769
+        ],
+        "fold_auc_values": [
+          0.930250934747599,
+          0.9242321677274257,
+          0.9344947572208879,
+          0.920237719356209,
+          0.9312987752709634
+        ],
+        "n_samples": 47280,
+        "fold_epoch_counts": [
+          16,
+          17,
+          18,
+          18,
+          20
+        ],
+        "best_epoch_counts": [
+          6,
+          7,
+          8,
+          8,
+          10
+        ],
+        "mean_fold_nb_epochs": 7.8,
+        "std_fold_nb_epochs": 1.4832396974191326,
+        "mean_fold_nb_epochs_kept": 7.8,
+        "std_fold_nb_epochs_kept": 1.4832396974191326,
+        "mean_fold_nb_epochs_trained": 17.8,
+        "std_fold_nb_epochs_trained": 1.4832396974191326,
+        "mean_time_per_epoch_s": 96.70528089887641,
+        "n_epoch_lines": 89,
+        "fold_train_secs": [
+          1749.52,
+          1545.33,
+          1931.64,
+          1741.59,
+          1641.45
+        ],
+        "mean_fold_train_sec": 1721.9060000000002,
+        "std_fold_train_sec": 143.86677458676834
+      }
+    ]
+  }
+]

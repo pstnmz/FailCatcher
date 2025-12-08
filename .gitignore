@@ -1,6 +1,7 @@
 **/gps_augment/
 **/ISIC_2018/
 **/AMOS_2022/amos22
-**/runs/
+**/runs/**/**.pt
+**/runs/**/figs
 **/models/
 **/uq_benchmark_results/

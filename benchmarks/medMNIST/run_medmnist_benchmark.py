@@ -38,7 +38,7 @@ class RepeatGrayToRGB:
         return x.repeat(3, 1, 1)
 
 
-def subsample_dataset_stratified(dataset, max_samples=1000, seed=42):
+def subsample_dataset_stratified(dataset, max_samples=None, seed=42):
     """
     Subsample a dataset to a maximum number of samples using stratified sampling.
     
@@ -47,13 +47,13 @@ def subsample_dataset_stratified(dataset, max_samples=1000, seed=42):
     
     Args:
         dataset: PyTorch dataset with labels
-        max_samples: Maximum number of samples to keep (default: 1000)
+        max_samples: Maximum number of samples to keep (default: None = use all samples)
         seed: Random seed for reproducibility (default: 42)
     
     Returns:
-        Subset: Subsampled dataset
+        Subset or original dataset: Subsampled dataset or original if max_samples is None
     """
-    if len(dataset) <= max_samples:
+    if max_samples is None or len(dataset) <= max_samples:
         return dataset
     
     # Extract labels from dataset
@@ -69,12 +69,16 @@ def subsample_dataset_stratified(dataset, max_samples=1000, seed=42):
     indices = np.arange(len(dataset))
     try:
         # Use stratified sampling to maintain class distribution
-        _, selected_indices = train_test_split(
+        # Note: train_test_split returns (train, test), we want the train part
+        selected_indices, _ = train_test_split(
             indices,
             train_size=max_samples,
             stratify=labels,
             random_state=seed
         )
+        # Ensure indices are in a list format (train_test_split may return array or list)
+        if isinstance(selected_indices, np.ndarray):
+            selected_indices = selected_indices.tolist()
         selected_indices = sorted(selected_indices)  # Keep order for consistency
         
         # Count samples per class
@@ -85,15 +89,17 @@ def subsample_dataset_stratified(dataset, max_samples=1000, seed=42):
         print(f"  Subsampled calibration: {len(dataset)} → {len(selected_indices)} samples (stratified)")
         print(f"  Class distribution: {class_dist}")
         
-        return Subset(dataset, selected_indices.tolist())
+        return Subset(dataset, selected_indices)
     
     except ValueError as e:
         # If stratification fails (e.g., too few samples per class), fall back to random sampling
         print(f"  Warning: Stratified sampling failed ({e}), using random sampling")
         np.random.seed(seed)
         selected_indices = np.random.choice(indices, size=max_samples, replace=False)
+        if isinstance(selected_indices, np.ndarray):
+            selected_indices = selected_indices.tolist()
         selected_indices = sorted(selected_indices)
-        return Subset(dataset, selected_indices.tolist())
+        return Subset(dataset, selected_indices)
 
 
 def create_cv_generator(n_splits=5, seed=42, batch_size=5000, num_workers=0):
@@ -147,7 +153,7 @@ def create_cv_generator(n_splits=5, seed=42, batch_size=5000, num_workers=0):
 
 def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                            batch_size=4000, image_size=224, gpu_id=0, per_fold_eval=True,
-                           model_backbone='resnet18', setup='', gps_calib_samples=1000):
+                           model_backbone='resnet18', setup='', gps_calib_samples=None):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -158,7 +164,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         batch_size: Batch size for inference
         image_size: Image size
         gpu_id: GPU device ID to use
-        gps_calib_samples: Max samples for GPS calibration (default: 1000)
+        gps_calib_samples: Max samples for GPS calibration (default: None = use all)
         per_fold_eval: If True, compute per-fold metrics (mean±std). If False, use ensemble-based evaluation
         model_backbone: Model architecture ('resnet18' or 'vit_b_16')
         setup: Training setup - '' (standard), 'DA', 'DO', or 'DADO'
@@ -509,6 +515,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     if 'TTA_calib' in methods:
         print("\n🔍 Running TTA Calibration Caching (BetterRandAugment)...")
+        print(f"  DEBUG: gps_calib_samples parameter = {gps_calib_samples}")
         setup_name = setup if setup else 'standard'
         aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set')
         
@@ -523,8 +530,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         
         # Compute correct/incorrect indices for the subsampled calibration set
         # These will be used by GPS for policy search
-        if isinstance(calib_dataset_tta_subsampled, Subset):
-            # Extract the indices that were selected in the subsample
+        # Check if subsampling actually occurred (compare dataset identity, not just isinstance)
+        if calib_dataset_tta_subsampled is not calib_dataset_tta:
+            # Subsampling occurred - need to remap indices
             subsample_indices = calib_dataset_tta_subsampled.indices
             # Map from full calib indices to subsampled indices
             correct_idx_calib_subsampled = []
@@ -538,9 +546,10 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             incorrect_idx_calib_subsampled = np.array(incorrect_idx_calib_subsampled)
             print(f"  Subsampled correct: {len(correct_idx_calib_subsampled)}, incorrect: {len(incorrect_idx_calib_subsampled)}")
         else:
-            # No subsampling occurred (dataset already ≤ 1000)
+            # No subsampling occurred - use original indices
             correct_idx_calib_subsampled = correct_idx_calib
             incorrect_idx_calib_subsampled = incorrect_idx_calib
+            print(f"  Using full calibration set: correct: {len(correct_idx_calib_subsampled)}, incorrect: {len(incorrect_idx_calib_subsampled)}")
         
         # Determine normalization parameters based on color
         # Note: nb_channels should always be 3 because models expect 3-channel input
@@ -605,7 +614,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             )
             
             # Compute correct/incorrect for subsampled set
-            if isinstance(calib_dataset_tta_subsampled, Subset):
+            # Check if subsampling actually occurred (compare dataset identity)
+            if calib_dataset_tta_subsampled is not calib_dataset_tta:
                 subsample_indices = calib_dataset_tta_subsampled.indices
                 gps_correct_idx = []
                 gps_incorrect_idx = []
@@ -618,6 +628,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             else:
                 gps_correct_idx = correct_idx_calib.tolist()
                 gps_incorrect_idx = incorrect_idx_calib.tolist()
+                print(f"  Using full calibration set: correct: {len(gps_correct_idx)}, incorrect: {len(gps_incorrect_idx)}")
         
         uncertainties, metrics = detector.run_gps(
             test_dataset_tta, y_true,
@@ -766,8 +777,8 @@ if __name__ == '__main__':
         help='Use ensemble-based evaluation (legacy mode)'
     )
     parser.add_argument(
-        '--gps-calib-samples', type=int, default=1000,
-        help='Maximum number of calibration samples for GPS augmentation caching (default: 1000). Higher values = better coverage but slower.'
+        '--gps-calib-samples', type=int, default=None,
+        help='Maximum number of calibration samples for GPS augmentation caching (default: None = use all). Specify a number to subsample (e.g., 1000, 2000).'
     )
     
     args = parser.parse_args()

@@ -557,7 +557,7 @@ def apply_randaugment_and_store_results(
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=worker_count,
-                pin_memory=False,  # Disable to save GPU memory
+                pin_memory=True,  # Disable to save GPU memory
                 worker_init_fn=_dl_worker_init,
                 persistent_workers=(worker_count > 0),  # Keep workers alive for speed
                 prefetch_factor=safe_prefetch,
