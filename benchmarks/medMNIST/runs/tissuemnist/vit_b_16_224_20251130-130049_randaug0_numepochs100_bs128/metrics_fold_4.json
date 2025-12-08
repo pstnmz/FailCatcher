@@ -1,0 +1,110 @@
+{
+  "data_flag": "tissuemnist",
+  "num_classes": 8,
+  "class_names": [
+    "Collecting Duct, Connecting Tubule",
+    "Distal Convoluted Tubule",
+    "Glomerular endothelial cells",
+    "Interstitial endothelial cells",
+    "Leukocytes",
+    "Podocytes",
+    "Proximal Tubule Segments",
+    "Thick Ascending Limb"
+  ],
+  "is_ensemble": false,
+  "metrics": {
+    "accuracy": 0.6511209813874789,
+    "balanced_accuracy": 0.6524273421800821,
+    "auc": 0.9382302300205666
+  },
+  "confusion_matrix": [
+    [
+      9083,
+      3093,
+      18,
+      452,
+      415,
+      211,
+      1054,
+      839
+    ],
+    [
+      225,
+      1565,
+      15,
+      76,
+      68,
+      43,
+      150,
+      91
+    ],
+    [
+      4,
+      3,
+      918,
+      180,
+      132,
+      430,
+      5,
+      5
+    ],
+    [
+      41,
+      31,
+      124,
+      3250,
+      651,
+      197,
+      55,
+      53
+    ],
+    [
+      38,
+      69,
+      134,
+      457,
+      2370,
+      150,
+      91,
+      60
+    ],
+    [
+      31,
+      11,
+      346,
+      195,
+      170,
+      1362,
+      32,
+      55
+    ],
+    [
+      379,
+      689,
+      14,
+      384,
+      416,
+      154,
+      8093,
+      1072
+    ],
+    [
+      357,
+      1312,
+      5,
+      164,
+      228,
+      87,
+      734,
+      4144
+    ]
+  ],
+  "counts": {
+    "n_samples": 47280
+  },
+  "timing": {
+    "eval_wall_sec": 115.11351680755615,
+    "throughput_img_per_s": 410.72500702972616,
+    "latency_ms_per_img": 2.4347190526132856
+  }
+}

@@ -1,0 +1,130 @@
+{
+  "data_flag": "pathmnist",
+  "num_classes": 9,
+  "class_names": [
+    "adipose",
+    "background",
+    "debris",
+    "lymphocytes",
+    "mucus",
+    "smooth muscle",
+    "normal colon mucosa",
+    "cancer-associated stroma",
+    "colorectal adenocarcinoma epithelium"
+  ],
+  "is_ensemble": false,
+  "metrics": {
+    "accuracy": 0.9584958217270195,
+    "balanced_accuracy": 0.9467844693570525,
+    "auc": 0.9976155953700078
+  },
+  "confusion_matrix": [
+    [
+      1333,
+      0,
+      0,
+      0,
+      1,
+      4,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      847,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      339,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      634,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      55,
+      3,
+      0,
+      0,
+      969,
+      1,
+      5,
+      0,
+      2
+    ],
+    [
+      0,
+      0,
+      3,
+      0,
+      2,
+      543,
+      0,
+      40,
+      4
+    ],
+    [
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      727,
+      0,
+      10
+    ],
+    [
+      0,
+      0,
+      16,
+      4,
+      6,
+      51,
+      6,
+      308,
+      30
+    ],
+    [
+      0,
+      0,
+      2,
+      4,
+      1,
+      0,
+      44,
+      0,
+      1182
+    ]
+  ],
+  "counts": {
+    "n_samples": 7180
+  },
+  "timing": {
+    "eval_wall_sec": 17.685569286346436,
+    "throughput_img_per_s": 405.9807113782356,
+    "latency_ms_per_img": 2.4631712097975536
+  }
+}

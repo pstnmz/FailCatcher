@@ -1,0 +1,50 @@
+{
+  "data_flag": "octmnist",
+  "num_classes": 4,
+  "class_names": [
+    "choroidal neovascularization",
+    "diabetic macular edema",
+    "drusen",
+    "normal"
+  ],
+  "is_ensemble": false,
+  "metrics": {
+    "accuracy": 0.957,
+    "balanced_accuracy": 0.957,
+    "auc": 0.99658
+  },
+  "confusion_matrix": [
+    [
+      248,
+      0,
+      2,
+      0
+    ],
+    [
+      4,
+      246,
+      0,
+      0
+    ],
+    [
+      28,
+      1,
+      216,
+      5
+    ],
+    [
+      0,
+      1,
+      2,
+      247
+    ]
+  ],
+  "counts": {
+    "n_samples": 1000
+  },
+  "timing": {
+    "eval_wall_sec": 2.605722188949585,
+    "throughput_img_per_s": 383.7707658325305,
+    "latency_ms_per_img": 2.605722188949585
+  }
+}
