@@ -1,16 +1,16 @@
 import subprocess, shlex
 
 #flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
-flags = ['tissuemnist']
+flags = ['pathmnist']
 #colors = [False, False, False, False, True, True, False, True]  # Colors for the flags
-colors = [False] 
+colors = [True] 
 use_randaugment = [False]  # <- enable/disable RandAugment here
-use_dropout = True        # <- enable/disable Dropout for MC Dropout
+use_dropout = False        # <- enable/disable Dropout for MC Dropout
 dropout_rate = 0.1         # <- dropout rate (default: 0.1 for ViT, lower than ResNet)
 learning_rate = 0.0001     # <- learning rate (ViT typically uses lower LR)
 num_epochs = 100
 batch_size = 128            # <- ViT uses smaller batch size due to larger model
-cuda = "cuda:2"            # <- specify CUDA device
+cuda = "cuda:0"            # <- specify CUDA device
 
 python = "/home/psteinmetz/venvs/venv_medMNIST/bin/python3.12"  # or path to your venv python
 

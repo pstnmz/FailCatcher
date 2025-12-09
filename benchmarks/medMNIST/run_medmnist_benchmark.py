@@ -296,7 +296,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         print(f"  AMOS: {len(test_dataset)} samples (filtered from {len(amos_images)})")
     
     print(f"  Models: {len(models)} folds")
-    print(f"  Train+val: {len(study_dataset)}, Calib: {len(calib_dataset)}, Test: {len(test_dataset)}")
+    # For organamnist: study=train (medMNIST), calib=val (medMNIST)
+    # For others: study=80% of (train+val), calib=20% of (train+val)
+    study_label = "Train" if flag == 'organamnist' else "Train+val"
+    calib_label = "Val" if flag == 'organamnist' else "Calib"
+    print(f"  {study_label}: {len(study_dataset)}, {calib_label}: {len(calib_dataset)}, Test: {len(test_dataset)}")
     print(f"  Task: {info['task']}, Classes: {len(info['label'])}")
     
     # ========================================================================

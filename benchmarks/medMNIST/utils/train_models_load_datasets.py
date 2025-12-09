@@ -1212,20 +1212,53 @@ def load_models(flag, device, waugmentation=False, size=224, model_backbone='res
     print(f"Loaded {len(models)} models: {model_backbone} with setup '{setup or 'standard'}' from {model_filename.rsplit('_', 1)[0]}_*")
     return models
 
-def load_datasets(dataflag, color, im_size, transform, batch_size, cache_test=False, transform_test=None):    
+def load_datasets(dataflag, color, im_size, transform, batch_size, cache_test=False, transform_test=None):
+    """
+    Load and prepare datasets for training and evaluation.
+    
+    Data Split Strategy:
+    --------------------
+    For organamnist:
+        - Training set: Original medMNIST train split (no mixing)
+        - Calibration set: Original medMNIST val split (no mixing)
+        - Rationale: OrganAMNIST images are slices from 3D volumes. Using the original
+          splits prevents data leakage from correlated slices appearing in both train and calib.
+    
+    For all other datasets:
+        - Combines medMNIST train + val splits
+        - Random 80/20 split: 80% for training (used in CV), 20% for calibration
+        - Rationale: Other datasets don't have the same volumetric correlation issue
+    
+    Args:
+        dataflag: Dataset name (e.g., 'breastmnist', 'organamnist')
+        color: Whether dataset uses color images
+        im_size: Image size
+        transform: Transform to apply
+        batch_size: Batch size for dataloaders
+        cache_test: Whether to cache test set
+        transform_test: Optional separate transform for test set
+    
+    Returns:
+        tuple: ([train_dataset, calibration_dataset, test_dataset], 
+                [train_loader, calib_loader, test_loader], 
+                info)
+    """
     datasets, info = get_datasets(dataflag, im_size=im_size, color=color, transform=transform, transform_test=transform_test)
     # Combine train_dataset and val_dataset
     combined_train_dataset = ConcatDataset([datasets[0], datasets[1]])
 
     # Set the random seed for reproducibility
     torch.manual_seed(42)
+    if dataflag != 'organamnist':
+        # Calculate the sizes for training and calibration datasets
+        train_size = int(0.8 * len(combined_train_dataset))
+        calibration_size = len(combined_train_dataset) - train_size
 
-    # Calculate the sizes for training and calibration datasets
-    train_size = int(0.8 * len(combined_train_dataset))
-    calibration_size = len(combined_train_dataset) - train_size
-
-    # Split the combined_train_dataset into training and calibration datasets
-    train_dataset, calibration_dataset = random_split(combined_train_dataset, [train_size, calibration_size])
+        # Split the combined_train_dataset into training and calibration datasets
+        train_dataset, calibration_dataset = random_split(combined_train_dataset, [train_size, calibration_size])
+    else:
+        # OrganAMNIST: Use original medMNIST splits to prevent volumetric data leakage
+        train_dataset, calibration_dataset = datasets[0], datasets[1]
     test_dataset = datasets[2]  # Use the test dataset as is
 
     dataloaders = get_dataloaders([train_dataset, calibration_dataset, test_dataset], batch_size=batch_size, use_cache_test=cache_test)
