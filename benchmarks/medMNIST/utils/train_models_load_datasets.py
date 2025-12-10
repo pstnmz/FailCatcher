@@ -832,7 +832,18 @@ def train_vit(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
             if not isinstance(labels, torch.Tensor):
                 labels = labels.to(device)
 
+            # Squeeze but preserve at least 1D (avoid 0-d tensors)
             labels = labels.squeeze()
+            if labels.ndim == 0:
+                labels = labels.unsqueeze(0)
+            
+            # Skip empty batches (edge case with certain dataset sizes)
+            if images.size(0) == 0 or labels.size(0) == 0:
+                continue
+            
+            # Skip mismatched batches
+            if images.size(0) != labels.size(0):
+                continue
 
             optimizer.zero_grad()
             outputs = model(images)
@@ -866,7 +877,19 @@ def train_vit(data_flag, info, num_epochs=10, learning_rate=0.001, device=None,
                 if not isinstance(labels, torch.Tensor):
                     labels = labels.to(device)
 
+                # Squeeze but preserve at least 1D (avoid 0-d tensors)
                 labels = labels.squeeze()
+                if labels.ndim == 0:
+                    labels = labels.unsqueeze(0)
+                
+                # Skip empty batches (edge case with certain dataset sizes)
+                if images.size(0) == 0 or labels.size(0) == 0:
+                    continue
+                
+                # Skip mismatched batches
+                if images.size(0) != labels.size(0):
+                    continue
+                
                 outputs = model(images)
                 
                 if num_classes == 2:

@@ -2,7 +2,7 @@ import sys
 import os
 # Add parent directory to path to import utils
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from benchmarks.medMNIST.utils import train_models_load_datasets as tr
+from utils import train_models_load_datasets as tr
 from torchvision import transforms
 import torch
 import json, time

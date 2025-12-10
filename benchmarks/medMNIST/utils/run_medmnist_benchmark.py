@@ -207,15 +207,14 @@ def subsample_dataset_failure_aware(dataset, models, device, max_samples=None,
         print(f"  Not enough failures to reach target ratio ({min_failure_ratio:.1%})")
         print(f"  Keeping ALL {n_incorrect} failures ({actual_failure_ratio:.1%} of final set)")
     else:
-        # Enough failures - cap at min_failure_ratio (interpreted as maximum)
+        # Enough failures - keep all if possible, or subsample if too many
         if n_incorrect + n_correct <= max_samples:
             # Can keep everything
             target_incorrect = n_incorrect
             target_correct = n_correct
         else:
-            # Cap failures at min_failure_ratio * max_samples, fill rest with correct
-            max_failures_allowed = int(max_samples * min_failure_ratio)
-            target_incorrect = min(n_incorrect, max_failures_allowed)
+            # Keep all failures, sample from correct to fill budget
+            target_incorrect = min(n_incorrect, max_samples)
             target_correct = max_samples - target_incorrect
         actual_failure_ratio = target_incorrect / max_samples
         print(f"  Target: keep {target_incorrect} failures ({actual_failure_ratio:.1%} of final set)")
@@ -790,9 +789,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     if 'GPS' in methods:
         print("\n🔍 Running GPS...")
         setup_name = setup if setup else 'standard'
-        # Include sample count in folder name if subsampling occurs
-        folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
-        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set')
         
         # If TTA_calib was run, use the subsampled indices
         # Otherwise, compute them now (GPS can run independently of TTA_calib)

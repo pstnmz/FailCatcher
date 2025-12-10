@@ -23,7 +23,8 @@ import sys
 from datetime import datetime
 
 
-def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples=None, dry_run=False):
+def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples=None, 
+                  min_failure_ratio=0.3, dry_run=False):
     """
     Run TTA_calib for a specific model configuration.
     
@@ -34,6 +35,7 @@ def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples
         gpu_id: GPU device ID
         batch_size: Batch size for inference
         gps_calib_samples: Max calibration samples for GPS (None = use all)
+        min_failure_ratio: Minimum target proportion of failures (default: 0.3)
         dry_run: If True, only print the command without executing
     """
     setup_str = setup if setup else "standard"
@@ -53,6 +55,9 @@ def run_tta_calib(flag, model, setup, gpu_id, batch_size=4000, gps_calib_samples
     # Only add --gps-calib-samples if explicitly set
     if gps_calib_samples is not None:
         cmd.extend(["--gps-calib-samples", str(gps_calib_samples)])
+    
+    # Add min-failure-ratio
+    cmd.extend(["--min-failure-ratio", str(min_failure_ratio)])
     
     # Add setup if not standard
     if setup:
@@ -126,7 +131,12 @@ def main():
     
     parser.add_argument(
         '--gps-calib-samples', type=int, default=None,
-        help='Maximum calibration samples for GPS augmentation (default: None = use all). Use 1000-3000 to subsample large datasets.'
+        help='Maximum calibration samples for GPS augmentation (default: None = use all). Use 2000-3000 to subsample large datasets.'
+    )
+    
+    parser.add_argument(
+        '--min-failure-ratio', type=float, default=0.3,
+        help='Minimum target proportion of failures in GPS calibration (default: 0.3 = 30%%). Actual ratio may be lower if not enough failures.'
     )
     
     parser.add_argument(
@@ -180,6 +190,7 @@ def main():
             gpu_id=args.gpu,
             batch_size=args.batch_size,
             gps_calib_samples=args.gps_calib_samples,
+            min_failure_ratio=args.min_failure_ratio,
             dry_run=args.dry_run
         )
         
