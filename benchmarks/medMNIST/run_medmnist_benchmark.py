@@ -39,9 +39,13 @@ class RepeatGrayToRGB:
 
 
 def subsample_dataset_failure_aware(dataset, models, device, max_samples=None, 
-                                     min_failure_ratio=0.3, seed=42, batch_size=256):
+                                     min_failure_ratio=0.3, seed=42, batch_size=256,
+                                     eval_dataset=None):
     """
     Subsample calibration dataset prioritizing failures for GPS.
+    
+    **CRITICAL**: Models expect NORMALIZED inputs! If `dataset` is unnormalized (e.g., for TTA),
+    pass the normalized version via `eval_dataset` to ensure accurate failure detection.
     
     Returns:
         tuple: (subsampled_dataset, correct_indices, incorrect_indices)
@@ -84,106 +88,36 @@ def subsample_dataset_failure_aware(dataset, models, device, max_samples=None,
         # No subsampling needed - compute indices on full dataset
         print(f"  No subsampling needed (dataset size: {len(dataset)})")
         
-        # Still need to compute correct/incorrect indices for GPS
-        labels = []
-        for i in range(len(dataset)):
-            _, label = dataset[i]
-            if isinstance(label, torch.Tensor):
-                label = label.squeeze().item() if label.numel() == 1 else label.squeeze().cpu().numpy()
-            if isinstance(label, np.ndarray):
-                label = label.item() if label.size == 1 else label[0]
-            labels.append(int(label))
-        labels = np.array(labels)
+        # Use eval_dataset if provided (for normalized inference), otherwise use dataset
+        inference_dataset = eval_dataset if eval_dataset is not None else dataset
         
-        # Get ensemble predictions
+        # Use evaluate_models_on_loader for consistent ensemble inference
         from torch.utils.data import DataLoader
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, 
+        loader = DataLoader(inference_dataset, batch_size=batch_size, shuffle=False, 
                            num_workers=4, pin_memory=True)
         
-        all_preds = []
-        for model in models:
-            model.eval()
-            preds = []
-            with torch.no_grad():
-                for batch in loader:
-                    if isinstance(batch, dict):
-                        images = batch['image'].to(device)
-                    else:
-                        images = batch[0].to(device)
-                    outputs = model(images)
-                    pred = torch.argmax(outputs, dim=1).cpu().numpy()
-                    preds.extend(pred)
-            all_preds.append(np.array(preds))
-        
-        all_preds = np.array(all_preds)
-        ensemble_preds = np.apply_along_axis(
-            lambda x: np.bincount(x).argmax(), axis=0, arr=all_preds
-        )
-        
-        correct_mask = (ensemble_preds == labels)
-        correct_indices = np.where(correct_mask)[0]
-        incorrect_indices = np.where(~correct_mask)[0]
+        y_true, y_scores, ensemble_preds, correct_indices, incorrect_indices, _ = \
+            uq.evaluate_models_on_loader(models, loader, device)
         
         print(f"    Full dataset: {len(correct_indices)} correct, {len(incorrect_indices)} incorrect")
-        return dataset, correct_indices, incorrect_indices
+        return dataset, np.array(correct_indices), np.array(incorrect_indices)
     
     print(f"  Running ensemble inference to identify failures...")
     
-    # Extract labels and get predictions
-    labels = []
-    for i in range(len(dataset)):
-        _, label = dataset[i]
-        if isinstance(label, torch.Tensor):
-            label = label.squeeze().item() if label.numel() == 1 else label.squeeze().cpu().numpy()
-        if isinstance(label, np.ndarray):
-            label = label.item() if label.size == 1 else label[0]
-        labels.append(int(label))
-    labels = np.array(labels)
+    # Use eval_dataset if provided (for normalized inference), otherwise use dataset
+    inference_dataset = eval_dataset if eval_dataset is not None else dataset
+    print(f"  Inference dataset type: {type(inference_dataset)}, length: {len(inference_dataset)}")
     
-    print(f"  Extracted {len(labels)} labels from calibration dataset")
-    
-    # Get ensemble predictions
+    # Use evaluate_models_on_loader for consistent ensemble inference (soft voting)
     from torch.utils.data import DataLoader
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, 
+    loader = DataLoader(inference_dataset, batch_size=batch_size, shuffle=False, 
                        num_workers=4, pin_memory=True)
     
-    all_preds = []
-    for model_idx, model in enumerate(models):
-        model.eval()
-        preds = []
-        with torch.no_grad():
-            for batch in loader:
-                if isinstance(batch, dict):
-                    images = batch['image'].to(device)
-                else:
-                    images = batch[0].to(device)
-                
-                outputs = model(images)
-                pred = torch.argmax(outputs, dim=1).cpu().numpy()
-                preds.extend(pred)
-        preds_array = np.array(preds)
-        all_preds.append(preds_array)
+    labels, y_scores, ensemble_preds, correct_indices, incorrect_indices, _ = \
+        uq.evaluate_models_on_loader(models, loader, device)
     
-    # Ensemble: majority vote
-    all_preds = np.array(all_preds)  # (n_models, n_samples)
-    print(f"  Ensemble predictions shape: {all_preds.shape} (models × samples)")
-    
-    ensemble_preds = np.apply_along_axis(
-        lambda x: np.bincount(x).argmax(), 
-        axis=0, 
-        arr=all_preds
-    )
-    
-    print(f"  Final ensemble: {len(ensemble_preds)} predictions, {len(labels)} labels")
-    
-    # Sanity check: lengths must match
-    assert len(ensemble_preds) == len(labels), f"Shape mismatch: {len(ensemble_preds)} preds vs {len(labels)} labels"
-    assert len(ensemble_preds) == len(dataset), f"Count mismatch: {len(ensemble_preds)} preds vs {len(dataset)} samples"
-    
-    # Identify correct and incorrect predictions
-    correct_mask = (ensemble_preds == labels)
-    correct_indices = np.where(correct_mask)[0]
-    incorrect_indices = np.where(~correct_mask)[0]
+    correct_indices = np.array(correct_indices)
+    incorrect_indices = np.array(incorrect_indices)
     
     n_correct = len(correct_indices)
     n_incorrect = len(incorrect_indices)
@@ -729,6 +663,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         # Subsample calibration dataset (failure-aware for GPS)
         # Prioritizes failures (incorrect predictions) to maximize information density
         # Using fixed seed ensures consistency between TTA_calib and GPS search
+        # CRITICAL: Pass normalized calib_dataset for accurate ensemble inference,
+        #           but return subset of unnormalized calib_dataset_tta for augmentation
         # Returns: (subsampled_dataset, correct_indices, incorrect_indices)
         calib_dataset_tta_subsampled, correct_idx_calib_subsampled, incorrect_idx_calib_subsampled = \
             subsample_dataset_failure_aware(
@@ -738,7 +674,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                 max_samples=gps_calib_samples,
                 min_failure_ratio=min_failure_ratio,
                 seed=42,
-                batch_size=batch_size
+                batch_size=batch_size,
+                eval_dataset=calib_dataset  # Use normalized data for ensemble inference!
             )
         
         # correct_idx_calib_subsampled and incorrect_idx_calib_subsampled 
@@ -810,6 +747,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                     models=models,
                     device=device,
                     max_samples=gps_calib_samples,
+                    eval_dataset=calib_dataset,  # Use normalized data for ensemble inference!
                     min_failure_ratio=min_failure_ratio,
                     seed=42,
                     batch_size=batch_size
