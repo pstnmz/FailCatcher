@@ -366,8 +366,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         
         # Load AMOS external test dataset
         print("  Loading AMOS external test dataset...")
-        amos_path = '/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/Data_models/AMOS_2022/amos_external_test_224.npz'
-        amos_data = np.load(amos_path)
+        project_root = Path(__file__).resolve().parent.parent.parent
+        amos_path = project_root / 'benchmarks' / 'medMNIST' / 'Data' / 'AMOS_2022' / 'amos_external_test_224.npz'
+        amos_data = np.load(str(amos_path))
         amos_images = amos_data['test_images']  # (N, 224, 224, 1)
         amos_labels = amos_data['test_labels']  # (N, 15) - AMOS organ labels
         

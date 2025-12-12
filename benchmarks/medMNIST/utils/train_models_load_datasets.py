@@ -23,10 +23,21 @@ import random
 import gc
 import numpy as np
 import os, json, time
+from pathlib import Path
 from monai.data import CacheDataset as MONAI_CacheDataset
 MONAI_AVAILABLE = True
 
 torch.backends.cudnn.benchmark=True
+
+def _get_project_root():
+    """Get the UQ_toolbox project root directory."""
+    current = Path(__file__).resolve()
+    # Walk up until we find the directory containing 'FailCatcher' and 'benchmarks'
+    for parent in current.parents:
+        if (parent / 'FailCatcher').exists() and (parent / 'benchmarks').exists():
+            return parent
+    # Fallback: assume we're in benchmarks/medMNIST/utils
+    return current.parent.parent.parent
 
 # Custom RandAugment without flip operations for anatomical consistency
 class RandAugmentNoFlip(T.RandAugment):
@@ -1212,7 +1223,15 @@ def load_models(flag, device, waugmentation=False, size=224, model_backbone='res
         
         # Construct filename
         model_filename = f"{flag}_{model_backbone}_{size}_randaug{randaug}{dropout_suffix}_fold_{i}.pt"
-        model_path = f'/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/models/{size}*{size}/{model_filename}'
+        
+        # Allow environment variable override for models directory
+        models_base_dir = os.environ.get('MEDMNIST_MODELS_DIR')
+        if models_base_dir:
+            model_path = Path(models_base_dir) / f'{size}*{size}' / model_filename
+        else:
+            project_root = _get_project_root()
+            model_path = project_root / 'benchmarks' / 'medMNIST' / 'models' / f'{size}*{size}' / model_filename
+        model_path = str(model_path)
         
         # Load the state dictionary
         if not os.path.exists(model_path):
