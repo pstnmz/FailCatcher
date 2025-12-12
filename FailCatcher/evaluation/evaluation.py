@@ -253,7 +253,7 @@ def compute_all_metrics(uncertainties, predictions, labels, correct_idx=None, in
     }
 
 
-def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels):
+def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, predictions_per_fold=None):
     """
     Compute metrics independently for each fold, then aggregate with mean±std.
     
@@ -264,8 +264,9 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels):
     
     Args:
         uncertainties_per_fold: Array of uncertainty scores [num_folds, N]
-        predictions: Array of predicted labels [N] (ensemble predictions)
+        predictions: Array of predicted labels [N] (ensemble predictions, used if predictions_per_fold=None)
         labels: Array of true labels [N]
+        predictions_per_fold: Optional [num_folds, N] array of per-fold predictions (CORRECT approach)
     
     Returns:
         dict: Aggregated metrics with mean and std:
@@ -277,10 +278,10 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels):
     """
     num_folds = uncertainties_per_fold.shape[0]
     
-    # Compute correct/incorrect for ensemble predictions (same for all folds)
-    errors = (predictions != labels)
-    correct_idx = np.where(~errors)[0]
-    incorrect_idx = np.where(errors)[0]
+    # Compute correct/incorrect for ensemble predictions (for accuracy reporting)
+    errors_ensemble = (predictions != labels)
+    correct_idx_ensemble = np.where(~errors_ensemble)[0]
+    incorrect_idx_ensemble = np.where(errors_ensemble)[0]
     
     # Compute metrics for each fold independently
     per_fold_metrics = []
@@ -290,11 +291,16 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels):
     
     for fold_idx in range(num_folds):
         fold_uncertainties = uncertainties_per_fold[fold_idx]
-        
+    
+        fold_predictions = predictions_per_fold[fold_idx]
+        fold_errors = (fold_predictions != labels)
+        fold_correct_idx = np.where(~fold_errors)[0]
+        fold_incorrect_idx = np.where(fold_errors)[0]
+
         # Compute metrics for this fold
         fold_metrics = compute_all_metrics(
-            fold_uncertainties, predictions, labels,
-            correct_idx, incorrect_idx
+            fold_uncertainties, fold_predictions, labels,
+            fold_correct_idx, fold_incorrect_idx
         )
         
         per_fold_metrics.append(fold_metrics)
@@ -319,10 +325,10 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels):
         'aurc_std': float(np.std(aurc_valid)) if len(aurc_valid) > 0 else np.nan,
         'augrc_mean': float(np.mean(augrc_valid)) if len(augrc_valid) > 0 else np.nan,
         'augrc_std': float(np.std(augrc_valid)) if len(augrc_valid) > 0 else np.nan,
-        'accuracy': float(len(correct_idx) / len(labels)),  # Ensemble accuracy
-        'error_rate': float(len(incorrect_idx) / len(labels)),
-        'n_correct': len(correct_idx),
-        'n_incorrect': len(incorrect_idx),
+        'accuracy': float(len(correct_idx_ensemble) / len(labels)),  # Ensemble accuracy
+        'error_rate': float(len(incorrect_idx_ensemble) / len(labels)),
+        'n_correct': len(correct_idx_ensemble),
+        'n_incorrect': len(incorrect_idx_ensemble),
         'n_total': len(labels),
         'num_folds': num_folds,
         'per_fold_metrics': per_fold_metrics,  # Full details per fold
@@ -478,7 +484,8 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
 
 def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
                                        method_name='UQ Method', save_path=None,
-                                       uncertainties_per_fold=None, ensemble_uncertainties=None):
+                                       uncertainties_per_fold=None, ensemble_uncertainties=None,
+                                       predictions_per_fold=None):
     """
     Plot ROC curve for failure prediction (AUROC_f).
     
@@ -490,40 +497,98 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
     
     Args:
         uncertainties: Array of uncertainty scores [N] (higher = more uncertain)
-        predictions: Array of predicted labels [N]
+        predictions: Array of predicted labels [N] (ensemble predictions)
         labels: Array of true labels [N]
         method_name: Name of the UQ method for plot title
         save_path: Path to save figure (optional)
         uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
         ensemble_uncertainties: Optional [N] array for ensemble reference
+        predictions_per_fold: Optional [num_folds, N] array of per-fold predictions
     
     Returns:
         matplotlib figure
     """
+    # Compute ROC for ensemble predictions (reference)
     errors = (predictions != labels)
     correct_idx = np.where(~errors)[0]
     incorrect_idx = np.where(errors)[0]
     
-    # Compute ROC curve for main uncertainties
-    fpr, tpr, thresholds, auroc_f = compute_roc_curve(uncertainties, correct_idx, incorrect_idx)
-    
     # Create figure
     fig, ax = plt.subplots(figsize=(8, 8))
     
-    # Plot per-fold curves if provided (semi-transparent)
+    # Compute average ROC curve if per-fold data is available
     if uncertainties_per_fold is not None:
         num_folds = uncertainties_per_fold.shape[0]
+        
+        # Collect all fold ROC curves
+        fold_fprs = []
+        fold_tprs = []
+        fold_aurocs = []
+        
+        # If per-fold predictions available, use them (CORRECT approach)
+        # Otherwise fall back to ensemble predictions (legacy, less accurate)
         for fold_idx in range(num_folds):
             fold_uncertainties = uncertainties_per_fold[fold_idx]
-            fpr_fold, tpr_fold, _, auroc_fold = compute_roc_curve(fold_uncertainties, correct_idx, incorrect_idx)
-            ax.plot(fpr_fold, tpr_fold, '-', alpha=0.3, linewidth=1.5,
-                   color='cornflowerblue', label=f'Fold {fold_idx+1}' if fold_idx < 3 else '')
-    
-    # Determine label for main curve
-    label_main = 'Average' if uncertainties_per_fold is not None else method_name
-    
-    # Plot main ROC curve
-    ax.plot(fpr, tpr, 'b-', linewidth=2.5, label=f'{label_main}: AUROC_f = {auroc_f:.4f}')
+            
+            if predictions_per_fold is not None:
+                # CORRECT: Use fold's own predictions
+                fold_predictions = predictions_per_fold[fold_idx]
+                fold_errors = (fold_predictions != labels)
+                fold_correct_idx = np.where(~fold_errors)[0]
+                fold_incorrect_idx = np.where(fold_errors)[0]
+            else:
+                # LEGACY: Use ensemble predictions (less accurate)
+                fold_correct_idx = correct_idx
+                fold_incorrect_idx = incorrect_idx
+            
+            fpr_fold, tpr_fold, _, auroc_fold = compute_roc_curve(
+                fold_uncertainties, fold_correct_idx, fold_incorrect_idx
+            )
+            
+            # Store for averaging
+            fold_fprs.append(fpr_fold)
+            fold_tprs.append(tpr_fold)
+            fold_aurocs.append(auroc_fold)
+            
+            # Plot individual fold (semi-transparent)
+            ax.plot(fpr_fold, tpr_fold, '-', alpha=0.6, linewidth=1.5,
+                   color='cornflowerblue')
+        
+        # Compute average ROC curve by interpolating to common FPR points
+        # This is the CORRECT way to average ROC curves
+        mean_fpr = np.linspace(0, 1, 100)
+        interpolated_tprs = []
+        
+        for fpr_fold, tpr_fold in zip(fold_fprs, fold_tprs):
+            # Interpolate this fold's TPR to common FPR points
+            interp_tpr = np.interp(mean_fpr, fpr_fold, tpr_fold)
+            interpolated_tprs.append(interp_tpr)
+        
+        # Compute summary statistics
+        mean_auroc = np.mean(fold_aurocs)
+        std_auroc = np.std(fold_aurocs)
+        
+        # Plot ensemble curve if available
+        ensemble_auroc = None
+        if ensemble_uncertainties is not None:
+            fpr_ens, tpr_ens, _, ensemble_auroc = compute_roc_curve(
+                ensemble_uncertainties, correct_idx, incorrect_idx
+            )
+            ax.plot(fpr_ens, tpr_ens, 'g-', linewidth=2.5, label='Ensemble', alpha=0.8)
+        
+        # Add text annotation with mean±std and ensemble
+        text_lines = [f'Per-fold mean: {mean_auroc:.4f}±{std_auroc:.4f}']
+        if ensemble_auroc is not None:
+            text_lines.append(f'Ensemble: {ensemble_auroc:.4f}')
+        text_lines.append(f'({num_folds} folds)')
+        
+        ax.text(0.98, 0.12, '\n'.join(text_lines),
+                transform=ax.transAxes, fontsize=11, verticalalignment='bottom', 
+                horizontalalignment='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    else:
+        # Single curve (no folds)
+        fpr, tpr, thresholds, auroc_f = compute_roc_curve(uncertainties, correct_idx, incorrect_idx)
+        ax.plot(fpr, tpr, 'b-', linewidth=2.5, label=f'AUROC_f = {auroc_f:.4f}')
     
     # Plot diagonal (random baseline)
     ax.plot([0, 1], [0, 1], 'r--', linewidth=2, alpha=0.7, label='Random')
@@ -689,7 +754,8 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
 
 def save_all_evaluation_plots(uncertainties, predictions, labels, 
                                method_name='UQ Method', output_dir='./figures',
-                               uncertainties_per_fold=None, ensemble_uncertainties=None):
+                               uncertainties_per_fold=None, ensemble_uncertainties=None,
+                               predictions_per_fold=None):
     """
     Generate and save all evaluation plots for a UQ method.
     
@@ -706,6 +772,7 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
         output_dir: Directory to save figures
         uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
         ensemble_uncertainties: Optional [N] array for ensemble reference
+        predictions_per_fold: Optional [num_folds, N] array of per-fold predictions
     
     Returns:
         dict: Paths to saved figures
@@ -722,7 +789,8 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
                                                 method_name=method_name,
                                                 save_path=roc_path,
                                                 uncertainties_per_fold=uncertainties_per_fold,
-                                                ensemble_uncertainties=ensemble_uncertainties)
+                                                ensemble_uncertainties=ensemble_uncertainties,
+                                                predictions_per_fold=predictions_per_fold)
     plt.close(fig_roc)
     
     # Save risk-coverage curves
