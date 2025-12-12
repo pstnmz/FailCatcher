@@ -1,4 +1,5 @@
 import subprocess, shlex
+from pathlib import Path
 
 #flags = ['breastmnist', 'organamnist', 'pneumoniamnist', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'dermamnist-e']
 flags = ['organamnist', 'organamnist', 'organamnist', 'organamnist']
@@ -13,8 +14,9 @@ batch_size = 128            # <- ViT uses smaller batch size due to larger model
 cuda = "cuda:2"            # <- specify CUDA device
 
 python = "/home/psteinmetz/venvs/venv_medMNIST/bin/python3.12"  # or path to your venv python
+script_path = Path(__file__).parent / 'train_vit_medMNIST.py'
 
 for f, c, r, d in zip(flags, colors, use_randaugment, use_dropouts):
-    cmd = f"{python} /mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/benchmarks/medMNIST/trainings/train_vit_medMNIST.py --flag {shlex.quote(f)} --color {str(c)} --batch_size {str(batch_size)} --use_randaugment {str(r)} --use_dropout {str(d)} --dropout_rate {str(dropout_rate)} --learning_rate {str(learning_rate)} --num_epochs {str(num_epochs)} --cuda {shlex.quote(cuda)}"
+    cmd = f"{python} {script_path} --flag {shlex.quote(f)} --color {str(c)} --batch_size {str(batch_size)} --use_randaugment {str(r)} --use_dropout {str(d)} --dropout_rate {str(dropout_rate)} --learning_rate {str(learning_rate)} --num_epochs {str(num_epochs)} --cuda {shlex.quote(cuda)}"
     print("Running:", cmd)
     subprocess.run(cmd, shell=True, check=True)

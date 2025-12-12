@@ -5,3 +5,5 @@
 **/runs/**/figs
 **/models/
 **/uq_benchmark_results/
+**/.venv/
+**/__pycache__/
