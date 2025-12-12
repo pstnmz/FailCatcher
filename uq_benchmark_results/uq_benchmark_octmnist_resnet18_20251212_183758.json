@@ -1,0 +1,222 @@
+{
+  "flag": "octmnist",
+  "model_backbone": "resnet18",
+  "setup": "",
+  "timestamp": "20251212_183758",
+  "test_accuracy": 0.922,
+  "test_size": 1000,
+  "methods": {
+    "MSR": {
+      "auroc_f_mean": 0.7641190214647132,
+      "auroc_f_std": 0.02923731929905814,
+      "aurc_mean": 0.04175938417492658,
+      "aurc_std": 0.007769914655986496,
+      "augrc_mean": 0.024675399999999997,
+      "augrc_std": 0.0027505256115877195,
+      "accuracy": 0.922,
+      "error_rate": 0.078,
+      "n_correct": 922,
+      "n_incorrect": 78,
+      "n_total": 1000,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.783670525005782,
+          "aurc": 0.04123841536593407,
+          "augrc": 0.024742999999999987,
+          "accuracy": 0.899,
+          "error_rate": 0.101,
+          "n_correct": 899,
+          "n_incorrect": 101,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7640502648707583,
+          "aurc": 0.05281928394908533,
+          "augrc": 0.026524500000000006,
+          "accuracy": 0.899,
+          "error_rate": 0.101,
+          "n_correct": 899,
+          "n_incorrect": 101,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7886139354066986,
+          "aurc": 0.03200147849456608,
+          "augrc": 0.020836999999999994,
+          "accuracy": 0.912,
+          "error_rate": 0.088,
+          "n_correct": 912,
+          "n_incorrect": 88,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7762243257292761,
+          "aurc": 0.03489803875081685,
+          "augrc": 0.022651,
+          "accuracy": 0.909,
+          "error_rate": 0.091,
+          "n_correct": 909,
+          "n_incorrect": 91,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7080360563110515,
+          "aurc": 0.04783970431423057,
+          "augrc": 0.02862149999999999,
+          "accuracy": 0.908,
+          "error_rate": 0.092,
+          "n_correct": 908,
+          "n_incorrect": 92,
+          "n_total": 1000
+        }
+      ],
+      "auroc_f": 0.7641190214647132,
+      "aurc": 0.04175938417492658,
+      "augrc": 0.024675399999999997,
+      "time_seconds": 0.0006517009969684295
+    },
+    "MSR_calibrated": {
+      "auroc_f_mean": 0.7628389007037395,
+      "auroc_f_std": 0.029769606928368622,
+      "aurc_mean": 0.041929651760047905,
+      "aurc_std": 0.007845647341236009,
+      "augrc_mean": 0.024784499999999994,
+      "augrc_std": 0.0027885310290545456,
+      "accuracy": 0.922,
+      "error_rate": 0.078,
+      "n_correct": 922,
+      "n_incorrect": 78,
+      "n_total": 1000,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.782971178096675,
+          "aurc": 0.041329148006656054,
+          "augrc": 0.024806499999999995,
+          "accuracy": 0.899,
+          "error_rate": 0.101,
+          "n_correct": 899,
+          "n_incorrect": 101,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7624643443209725,
+          "aurc": 0.05322998575104808,
+          "augrc": 0.026668500000000005,
+          "accuracy": 0.899,
+          "error_rate": 0.101,
+          "n_correct": 899,
+          "n_incorrect": 101,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7868445972886762,
+          "aurc": 0.03223352427905133,
+          "augrc": 0.020978999999999994,
+          "accuracy": 0.912,
+          "error_rate": 0.088,
+          "n_correct": 912,
+          "n_incorrect": 88,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7762545485317763,
+          "aurc": 0.03490115651947734,
+          "augrc": 0.022648499999999988,
+          "accuracy": 0.909,
+          "error_rate": 0.091,
+          "n_correct": 909,
+          "n_incorrect": 91,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7056598352805976,
+          "aurc": 0.047954444244006716,
+          "augrc": 0.028819999999999988,
+          "accuracy": 0.908,
+          "error_rate": 0.092,
+          "n_correct": 908,
+          "n_incorrect": 92,
+          "n_total": 1000
+        }
+      ],
+      "auroc_f": 0.7628389007037395,
+      "aurc": 0.041929651760047905,
+      "augrc": 0.024784499999999994,
+      "time_seconds": 6.392393583999365
+    },
+    "MLS": {
+      "auroc_f_mean": 0.7225140372709588,
+      "auroc_f_std": 0.018971087799029913,
+      "aurc_mean": 0.04409345117723077,
+      "aurc_std": 0.006044635585995632,
+      "augrc_mean": 0.028249899999999988,
+      "augrc_std": 0.0024064268407745096,
+      "accuracy": 0.922,
+      "error_rate": 0.078,
+      "n_correct": 922,
+      "n_incorrect": 78,
+      "n_total": 1000,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.7025187502065001,
+          "aurc": 0.05012641572988656,
+          "augrc": 0.03211149999999999,
+          "accuracy": 0.899,
+          "error_rate": 0.101,
+          "n_correct": 899,
+          "n_incorrect": 101,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7448209782046059,
+          "aurc": 0.05152871670989958,
+          "augrc": 0.028270499999999983,
+          "accuracy": 0.899,
+          "error_rate": 0.101,
+          "n_correct": 899,
+          "n_incorrect": 101,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7261513157894736,
+          "aurc": 0.037895815806876794,
+          "augrc": 0.025849999999999998,
+          "accuracy": 0.912,
+          "error_rate": 0.088,
+          "n_correct": 912,
+          "n_incorrect": 88,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.7404103047667404,
+          "aurc": 0.036841055254321256,
+          "augrc": 0.02561349999999999,
+          "accuracy": 0.909,
+          "error_rate": 0.091,
+          "n_correct": 909,
+          "n_incorrect": 91,
+          "n_total": 1000
+        },
+        {
+          "auroc_f": 0.6986688373874737,
+          "aurc": 0.04407525238516969,
+          "augrc": 0.02940399999999999,
+          "accuracy": 0.908,
+          "error_rate": 0.092,
+          "n_correct": 908,
+          "n_incorrect": 92,
+          "n_total": 1000
+        }
+      ],
+      "auroc_f": 0.7225140372709588,
+      "aurc": 0.04409345117723077,
+      "augrc": 0.028249899999999988,
+      "time_seconds": 0.0006657510020886548
+    }
+  },
+  "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_octmnist_resnet18_20251212_183758.npz",
+  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/octmnist/20251212_183758"
+}
