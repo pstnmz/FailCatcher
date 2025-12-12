@@ -42,27 +42,53 @@ DERMAMNIST_E_INFO = {
 
 class DermaMNIST_E(MedMNIST):
     INFO = DERMAMNIST_E_INFO
-    flag = 'dermamnist-e'
+    flag = 'dermamnist-e'  # User-facing flag
     available_sizes = (224,)  # only 224 supported
-    # If your cached file is not ~/.medmnist/dermamnist_e.npz, set:
-    # filename = 'dermamnist_extended_224_wsitesources.npz'
+    
     def __init__(self, split='train', transform=None, target_transform=None,
-                 download=False, as_rgb=True, size=224, **kwargs):
-        super().__init__(split=split, transform=transform, target_transform=target_transform,
-                         download=download, as_rgb=as_rgb, size=size, **kwargs)
+                 download=False, as_rgb=True, size=224, root=None, **kwargs):
+        # Use custom filename for local file
+        # File is located at: benchmarks/medMNIST/Data/ISIC_2018/dermamnist_extended_224_wsitesources.npz
+        if root is None:
+            # Default to the local data directory
+            import os
+            script_dir = Path(__file__).parent.parent  # Go up to medMNIST/
+            root = script_dir / "Data" / "ISIC_2018"
+        
+        self.root = Path(root)
+        
+        # Load the NPZ file directly (bypass download)
+        npz_filename = f"dermamnist_extended_{size}_wsitesources.npz"
+        npz_path = self.root / npz_filename
+        
+        if not npz_path.exists():
+            raise FileNotFoundError(
+                f"Could not find {npz_filename} at {self.root}\n"
+                f"Expected path: {npz_path}"
+            )
+        
+        # Load data directly instead of calling parent init (which tries to download)
+        self.split = split
+        self.transform = transform
+        self.target_transform = target_transform
+        self.as_rgb = as_rgb
+        self.size = size
+        
+        # Load the NPZ file
+        npz_data = np.load(npz_path, allow_pickle=True)
+        
+        # Load images and labels for the specified split
+        self.imgs = npz_data[f'{split}_images']
+        self.labels = npz_data[f'{split}_labels']
+        
+        # Store as 'data' and 'targets' for compatibility
+        self.data = self.imgs
+        self.targets = self.labels
 
-        # after base init, read any extra arrays you embedded in the NPZ
-        try:
-            npz_path = Path.home() / ".medmnist" / f"{self.flag}_{self.size}.npz"
-            with np.load(npz_path, allow_pickle=True) as z:
-                # Only attach for test split (or attach all and index per split if you prefer)
-                if self.split == 'test' and 'test_centers' in z.files:
-                    # store as a numpy array attribute
-                    self.test_centers = z['test_centers']
-                else:
-                    self.test_centers = None
-        except Exception:
-            # keep training robust even if the metadata is missing
+        # Load extra metadata if present (test centers, etc.)
+        if self.split == 'test' and 'test_centers' in npz_data.files:
+            self.test_centers = npz_data['test_centers']
+        else:
             self.test_centers = None
     def __len__(self):
         # Prefer explicit length attributes if present
@@ -132,7 +158,10 @@ class DermaMNIST_E(MedMNIST):
 # Register into medmnist module
 setattr(medmnist, 'DermaMNIST_E', DermaMNIST_E)
 try:
+    # Register with both hyphen and underscore for compatibility
     medmnist.INFO['dermamnist-e'] = DERMAMNIST_E_INFO
+    medmnist.INFO['dermamnist_e'] = DERMAMNIST_E_INFO
 except Exception:
     from medmnist.info import INFO as _INFO
     _INFO['dermamnist-e'] = DERMAMNIST_E_INFO
+    _INFO['dermamnist_e'] = DERMAMNIST_E_INFO

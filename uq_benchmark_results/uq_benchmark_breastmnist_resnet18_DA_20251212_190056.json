@@ -1,0 +1,222 @@
+{
+  "flag": "breastmnist",
+  "model_backbone": "resnet18",
+  "setup": "DA",
+  "timestamp": "20251212_190056",
+  "test_accuracy": 0.9166666666666666,
+  "test_size": 156,
+  "methods": {
+    "MSR": {
+      "auroc_f_mean": 0.7240054108157952,
+      "auroc_f_std": 0.0373898564961048,
+      "aurc_mean": 0.08226183716550076,
+      "aurc_std": 0.017420777621742767,
+      "augrc_mean": 0.04847961867192635,
+      "augrc_std": 0.015417155554203577,
+      "accuracy": 0.9166666666666666,
+      "error_rate": 0.08333333333333333,
+      "n_correct": 143,
+      "n_incorrect": 13,
+      "n_total": 156,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.7263313609467456,
+          "aurc": 0.08102584613796174,
+          "augrc": 0.05189842209072977,
+          "accuracy": 0.8333333333333334,
+          "error_rate": 0.16666666666666666,
+          "n_correct": 130,
+          "n_incorrect": 26,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7799873737373738,
+          "aurc": 0.07651606686470364,
+          "augrc": 0.04047501643655489,
+          "accuracy": 0.8461538461538461,
+          "error_rate": 0.15384615384615385,
+          "n_correct": 132,
+          "n_incorrect": 24,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.6655745967741935,
+          "aurc": 0.11501974081430501,
+          "augrc": 0.0755670611439842,
+          "accuracy": 0.7948717948717949,
+          "error_rate": 0.20512820512820512,
+          "n_correct": 124,
+          "n_incorrect": 32,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7388392857142857,
+          "aurc": 0.06314516637796155,
+          "augrc": 0.029298159105851405,
+          "accuracy": 0.8974358974358975,
+          "error_rate": 0.10256410256410256,
+          "n_correct": 140,
+          "n_incorrect": 16,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7092944369063772,
+          "aurc": 0.07560236563257182,
+          "augrc": 0.04515943458251149,
+          "accuracy": 0.858974358974359,
+          "error_rate": 0.14102564102564102,
+          "n_correct": 134,
+          "n_incorrect": 22,
+          "n_total": 156
+        }
+      ],
+      "auroc_f": 0.7240054108157952,
+      "aurc": 0.08226183716550076,
+      "augrc": 0.04847961867192635,
+      "time_seconds": 0.0003221040024072863
+    },
+    "MSR_calibrated": {
+      "auroc_f_mean": 0.7609388705376373,
+      "auroc_f_std": 0.030813339917606895,
+      "aurc_mean": 0.060235934565261794,
+      "aurc_std": 0.01978052296990671,
+      "augrc_mean": 0.039903846153846144,
+      "augrc_std": 0.010608682109208593,
+      "accuracy": 0.9166666666666666,
+      "error_rate": 0.08333333333333333,
+      "n_correct": 143,
+      "n_incorrect": 13,
+      "n_total": 156,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.7435549525101763,
+          "aurc": 0.06073010775945073,
+          "augrc": 0.04100920447074292,
+          "accuracy": 0.858974358974359,
+          "error_rate": 0.14102564102564102,
+          "n_correct": 134,
+          "n_incorrect": 22,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7422794117647059,
+          "aurc": 0.055936845630736726,
+          "augrc": 0.03702333990795528,
+          "accuracy": 0.8717948717948718,
+          "error_rate": 0.1282051282051282,
+          "n_correct": 136,
+          "n_incorrect": 20,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7502790178571428,
+          "aurc": 0.08101041121828476,
+          "augrc": 0.052884615384615405,
+          "accuracy": 0.8205128205128205,
+          "error_rate": 0.1794871794871795,
+          "n_correct": 128,
+          "n_incorrect": 28,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.8223214285714286,
+          "aurc": 0.025654629503039025,
+          "augrc": 0.021614069690992752,
+          "accuracy": 0.8974358974358975,
+          "error_rate": 0.10256410256410256,
+          "n_correct": 140,
+          "n_incorrect": 16,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7462595419847329,
+          "aurc": 0.07784767871479774,
+          "augrc": 0.04698800131492438,
+          "accuracy": 0.8397435897435898,
+          "error_rate": 0.16025641025641027,
+          "n_correct": 131,
+          "n_incorrect": 25,
+          "n_total": 156
+        }
+      ],
+      "auroc_f": 0.7609388705376373,
+      "aurc": 0.060235934565261794,
+      "augrc": 0.039903846153846144,
+      "time_seconds": 0.026678243000787916
+    },
+    "MLS": {
+      "auroc_f_mean": 0.7240054108157952,
+      "auroc_f_std": 0.0373898564961048,
+      "aurc_mean": 0.08226183716550076,
+      "aurc_std": 0.017420777621742767,
+      "augrc_mean": 0.04847961867192635,
+      "augrc_std": 0.015417155554203577,
+      "accuracy": 0.9166666666666666,
+      "error_rate": 0.08333333333333333,
+      "n_correct": 143,
+      "n_incorrect": 13,
+      "n_total": 156,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.7263313609467456,
+          "aurc": 0.08102584613796174,
+          "augrc": 0.05189842209072977,
+          "accuracy": 0.8333333333333334,
+          "error_rate": 0.16666666666666666,
+          "n_correct": 130,
+          "n_incorrect": 26,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7799873737373738,
+          "aurc": 0.07651606686470364,
+          "augrc": 0.04047501643655489,
+          "accuracy": 0.8461538461538461,
+          "error_rate": 0.15384615384615385,
+          "n_correct": 132,
+          "n_incorrect": 24,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.6655745967741935,
+          "aurc": 0.11501974081430501,
+          "augrc": 0.0755670611439842,
+          "accuracy": 0.7948717948717949,
+          "error_rate": 0.20512820512820512,
+          "n_correct": 124,
+          "n_incorrect": 32,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7388392857142857,
+          "aurc": 0.06314516637796155,
+          "augrc": 0.029298159105851405,
+          "accuracy": 0.8974358974358975,
+          "error_rate": 0.10256410256410256,
+          "n_correct": 140,
+          "n_incorrect": 16,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7092944369063772,
+          "aurc": 0.07560236563257182,
+          "augrc": 0.04515943458251149,
+          "accuracy": 0.858974358974359,
+          "error_rate": 0.14102564102564102,
+          "n_correct": 134,
+          "n_incorrect": 22,
+          "n_total": 156
+        }
+      ],
+      "auroc_f": 0.7240054108157952,
+      "aurc": 0.08226183716550076,
+      "augrc": 0.04847961867192635,
+      "time_seconds": 0.00026750300094136037
+    }
+  },
+  "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_breastmnist_resnet18_DA_20251212_190056.npz",
+  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/breastmnist/20251212_190056"
+}

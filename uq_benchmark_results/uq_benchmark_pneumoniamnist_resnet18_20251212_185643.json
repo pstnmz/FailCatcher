@@ -1,0 +1,222 @@
+{
+  "flag": "pneumoniamnist",
+  "model_backbone": "resnet18",
+  "setup": "",
+  "timestamp": "20251212_185643",
+  "test_accuracy": 0.9118589743589743,
+  "test_size": 624,
+  "methods": {
+    "MSR": {
+      "auroc_f_mean": 0.8752443943910938,
+      "auroc_f_std": 0.019709775416919272,
+      "aurc_mean": 0.018624630501799463,
+      "aurc_std": 0.004218874219931612,
+      "augrc_mean": 0.014883557281393822,
+      "augrc_std": 0.002626730043364088,
+      "accuracy": 0.9118589743589743,
+      "error_rate": 0.08814102564102565,
+      "n_correct": 569,
+      "n_incorrect": 55,
+      "n_total": 624,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.8951429499675114,
+          "aurc": 0.014677391371432546,
+          "augrc": 0.012033355933596317,
+          "accuracy": 0.9134615384615384,
+          "error_rate": 0.08653846153846154,
+          "n_correct": 570,
+          "n_incorrect": 54,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8717782109594975,
+          "aurc": 0.017810732825707904,
+          "augrc": 0.01481472920775806,
+          "accuracy": 0.9086538461538461,
+          "error_rate": 0.09134615384615384,
+          "n_correct": 567,
+          "n_incorrect": 57,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8390342052313883,
+          "aurc": 0.022188041689799865,
+          "augrc": 0.017176199868507568,
+          "accuracy": 0.9102564102564102,
+          "error_rate": 0.08974358974358974,
+          "n_correct": 568,
+          "n_incorrect": 56,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8888515330823022,
+          "aurc": 0.013776650206291183,
+          "augrc": 0.011962730111768585,
+          "accuracy": 0.9166666666666666,
+          "error_rate": 0.08333333333333333,
+          "n_correct": 572,
+          "n_incorrect": 52,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8814150727147698,
+          "aurc": 0.024670336415765826,
+          "augrc": 0.01843077128533858,
+          "accuracy": 0.8862179487179487,
+          "error_rate": 0.11378205128205128,
+          "n_correct": 553,
+          "n_incorrect": 71,
+          "n_total": 624
+        }
+      ],
+      "auroc_f": 0.8752443943910938,
+      "aurc": 0.018624630501799463,
+      "augrc": 0.014883557281393822,
+      "time_seconds": 0.0004302850029489491
+    },
+    "MSR_calibrated": {
+      "auroc_f_mean": 0.9005805271085666,
+      "auroc_f_std": 0.03923953059826614,
+      "aurc_mean": 0.01507522579871077,
+      "aurc_std": 0.005147139252514899,
+      "augrc_mean": 0.01246712689020382,
+      "augrc_std": 0.0034852182216488863,
+      "accuracy": 0.9118589743589743,
+      "error_rate": 0.08814102564102565,
+      "n_correct": 569,
+      "n_incorrect": 55,
+      "n_total": 624,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.830685510071475,
+          "aurc": 0.022673469985546923,
+          "augrc": 0.01712868795200527,
+          "accuracy": 0.9134615384615384,
+          "error_rate": 0.08653846153846154,
+          "n_correct": 570,
+          "n_incorrect": 54,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.9255218812877264,
+          "aurc": 0.01145691329017262,
+          "augrc": 0.010111049474030243,
+          "accuracy": 0.9102564102564102,
+          "error_rate": 0.08974358974358974,
+          "n_correct": 568,
+          "n_incorrect": 56,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8908450704225351,
+          "aurc": 0.015358845720629372,
+          "augrc": 0.01294378698224853,
+          "accuracy": 0.9102564102564102,
+          "error_rate": 0.08974358974358974,
+          "n_correct": 568,
+          "n_incorrect": 56,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.9452613240418118,
+          "aurc": 0.007821422279636997,
+          "augrc": 0.007244925213675219,
+          "accuracy": 0.9198717948717948,
+          "error_rate": 0.08012820512820513,
+          "n_correct": 574,
+          "n_incorrect": 50,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.9105888497192844,
+          "aurc": 0.018065477717567936,
+          "augrc": 0.014907184829059844,
+          "accuracy": 0.8894230769230769,
+          "error_rate": 0.11057692307692307,
+          "n_correct": 555,
+          "n_incorrect": 69,
+          "n_total": 624
+        }
+      ],
+      "auroc_f": 0.9005805271085666,
+      "aurc": 0.01507522579871077,
+      "augrc": 0.01246712689020382,
+      "time_seconds": 0.021366246000980027
+    },
+    "MLS": {
+      "auroc_f_mean": 0.8752476432539918,
+      "auroc_f_std": 0.01971305619541793,
+      "aurc_mean": 0.018626865344893467,
+      "aurc_std": 0.004219859026279416,
+      "augrc_mean": 0.014883300460223542,
+      "augrc_std": 0.002627008749249107,
+      "accuracy": 0.9118589743589743,
+      "error_rate": 0.08814102564102565,
+      "n_correct": 569,
+      "n_incorrect": 55,
+      "n_total": 624,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.8951591942820013,
+          "aurc": 0.014677391371432546,
+          "augrc": 0.012032071827744907,
+          "accuracy": 0.9134615384615384,
+          "error_rate": 0.08653846153846154,
+          "n_correct": 570,
+          "n_incorrect": 54,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8717782109594975,
+          "aurc": 0.017815087619464872,
+          "augrc": 0.01481472920775806,
+          "accuracy": 0.9086538461538461,
+          "error_rate": 0.09134615384615384,
+          "n_correct": 567,
+          "n_incorrect": 57,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8390342052313884,
+          "aurc": 0.022194861111512906,
+          "augrc": 0.01717619986850756,
+          "accuracy": 0.9102564102564102,
+          "error_rate": 0.08974358974358974,
+          "n_correct": 568,
+          "n_incorrect": 56,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8888515330823024,
+          "aurc": 0.013776650206291183,
+          "augrc": 0.011962730111768577,
+          "accuracy": 0.9166666666666666,
+          "error_rate": 0.08333333333333333,
+          "n_correct": 572,
+          "n_incorrect": 52,
+          "n_total": 624
+        },
+        {
+          "auroc_f": 0.8814150727147696,
+          "aurc": 0.024670336415765826,
+          "augrc": 0.018430771285338605,
+          "accuracy": 0.8862179487179487,
+          "error_rate": 0.11378205128205128,
+          "n_correct": 553,
+          "n_incorrect": 71,
+          "n_total": 624
+        }
+      ],
+      "auroc_f": 0.8752476432539918,
+      "aurc": 0.018626865344893467,
+      "augrc": 0.014883300460223542,
+      "time_seconds": 0.00010898199980147183
+    }
+  },
+  "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_pneumoniamnist_resnet18_20251212_185643.npz",
+  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/pneumoniamnist/20251212_185643"
+}
