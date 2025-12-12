@@ -626,9 +626,27 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             indiv_scores_test=indiv_scores if per_fold_eval else None,
             indiv_scores_calib=indiv_scores_calib if per_fold_eval else None,
             method=calib_method,
-            per_fold_evaluation=per_fold_eval
+            per_fold_evaluation=per_fold_eval,
+            auto_tune_platt=True,  # Enable automatic hyperparameter selection
+            verbose_tuning=True    # Print tuning results
         )
         results[f'MSR_{calib_method}'] = metrics
+        if 'auroc_f_mean' in metrics:
+            print(f"  AUROC: {metrics['auroc_f_mean']:.4f}±{metrics['auroc_f_std']:.4f}, "
+                  f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
+        else:
+            print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+    
+    if 'MLS' in methods:
+        print("\n🔍 Running MLS (Maximum Logit Score)...")
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
+        uncertainties, metrics = detector.run_mls(
+            logits, y_true,
+            indiv_logits=indiv_logits if per_fold_eval else None,
+            per_fold_evaluation=per_fold_eval
+        )
+        results['MLS'] = metrics
         if 'auroc_f_mean' in metrics:
             print(f"  AUROC: {metrics['auroc_f_mean']:.4f}±{metrics['auroc_f_std']:.4f}, "
                   f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
@@ -880,8 +898,8 @@ if __name__ == '__main__':
     
     parser.add_argument(
         '--methods', nargs='+',
-        default=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP'],
-        choices=['MSR', 'MSR_calibrated', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP'],
+        default=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP'],
+        choices=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP'],
         help='UQ methods to run'
     )
     parser.add_argument(

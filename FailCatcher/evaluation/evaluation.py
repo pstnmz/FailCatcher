@@ -615,7 +615,8 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
 
 def plot_uncertainty_distributions(uncertainties, predictions, labels, 
                                    method_name='UQ Method', save_path=None,
-                                   uncertainties_per_fold=None, ensemble_uncertainties=None):
+                                   uncertainties_per_fold=None, ensemble_uncertainties=None,
+                                   predictions_per_fold=None):
     """
     Plot uncertainty score distributions for correct vs incorrect predictions.
     
@@ -626,19 +627,40 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
     
     Args:
         uncertainties: Array of uncertainty scores [N]
-        predictions: Array of predicted labels [N]
+        predictions: Array of predicted labels [N] (ensemble predictions, used if predictions_per_fold=None)
         labels: Array of true labels [N]
         method_name: Name of the UQ method for plot title
         save_path: Path to save figure (optional)
         uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
         ensemble_uncertainties: Optional [N] array for ensemble reference
+        predictions_per_fold: Optional [num_folds, N] array of per-fold predictions (CORRECT for per-fold evaluation)
     
     Returns:
         matplotlib figure
     """
-    errors = (predictions != labels)
-    correct_idx = ~errors
-    incorrect_idx = errors
+    # If per-fold data available, compute average correct/incorrect across folds
+    # This matches the per-fold AUROC computation (correct approach)
+    if uncertainties_per_fold is not None and predictions_per_fold is not None:
+        # Average uncertainties across folds for main plot
+        num_folds = uncertainties_per_fold.shape[0]
+        fold_correct_masks = []
+        fold_incorrect_masks = []
+        
+        for fold_idx in range(num_folds):
+            fold_predictions = predictions_per_fold[fold_idx]
+            fold_errors = (fold_predictions != labels)
+            fold_correct_masks.append(~fold_errors)
+            fold_incorrect_masks.append(fold_errors)
+        
+        # Average the masks: sample is "correct" if majority of folds predict it correctly
+        correct_votes = np.sum(fold_correct_masks, axis=0)
+        correct_idx = (correct_votes > num_folds / 2)
+        incorrect_idx = ~correct_idx
+    else:
+        # Use ensemble predictions
+        errors = (predictions != labels)
+        correct_idx = ~errors
+        incorrect_idx = errors
     
     unc_correct = uncertainties[correct_idx]
     unc_incorrect = uncertainties[incorrect_idx]
@@ -673,8 +695,20 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
         num_folds = uncertainties_per_fold.shape[0]
         for fold_idx in range(num_folds):
             fold_unc = uncertainties_per_fold[fold_idx]
-            fold_correct = fold_unc[correct_idx]
-            fold_incorrect = fold_unc[incorrect_idx]
+            
+            # Use per-fold predictions if available (CORRECT approach)
+            if predictions_per_fold is not None:
+                fold_predictions = predictions_per_fold[fold_idx]
+                fold_errors = (fold_predictions != labels)
+                fold_correct_idx = ~fold_errors
+                fold_incorrect_idx = fold_errors
+            else:
+                # Fallback to averaged correct/incorrect indices
+                fold_correct_idx = correct_idx
+                fold_incorrect_idx = incorrect_idx
+            
+            fold_correct = fold_unc[fold_correct_idx]
+            fold_incorrect = fold_unc[fold_incorrect_idx]
             
             # Jitter x-positions for visibility
             x_correct = np.random.normal(1, 0.04, size=len(fold_correct))
@@ -712,8 +746,20 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
         num_folds = uncertainties_per_fold.shape[0]
         for fold_idx in range(num_folds):
             fold_unc = uncertainties_per_fold[fold_idx]
-            fold_correct = fold_unc[correct_idx]
-            fold_incorrect = fold_unc[incorrect_idx]
+            
+            # Use per-fold predictions if available (CORRECT approach)
+            if predictions_per_fold is not None:
+                fold_predictions = predictions_per_fold[fold_idx]
+                fold_errors = (fold_predictions != labels)
+                fold_correct_idx = ~fold_errors
+                fold_incorrect_idx = fold_errors
+            else:
+                # Fallback to averaged correct/incorrect indices
+                fold_correct_idx = correct_idx
+                fold_incorrect_idx = incorrect_idx
+            
+            fold_correct = fold_unc[fold_correct_idx]
+            fold_incorrect = fold_unc[fold_incorrect_idx]
             
             ax2.hist(fold_correct, bins=bins, alpha=0.15, color='green', 
                     density=True, edgecolor=None, linewidth=0)
@@ -807,7 +853,8 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
                                               method_name=method_name,
                                               save_path=dist_path,
                                               uncertainties_per_fold=uncertainties_per_fold,
-                                              ensemble_uncertainties=ensemble_uncertainties)
+                                              ensemble_uncertainties=ensemble_uncertainties,
+                                              predictions_per_fold=predictions_per_fold)
     plt.close(fig_dist)
     
     return {

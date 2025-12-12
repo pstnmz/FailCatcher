@@ -109,16 +109,19 @@ class TemperatureScaler(nn.Module):
     Divides logits by learned temperature T:
         calibrated_logits = logits / T
     
-    Temperature is parameterized in log-space for stability and constrained to [0.5, 5.0].
+    Temperature is parameterized in log-space for numerical stability and 
+    constrained to reasonable range [0.1, 10.0] to prevent extreme values.
     """
-    def __init__(self, init_temp=1.5):
+    def __init__(self, init_temp=1.0):
         super().__init__()
+        # Initialize at T=1.0 (no scaling) - standard practice
         self.log_temperature = nn.Parameter(torch.log(torch.tensor([init_temp])))
 
     def forward(self, logits):
         """Apply temperature scaling to logits."""
         temperature = torch.exp(self.log_temperature)
-        temperature = torch.clamp(temperature, min=0.5, max=5.0)
+        # Wider bounds allow for poorly calibrated models
+        temperature = torch.clamp(temperature, min=0.1, max=10.0)
         return logits / temperature
 
 
@@ -170,19 +173,17 @@ def fit_temperature_scaling(logits, labels, max_iter=1000):
     model = TemperatureScaler()
 
     if logits.shape[1] == 1:
-        # Binary classification
-        class_weights = compute_class_weights(labels_np)
-        # Map class weights to sample weights based on labels
-        sample_weights = torch.where(labels == 1, class_weights[1], class_weights[0])
-        criterion = nn.BCEWithLogitsLoss(weight=sample_weights)
+        # Binary classification - use unweighted loss for standard calibration
+        criterion = nn.BCEWithLogitsLoss()
     else:
-        # Multiclass classification
+        # Multiclass classification - use unweighted loss for standard calibration
+        # Temperature scaling aims to match predicted probabilities to empirical frequencies,
+        # not to handle class imbalance (that's what class_weight during training is for)
         labels = labels.long()
-        class_weights = compute_class_weights(labels_np)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        criterion = nn.CrossEntropyLoss()
 
-    # Optimize log-temperature using LBFGS
-    optimizer = optim.LBFGS([model.log_temperature], lr=0.001, max_iter=max_iter)
+    # Optimize log-temperature using LBFGS with higher learning rate
+    optimizer = optim.LBFGS([model.log_temperature], lr=0.01, max_iter=max_iter)
     
     print(f"Initial log-temperature: {model.log_temperature.item():.4f}")
     print(f"Initial temperature: {torch.exp(model.log_temperature).item():.4f}")
@@ -205,7 +206,38 @@ def fit_temperature_scaling(logits, labels, max_iter=1000):
 # FUNCTIONAL API (existing, for backward compatibility)
 # ============================================================================
 
-def posthoc_calibration(y_scores, y_true, method_calibration='platt'):
+def _should_use_balanced_platt(y_true, min_samples=200, min_imbalance_ratio=2.0):
+    """
+    Determine whether to use class_weight='balanced' for Platt scaling.
+    
+    Rule: Use balanced weighting when:
+    1. Calibration set is large enough (>= min_samples)
+    2. Classes are moderately to highly imbalanced (ratio >= min_imbalance_ratio)
+    
+    Args:
+        y_true: True labels from calibration set
+        min_samples: Minimum calibration set size to consider balanced (default: 200)
+        min_imbalance_ratio: Minimum class imbalance ratio to use balanced (default: 2.0)
+    
+    Returns:
+        'balanced' or None
+    """
+    n_samples = len(y_true)
+    class_counts = np.bincount(y_true)
+    
+    # Compute imbalance ratio (majority / minority)
+    majority_count = np.max(class_counts)
+    minority_count = np.min(class_counts)
+    imbalance_ratio = majority_count / minority_count if minority_count > 0 else 1.0
+    
+    # Use balanced if dataset is large enough AND imbalanced
+    use_balanced = (n_samples >= min_samples) and (imbalance_ratio >= min_imbalance_ratio)
+    
+    return 'balanced' if use_balanced else None
+
+
+def posthoc_calibration(y_scores, y_true, method_calibration='platt', 
+                       auto_tune_platt=False, platt_val_ratio=0.3, verbose=False):
     """
     Perform post-hoc calibration using Platt scaling, isotonic regression, or temperature scaling.
 
@@ -215,6 +247,10 @@ def posthoc_calibration(y_scores, y_true, method_calibration='platt'):
             - Multiclass: (N, C)
         y_true: True labels (np.ndarray)
         method_calibration: 'platt', 'isotonic', or 'temperature'
+        auto_tune_platt: If True and method_calibration='platt', automatically determine
+            class_weight based on calibration set size and class imbalance
+        platt_val_ratio: (Deprecated, unused)
+        verbose: Print configuration if True
 
     Returns:
         tuple: (calibrated_probs, calibration_model)
@@ -222,6 +258,10 @@ def posthoc_calibration(y_scores, y_true, method_calibration='platt'):
                 - Binary: (N,) array of positive class probabilities
                 - Multiclass: (N, C) array of class probabilities
             - calibration_model: Fitted calibration model
+    
+    Note:
+        Auto-tuning uses simple heuristic: class_weight='balanced' if calibration set
+        has >= 200 samples AND imbalance ratio >= 2.0, otherwise None.
     """
     # Ensure y_scores is numpy array
     y_scores = np.asarray(y_scores)
@@ -252,7 +292,23 @@ def posthoc_calibration(y_scores, y_true, method_calibration='platt'):
             calibrated_probs = torch.softmax(calibrated_logits, dim=1).numpy()
 
     elif method_calibration == 'platt':
-        model = LogisticRegression(C=0.01, class_weight='balanced', max_iter=1000)
+        # Automatic selection based on dataset characteristics
+        # Use balanced weighting for large, imbalanced datasets
+        # Use unweighted (None) for small or balanced datasets
+        if auto_tune_platt:
+            class_weight = _should_use_balanced_platt(y_true)
+            if verbose:
+                n_samples = len(y_true)
+                class_counts = np.bincount(y_true)
+                ratio = np.max(class_counts) / np.min(class_counts)
+                weight_str = class_weight if class_weight else 'None'
+                print(f"Platt config: N={n_samples}, imbalance={ratio:.2f} → class_weight={weight_str}")
+        else:
+            # Default: no class weighting (works better for small calibration sets)
+            class_weight = None
+        
+        # Use moderate regularization (C=1.0) as default
+        model = LogisticRegression(C=1.0, class_weight=class_weight, max_iter=1000)
         model.fit(y_scores_input.reshape(-1, 1), y_true)
         calibrated_probs = model.predict_proba(y_scores_input.reshape(-1, 1))[:, 1]
 
@@ -313,3 +369,48 @@ def distance_to_hard_labels_computation(predictions):
         distances = 1.0 - np.max(predictions, axis=1)
 
     return distances
+
+
+def maximum_logit_score_computation(logits):
+    """
+    Compute Maximum Logit Score (MLS) as uncertainty metric.
+    
+    MLS uses the negative of the maximum unnormalized logit as a confidence scoring function (CSF).
+    Higher logit values indicate more confident predictions, so negating gives uncertainty.
+    
+    Args:
+        logits: Raw logits (unnormalized scores) from model
+            - Binary: (N,) or (N, 1) single logit value
+            - Multiclass: (N, C) logits for each class
+    
+    Returns:
+        np.ndarray: Per-sample uncertainty scores (N,)
+            - Negative of maximum logit: -max(logits)
+            - Higher values = more uncertain (lower max logit)
+            - Lower values = more confident (higher max logit)
+    
+    Example:
+        >>> # Binary with single logit
+        >>> logits = np.array([3.0, 0.5, -2.0])  # Confident pos, uncertain, confident neg
+        >>> unc = maximum_logit_score_computation(logits)
+        >>> # [-3.0, -0.5, 2.0] → negative logit is uncertain
+        
+        >>> # Multiclass
+        >>> logits = np.array([[5.0, 1.0, 0.5], [2.0, 1.8, 1.5]])  # Confident, uncertain
+        >>> unc = maximum_logit_score_computation(logits)
+        >>> # [-5.0, -2.0] → first is more confident (lower uncertainty)
+    """
+    logits = np.asarray(logits)
+    
+    if logits.ndim == 1:
+        # Binary with single logit: use absolute value of logit for confidence
+        uncertainties = -np.abs(logits)
+    elif logits.shape[1] == 1:
+        # Binary with shape (N, 1)
+        logits = logits.ravel()
+        uncertainties = -np.abs(logits)
+    else:
+        # Multiclass: negative of maximum logit
+        uncertainties = -np.max(logits, axis=1)
+    
+    return uncertainties
