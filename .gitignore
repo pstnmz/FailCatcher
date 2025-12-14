@@ -1,4 +1,4 @@
-**/gps_augment/
+**/gps_augment_cache/
 **/ISIC_2018/
 **/AMOS_2022/amos22
 **/runs/**/**.pt
@@ -6,3 +6,5 @@
 **/models/
 **/.venv/
 **/__pycache__/
+__pycache__/
+*.pyc
