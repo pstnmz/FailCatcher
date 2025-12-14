@@ -85,16 +85,49 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
     
     Args:
         results_dir: Path to results directory
-        dataset_key: Dataset key (e.g., 'breastmnist_standard')
+        dataset_key: Dataset key (e.g., 'breastmnist_standard', 'breastmnist_DA')
         model_name: Model name to filter by
     
     Returns:
         float: Test accuracy, or 0 if not found
     """
     results_dir = Path(results_dir)
-    # Look for JSON files matching this dataset and model
-    pattern = f"uq_benchmark_{dataset_key.replace('_standard', '')}_{model_name}_*.json"
-    json_files = list(results_dir.glob(pattern))
+    
+    # Parse dataset_key to extract base name and setup
+    # e.g., 'breastmnist_standard' -> ('breastmnist', 'standard')
+    # e.g., 'breastmnist_DA' -> ('breastmnist', 'DA')
+    if '_' in dataset_key:
+        parts = dataset_key.rsplit('_', 1)
+        base_name = parts[0]
+        setup = parts[1] if parts[1] in ['standard', 'DA', 'DO', 'DADO'] else 'standard'
+        # If the split didn't give us a valid setup, treat whole key as base name
+        if setup == 'standard' and parts[1] != 'standard':
+            base_name = dataset_key
+            setup = 'standard'
+    else:
+        base_name = dataset_key
+        setup = 'standard'
+    
+    # Build pattern based on setup
+    if setup == 'standard':
+        # For standard setup, filename doesn't have setup suffix
+        # Need to filter out files with setup suffixes (DA, DO, DADO)
+        pattern = f"uq_benchmark_{base_name}_{model_name}_*.json"
+        all_matches = list(results_dir.glob(pattern))
+        # Filter out files with setup suffixes
+        json_files = [f for f in all_matches if not any(
+            f.stem.endswith(f'_{s}_{ts}') or f.stem.endswith(f'_{s}')
+            for s in ['DA', 'DO', 'DADO']
+            for ts in [f.stem.split('_')[-1]]  # Last part is timestamp
+        )]
+        # Simpler filter: exclude if filename contains _DA_, _DO_, or _DADO_ before timestamp
+        json_files = [f for f in all_matches if not any(
+            f'_{s}_' in f.name for s in ['DA', 'DO', 'DADO']
+        )]
+    else:
+        # For DA/DO/DADO, filename includes setup
+        pattern = f"uq_benchmark_{base_name}_{model_name}_{setup}_*.json"
+        json_files = list(results_dir.glob(pattern))
     
     if not json_files:
         return 0.0

@@ -219,5 +219,5 @@
   },
   "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_pneumoniamnist_resnet18_20251212_185643.npz",
   "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/pneumoniamnist/20251212_185643",
-  "ensemble_balanced_accuracy": 0.9175213675213676
+  "ensemble_balanced_accuracy": 0.8824786324786325
 }
