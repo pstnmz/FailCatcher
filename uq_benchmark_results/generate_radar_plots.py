@@ -105,7 +105,7 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
-        return data.get('test_accuracy', 0.0)
+        return data.get('ensemble_balanced_accuracy', 0.0)
     except:
         return 0.0
 
@@ -138,29 +138,22 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
             k  # Then alphabetically
         ))
     
-    # Sort families by their standard variant's accuracy (ascending)
-    if results_dir and model_name == 'resnet18':
-        family_order = []
-        for base_name, variants in dataset_families.items():
-            # Find the standard variant
-            standard_key = f"{base_name}_standard"
-            if standard_key not in variants:
-                # If no standard, use first variant
-                standard_key = variants[0]
-            accuracy = get_dataset_accuracy(results_dir, standard_key, 'resnet18')
-            family_order.append((accuracy, base_name))
-        
-        # Sort families by accuracy (ascending)
-        family_order.sort()
-        
-        # Build final dataset list: each family's variants in order
-        dataset_keys = []
-        for _, base_name in family_order:
+    # Manual ordering by classification performance (easiest to hardest)
+    # Order: tissuemnist, dermamnist-e, breastmnist, pneumoniamnist, octmnist, pathmnist, organamnist, bloodmnist
+    preferred_order = [
+        'tissuemnist', 'dermamnist-e', 'breastmnist', 'pneumoniamnist', 
+        'octmnist', 'pathmnist', 'organamnist', 'bloodmnist'
+    ]
+    
+    # Build dataset list following the preferred order
+    dataset_keys = []
+    for base_name in preferred_order:
+        if base_name in dataset_families:
             dataset_keys.extend(dataset_families[base_name])
-    else:
-        # Default: alphabetical by family, then by setup
-        dataset_keys = []
-        for base_name in sorted(dataset_families.keys()):
+    
+    # Add any remaining datasets not in the preferred order
+    for base_name in sorted(dataset_families.keys()):
+        if base_name not in preferred_order:
             dataset_keys.extend(dataset_families[base_name])
     
     num_datasets = len(dataset_keys)
@@ -180,27 +173,12 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
     print(f"  Methods: {len(all_methods)}")
     
     # Set up the angles for radar plot with family clustering
-    # Count families and datasets per family
-    family_sizes = defaultdict(int)
-    for dataset_key in dataset_keys:
-        base_name = dataset_key.rsplit('_', 1)[0] if '_' in dataset_key else dataset_key
-        if base_name.endswith('_standard'):
-            base_name = base_name.replace('_standard', '')
-        family_sizes[base_name] += 1
-    
-    num_families = len(family_sizes)
-    
-    # Calculate spacing: distribute 2π across families and their members
-    # Allocate more space to families with more members
-    total_members = len(dataset_keys)
-    base_angle_per_dataset = 2 * np.pi / total_members
-    
-    # Reduce spacing within families, add gaps between families
-    within_family_factor = 0.6  # Make family members closer (60% of normal spacing)
-    between_family_gap = base_angle_per_dataset * 1.5  # Extra gap between families
-    
+    # Keep datasets from same family close together with tighter angles
     angles = []
-    current_angle = 0
+    
+    # Group datasets by family (in order they appear)
+    families = []
+    current_family_datasets = []
     current_family = None
     
     for dataset_key in dataset_keys:
@@ -208,21 +186,38 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
         if base_name.endswith('_standard'):
             base_name = base_name.replace('_standard', '')
         
-        if current_family is None:
-            # First dataset
+        if current_family != base_name:
+            if current_family_datasets:
+                families.append(current_family_datasets)
+            current_family_datasets = [dataset_key]
             current_family = base_name
-            angles.append(current_angle)
-        elif current_family != base_name:
-            # New family - add gap
-            current_angle += between_family_gap
-            current_family = base_name
-            angles.append(current_angle)
         else:
-            # Same family - reduced spacing
-            current_angle += base_angle_per_dataset * within_family_factor
-            angles.append(current_angle)
+            current_family_datasets.append(dataset_key)
     
-    angles = np.array(angles).tolist()
+    if current_family_datasets:
+        families.append(current_family_datasets)
+    
+    # Distribute families evenly around the circle
+    num_families = len(families)
+    angle_per_family = 2 * np.pi / num_families
+    
+    # Within each family, use tighter clustering (50% of the family's allocated angle)
+    within_family_factor = 0.5
+    
+    for family_idx, family_datasets in enumerate(families):
+        family_center = family_idx * angle_per_family
+        family_size = len(family_datasets)
+        
+        if family_size == 1:
+            angles.append(family_center)
+        else:
+            # Spread datasets within the family's allocated space
+            family_span = angle_per_family * within_family_factor
+            for i, dataset_key in enumerate(family_datasets):
+                # Distribute evenly within the family span
+                offset = (i - (family_size - 1) / 2) * (family_span / family_size)
+                angles.append(family_center + offset)
+    
     angles += angles[:1]  # Complete the circle
     
     # Create figure
@@ -246,14 +241,32 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
                 color=colors[method_idx], markersize=7, markeredgewidth=1.5,
                 markeredgecolor='white')
     
+    # Add ensemble balanced accuracy scatter overlay
+    if results_dir:
+        accuracy_values = []
+        for dataset_key in dataset_keys:
+            accuracy = get_dataset_accuracy(results_dir, dataset_key, model_name)
+            accuracy_values.append(accuracy)
+        
+        # Complete the circle
+        accuracy_values += accuracy_values[:1]
+        
+        # Plot as distinct scatter points
+        ax.scatter(angles, accuracy_values, s=120, c='red', marker='*', 
+                   edgecolors='black', linewidths=1.5, zorder=10, 
+                   label='Ensemble Balanced Accuracy', alpha=0.9)
+    
     # Set labels
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(dataset_keys, size=9)
     
-    # Set y-axis (AUROC range)
+    # Set y-axis (AUROC range) - fixed scale from 0.5 to 1.0
     ax.set_ylim(0.5, 1.0)
-    ax.set_yticks([0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-    ax.set_yticklabels(['0.5', '0.6', '0.7', '0.8', '0.9', '1.0'], size=10)
+    
+    # Set ticks every 0.1
+    y_ticks = np.arange(0.5, 1.05, 0.1)  # 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+    ax.set_yticks(y_ticks)
+    ax.set_yticklabels([f'{y:.1f}' for y in y_ticks], size=10)
     ax.set_ylabel('AUROC_f', size=12, labelpad=30)
     
     # Grid
