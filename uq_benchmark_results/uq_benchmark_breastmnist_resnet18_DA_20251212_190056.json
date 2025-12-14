@@ -218,5 +218,6 @@
     }
   },
   "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_breastmnist_resnet18_DA_20251212_190056.npz",
-  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/breastmnist/20251212_190056"
+  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/breastmnist/20251212_190056",
+  "ensemble_balanced_accuracy": 0.8903508771929824
 }

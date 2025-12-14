@@ -218,5 +218,6 @@
     }
   },
   "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_organamnist_resnet18_20251212_185557.npz",
-  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/organamnist/20251212_185557"
+  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/organamnist/20251212_185557",
+  "ensemble_balanced_accuracy": 0.9671369840674022
 }

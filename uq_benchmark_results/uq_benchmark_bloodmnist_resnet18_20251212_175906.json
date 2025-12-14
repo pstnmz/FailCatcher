@@ -218,5 +218,6 @@
     }
   },
   "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_bloodmnist_resnet18_20251212_175906.npz",
-  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/bloodmnist/20251212_175906"
+  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/bloodmnist/20251212_175906",
+  "ensemble_balanced_accuracy": 0.9890944228140501
 }
