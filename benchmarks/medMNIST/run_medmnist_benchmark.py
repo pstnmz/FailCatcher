@@ -12,6 +12,7 @@ Usage:
 import argparse
 import os
 import sys
+import pickle
 from pathlib import Path
 
 # Add parent directories to path
@@ -450,10 +451,24 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     test_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}_test_results.npz')
     
     # Try to load cached results FIRST
+    cache_loaded = False
     if os.path.exists(calib_cache_path) and os.path.exists(test_cache_path):
         print("\n📦 Loading cached evaluation results...")
-        calib_cache = np.load(calib_cache_path, allow_pickle=True)
-        test_cache = np.load(test_cache_path, allow_pickle=True)
+        try:
+            calib_cache = np.load(calib_cache_path, allow_pickle=True)
+            test_cache = np.load(test_cache_path, allow_pickle=True)
+            cache_loaded = True
+        except (pickle.UnpicklingError, ValueError, EOFError) as e:
+            print(f"  ⚠️  Cache corrupted ({e.__class__.__name__}), regenerating...")
+            # Delete corrupted cache files
+            try:
+                os.remove(calib_cache_path)
+                os.remove(test_cache_path)
+            except Exception:
+                pass
+            cache_loaded = False
+    
+    if cache_loaded:
         
         # Calibration
         y_true_calib = calib_cache['y_true']
@@ -661,11 +676,14 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     if 'TTA' in methods:
         print("\n🔍 Running TTA...")
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
         uncertainties, metrics = detector.run_tta(
             test_dataset_tta, y_true,
             image_size=image_size,
             batch_size=batch_size,
-            nb_augmentations=5
+            nb_augmentations=5,
+            per_fold_evaluation=per_fold_eval
         )
         results['TTA'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
@@ -776,6 +794,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             gps_incorrect_idx = gps_incorrect_idx.tolist()
             print(f"  GPS will use: {len(gps_correct_idx)} correct, {len(gps_incorrect_idx)} incorrect indices")
         
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
         uncertainties, metrics = detector.run_gps(
             test_dataset_tta, y_true,
             aug_folder=aug_folder,
@@ -783,7 +803,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             incorrect_idx_calib=gps_incorrect_idx,
             image_size=image_size,
             batch_size=batch_size,
-            cache_dir=os.path.join(output_dir, 'gps_cache')
+            cache_dir=os.path.join(output_dir, 'gps_cache'),
+            per_fold_evaluation=per_fold_eval
         )
         results['GPS'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
@@ -886,7 +907,7 @@ if __name__ == '__main__':
     )
     
     parser.add_argument(
-        '--model', type=str, default='resnet18 ', choices=['resnet18', 'vit_b_16'],
+        '--model', type=str, default='resnet18', choices=['resnet18', 'vit_b_16'],
         help='Model backbone to use (default: resnet18)'
     )
     

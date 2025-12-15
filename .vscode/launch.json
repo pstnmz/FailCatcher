@@ -2,14 +2,15 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug launch_uq_methods.py",
+            "name": "run_medmnist_benchmark.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/launch_uq_methods.py",
+            "program": "${workspaceFolder}/benchmarks/medMNIST/run_medmnist_benchmark.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["--flag", "organamnist", "--methods", "KNN_SHAP"],
-            "justMyCode": false
+            "args": ["--flag", "breastmnist", "--methods", "TTA", "--per-fold-eval"],
+            "justMyCode": false,
+            "python": "/home/lito/Documents/Codes/UQ_toolbox/.venv/bin/python3.12"
         }
     ]
 }

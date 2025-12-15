@@ -553,7 +553,9 @@ class FailureDetector:
         m: int = 9,
         nb_channels: int = 3,
         mean: float = 0.5,
-        std: float = 0.5
+        std: float = 0.5,
+        per_fold_evaluation: bool = True,
+        seed: Optional[int] = None
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run Test-Time Augmentation (TTA).
@@ -569,10 +571,19 @@ class FailureDetector:
             nb_channels: Number of image channels
             mean: Normalization mean
             std: Normalization std
+            per_fold_evaluation: If True, compute per-model uncertainty then average (per-fold evaluation)
+                                If False, average models first then compute uncertainty (ensemble evaluation)
+            seed: Random seed for augmentations. If None (default), generates a time-based seed
+                  for different augmentations on each run. Set to an integer for reproducibility.
         
         Returns:
             tuple: (uncertainties, metrics_dict)
         """
+        # Generate time-based seed if not provided (for non-deterministic augmentations)
+        if seed is None:
+            seed = int(time.time_ns() % (2**31))  # Use nanosecond timestamp modulo 2^31
+            print(f"  Using random seed for augmentations: {seed}")
+        
         timer = Timer("TTA computation")
         with timer:
             tta = uq.TTAMethod(
@@ -588,7 +599,46 @@ class FailureDetector:
                 batch_size=batch_size
             )
             
-            uncertainties = tta.compute(self.models, test_dataset, self.device)
+            # TTA ALWAYS computes the same way:
+            # For each model: apply augmentations and compute std across augmentations
+            # This gives us per-model uncertainties [M, N]
+            
+            # Compute per-model TTA uncertainties
+            _, per_fold_uncertainties = tta.compute(
+                self.models, test_dataset, self.device, 
+                ensemble_mode=True,  # Compute per-model
+                return_per_fold=True,  # Return full [M, N] array
+                seed=seed  # Pass seed to TTA
+            )
+            
+            # Get per-fold predictions for accurate per-fold metrics
+            predictions_per_fold = []
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            for model_idx, model in enumerate(self.models):
+                fold_preds = []
+                for batch_imgs, _ in test_loader:
+                    with torch.no_grad():
+                        model.eval()
+                        batch_imgs = batch_imgs.to(self.device)
+                        logits = model(batch_imgs)
+                        if logits.shape[1] == 1:
+                            probs = torch.sigmoid(logits)
+                            probs = torch.cat([1 - probs, probs], dim=1)
+                        else:
+                            probs = torch.softmax(logits, dim=1)
+                        fold_preds.append(torch.argmax(probs, dim=1).cpu().numpy())
+                predictions_per_fold.append(np.concatenate(fold_preds))
+            predictions_per_fold = np.array(predictions_per_fold)  # [M, N]
+            
+            # Difference between modes: what we return and how we compute metrics
+            if per_fold_evaluation:
+                # Per-fold mode: return [M, N] for per-fold metrics computation
+                uncertainties = per_fold_uncertainties  # [M, N]
+            else:
+                # Ensemble mode: average across models and return [N]
+                uncertainties = np.mean(per_fold_uncertainties, axis=0)  # [N]
+                # Still keep per_fold_uncertainties for storage
+                # But don't pass predictions_per_fold to metrics (use ensemble predictions)
         
         # Use cached predictions if available, otherwise compute
         if self._test_predictions_cache is not None:
@@ -602,11 +652,34 @@ class FailureDetector:
             correct_idx = np.where(y_pred == y_true)[0]
             incorrect_idx = np.where(y_pred != y_true)[0]
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        # Compute metrics based on mode
+        if per_fold_evaluation:
+            # Per-fold: compute metrics per fold (using per-fold predictions)
+            # Also compute ensemble reference (using ensemble predictions)
+            metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true,
+                                           predictions_per_fold=predictions_per_fold)
+        else:
+            # Ensemble: compute single metrics using ensemble predictions only
+            metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true,
+                                           predictions_per_fold=None)
+        
         metrics['time_seconds'] = timer.elapsed
         
         # Store results
-        self._uncertainties['TTA'] = uncertainties
+        if per_fold_evaluation:
+            # Per-fold mode: store per-fold [M, N], averaged [N], and ensemble reference [N]
+            self._uncertainties['TTA'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['TTA_per_fold'] = uncertainties  # [M, N] for plotting all curves
+            # Ensemble reference: same averaged uncertainties, will use ensemble predictions for ROC
+            self._uncertainties['TTA_ensemble'] = np.mean(uncertainties, axis=0)  # [N]
+            self._predictions_per_fold['TTA'] = predictions_per_fold  # [M, N]
+        else:
+            # Ensemble mode: store single averaged uncertainty [N]
+            # DO NOT store per-fold data (it will cause plotting to show per-fold curves)
+            self._uncertainties['TTA'] = uncertainties  # [N] averaged - this is the ensemble result
+            # Store per-fold data with different key for internal reference only (won't be plotted)
+            self._uncertainties['TTA_per_fold_internal'] = per_fold_uncertainties  # [M, N] for reference
+        
         self._results['TTA'] = metrics
         
         return uncertainties, metrics
@@ -727,7 +800,8 @@ class FailureDetector:
         nb_channels: int = 3,
         mean: float = 0.5,
         std: float = 0.5,
-        cache_dir: Optional[str] = None
+        cache_dir: Optional[str] = None,
+        per_fold_evaluation: bool = True
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run Greedy Policy Search (GPS).
@@ -749,6 +823,8 @@ class FailureDetector:
             mean: Normalization mean
             std: Normalization std
             cache_dir: Directory to cache policies
+            per_fold_evaluation: If True, compute per-model uncertainty then average (per-fold evaluation)
+                                If False, average models first then compute uncertainty (ensemble evaluation)
         
         Returns:
             tuple: (uncertainties, metrics_dict)
@@ -807,6 +883,7 @@ class FailureDetector:
                 )
             
             # Compute metric
+            # ensemble_mode=True for per_fold_evaluation (compute per-model, then average)
             uncertainties = gps.compute(
                 self.models, test_dataset, self.device,
                 n=2, m=45,
@@ -815,7 +892,8 @@ class FailureDetector:
                 image_normalization=True,
                 mean=mean,
                 std=std,
-                batch_size=batch_size
+                batch_size=batch_size,
+                ensemble_mode=per_fold_evaluation
             )
         
         # Use cached predictions if available, otherwise compute
@@ -1102,7 +1180,9 @@ class FailureDetector:
             print(f"\n📊 Generating evaluation plots...")
             for method_name, metric_values in self._uncertainties.items():
                 # Skip per-fold entries (they're paired with main entries)
-                if method_name.endswith('_per_fold') or method_name.endswith('_ensemble'):
+                if (method_name.endswith('_per_fold') or 
+                    method_name.endswith('_ensemble') or
+                    method_name.endswith('_per_fold_internal')):
                     continue
                 
                 try:
