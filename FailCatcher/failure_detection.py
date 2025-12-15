@@ -882,9 +882,15 @@ class FailureDetector:
                     seed=seed
                 )
             
-            # Compute metric
-            # ensemble_mode=True for per_fold_evaluation (compute per-model, then average)
-            uncertainties = gps.compute(
+            # Compute GPS uncertainties
+            # GPS always applies selected policies to each model and computes avg(std(models))
+            # This is consistent with TTA but uses ensemble-optimized policies from search
+            
+            print(f"\n  Applying {len(gps.policies)} selected policies to test set...")
+            print(f"  Computing per-model uncertainties, then averaging: avg(std(models))...")
+            
+            # Always compute per-model uncertainties first
+            _, per_fold_uncertainties = gps.compute(
                 self.models, test_dataset, self.device,
                 n=2, m=45,
                 nb_channels=nb_channels,
@@ -893,8 +899,38 @@ class FailureDetector:
                 mean=mean,
                 std=std,
                 batch_size=batch_size,
-                ensemble_mode=per_fold_evaluation
+                ensemble_mode=True,  # Compute per-model std
+                return_per_fold=True  # Return [M, N]
             )
+            
+            if per_fold_evaluation:
+                uncertainties = per_fold_uncertainties  # [M, N] for per-fold metrics
+            else:
+                uncertainties = np.mean(per_fold_uncertainties, axis=0)  # [N] averaged
+                # Keep per_fold_uncertainties for internal storage, don't set to None
+        
+        # Get predictions for metrics
+        if per_fold_evaluation:
+            # Get per-fold predictions
+            predictions_per_fold = []
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            for model_idx, model in enumerate(self.models):
+                fold_preds = []
+                for batch_imgs, _ in test_loader:
+                    with torch.no_grad():
+                        model.eval()
+                        batch_imgs = batch_imgs.to(self.device)
+                        logits = model(batch_imgs)
+                        if logits.shape[1] == 1:
+                            probs = torch.sigmoid(logits)
+                            probs = torch.cat([1 - probs, probs], dim=1)
+                        else:
+                            probs = torch.softmax(logits, dim=1)
+                        fold_preds.append(torch.argmax(probs, dim=1).cpu().numpy())
+                predictions_per_fold.append(np.concatenate(fold_preds))
+            predictions_per_fold = np.array(predictions_per_fold)  # [M, N]
+        else:
+            predictions_per_fold = None
         
         # Use cached predictions if available, otherwise compute
         if self._test_predictions_cache is not None:
@@ -908,11 +944,25 @@ class FailureDetector:
             correct_idx = np.where(y_pred == y_true)[0]
             incorrect_idx = np.where(y_pred != y_true)[0]
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true,
+                                       predictions_per_fold=predictions_per_fold)
         metrics['time_seconds'] = timer.elapsed
         
-        # Store results
-        self._uncertainties['GPS'] = uncertainties
+        # Store results (matching TTA pattern)
+        if per_fold_evaluation:
+            # Per-fold mode: store per-fold [M, N], averaged [N], and ensemble reference [N]
+            self._uncertainties['GPS'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['GPS_per_fold'] = uncertainties  # [M, N] for plotting all curves
+            # Note: No GPS_ensemble since GPS uses ensemble-optimized policies anyway
+            # The per-fold curves already represent applying ensemble-optimized policies to individual models
+            self._predictions_per_fold['GPS'] = predictions_per_fold  # [M, N]
+        else:
+            # Ensemble mode: store single averaged uncertainty [N]
+            # DO NOT store per-fold data (would trigger per-fold plotting)
+            self._uncertainties['GPS'] = uncertainties  # [N] averaged - this is avg(std(models))
+            # Store per-fold with internal suffix for potential debugging
+            self._uncertainties['GPS_per_fold_internal'] = per_fold_uncertainties  # [M, N]
+        
         self._results['GPS'] = metrics
         
         return uncertainties, metrics

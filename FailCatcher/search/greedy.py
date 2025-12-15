@@ -267,4 +267,4 @@ def plot_auc_curves(results):
     plt.legend(loc='best')
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
+    plt.close()  # Close instead of show to avoid blocking execution

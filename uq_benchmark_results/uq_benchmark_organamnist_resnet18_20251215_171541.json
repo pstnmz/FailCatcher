@@ -1,0 +1,82 @@
+{
+  "flag": "organamnist",
+  "model_backbone": "resnet18",
+  "setup": "",
+  "timestamp": "20251215_171541",
+  "test_accuracy": 0.9742378220272246,
+  "test_size": 17778,
+  "methods": {
+    "TTA": {
+      "auroc_f_mean": 0.7871047477241051,
+      "auroc_f_std": 0.010131923652940534,
+      "aurc_mean": 0.032481239519430646,
+      "aurc_std": 0.004813247258978271,
+      "augrc_mean": 0.022887744931706745,
+      "augrc_std": 0.0029875474287063323,
+      "accuracy": 0.9742378220272246,
+      "error_rate": 0.02576217797277534,
+      "n_correct": 17320,
+      "n_incorrect": 458,
+      "n_total": 17778,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.7893582268440547,
+          "aurc": 0.031037631153739316,
+          "augrc": 0.021923562122365115,
+          "accuracy": 0.9076386545168186,
+          "error_rate": 0.09236134548318146,
+          "n_correct": 16136,
+          "n_incorrect": 1642,
+          "n_total": 17778
+        },
+        {
+          "auroc_f": 0.790695441956532,
+          "aurc": 0.02966948495660787,
+          "augrc": 0.02086843219218451,
+          "accuracy": 0.911238609517381,
+          "error_rate": 0.08876139048261897,
+          "n_correct": 16200,
+          "n_incorrect": 1578,
+          "n_total": 17778
+        },
+        {
+          "auroc_f": 0.797122715313081,
+          "aurc": 0.027656623684732907,
+          "augrc": 0.020319822782505468,
+          "accuracy": 0.9113511081111486,
+          "error_rate": 0.08864889188885139,
+          "n_correct": 16202,
+          "n_incorrect": 1576,
+          "n_total": 17778
+        },
+        {
+          "auroc_f": 0.7907742095492942,
+          "aurc": 0.03247442497285496,
+          "augrc": 0.02269557723592918,
+          "accuracy": 0.9042636967037911,
+          "error_rate": 0.0957363032962088,
+          "n_correct": 16076,
+          "n_incorrect": 1702,
+          "n_total": 17778
+        },
+        {
+          "auroc_f": 0.767573144957564,
+          "aurc": 0.04156803282921817,
+          "augrc": 0.028631330325549462,
+          "accuracy": 0.8905951175610305,
+          "error_rate": 0.10940488243896951,
+          "n_correct": 15833,
+          "n_incorrect": 1945,
+          "n_total": 17778
+        }
+      ],
+      "auroc_f": 0.7871047477241051,
+      "aurc": 0.032481239519430646,
+      "augrc": 0.022887744931706745,
+      "time_seconds": 492.62190011799976
+    }
+  },
+  "metrics_file": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/all_metrics_organamnist_resnet18_20251215_171541.npz",
+  "figures_dir": "/home/lito/Documents/Codes/UQ_toolbox/uq_benchmark_results/figures/organamnist/20251215_171541"
+}

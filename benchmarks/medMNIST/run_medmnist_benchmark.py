@@ -683,7 +683,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             image_size=image_size,
             batch_size=batch_size,
             nb_augmentations=5,
-            per_fold_evaluation=per_fold_eval
+            per_fold_evaluation=per_fold_eval,
+            seed=42
         )
         results['TTA'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
@@ -803,7 +804,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             incorrect_idx_calib=gps_incorrect_idx,
             image_size=image_size,
             batch_size=batch_size,
-            cache_dir=os.path.join(output_dir, 'gps_cache'),
+            cache_dir=os.path.join(output_dir, 'gps_augment_cache'),
             per_fold_evaluation=per_fold_eval
         )
         results['GPS'] = metrics
