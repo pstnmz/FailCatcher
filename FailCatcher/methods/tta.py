@@ -142,11 +142,15 @@ class GPSMethod(UQMethod):
         if self.policies is None:
             raise RuntimeError("Call search_policies() before compute()")
         
+        print(f"  Extracting {len(self.policies)} policy groups...")
+        
         # Extract policies from search results
         transformation_pipeline = []
         for group in self.policies:
             n_group, m_group, transformations_group = extract_gps_augmentations_info(group)
             transformation_pipeline.append(transformations_group)
+        
+        print(f"  Extracted {len(transformation_pipeline)} transformation pipelines")
         
         if not transformation_pipeline:
             raise RuntimeError("No valid policies extracted from search results")
@@ -392,6 +396,8 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
         if is_gps_mode:
             # GPS mode: transformations is [[group1_policies], [group2_policies], [group3_policies]]
             all_groups_stds = []
+            all_groups_model_stds = [] if ensemble_mode else None
+            
             for group_idx, policy_group in enumerate(transformations):
                 print(f"  Applying policy group {group_idx + 1}/{len(transformations)}...")
                 
@@ -422,20 +428,23 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
                         else:
                             model_std = torch.mean(std_per_class, dim=1)  # [N]
                         
-                        model_stds.append(model_std)
+                        model_stds.append(model_std.cpu().numpy())
                     
-                    # Average across models
-                    group_stds = torch.mean(torch.stack(model_stds, dim=0), dim=0)  # [N]
+                    # Store per-model stds for this group
+                    all_groups_model_stds.append(np.array(model_stds))  # [M, N]
+                    
+                    # Average across models for group-level uncertainty
+                    group_stds = np.mean(model_stds, axis=0)  # [N]
                 else:
                     # Standard: compute std across K augmentations (models already averaged)
                     std_per_class = torch.std(predictions, dim=0)  # [N, num_classes]
                     
                     if std_per_class.shape[1] == 1:
-                        group_stds = std_per_class.squeeze(1)
+                        group_stds = std_per_class.squeeze(1).cpu().numpy()
                     else:
-                        group_stds = torch.mean(std_per_class, dim=1)
+                        group_stds = torch.mean(std_per_class, dim=1).cpu().numpy()
                 
-                all_groups_stds.append(group_stds.cpu().numpy())
+                all_groups_stds.append(group_stds)
             
             # Average across groups if requested
             if average_groups:
@@ -444,7 +453,13 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
                 stds = all_groups_stds  # [G, N] - return per-group stds
             
             averaged_predictions = None # not computed in GPS mode
-            per_fold_stds = None  # TODO: implement per-fold for GPS mode
+            
+            # Handle per-fold mode for GPS
+            if ensemble_mode and return_per_fold:
+                # Average per-model stds across groups: [G, M, N] → [M, N]
+                per_fold_stds = np.mean(all_groups_model_stds, axis=0)  # [M, N]
+            else:
+                per_fold_stds = None
         else:
             # Single policy or standard TTA: process each augmentation one by one
             if ensemble_mode:
@@ -573,7 +588,7 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
     if usingBetterRandAugment:
         if isinstance(transformations, list):
             # Case 1: Explicit policies provided
-            rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=True, randomize_sign=False, image_size=image_size) for policy in transformations]
+            rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=False, randomize_sign=False, image_size=image_size) for policy in transformations]
         
         # Case 2: Random policies (transformations is None or False)
         else:
@@ -593,12 +608,13 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
 
         for i, augmentation in enumerate(augmentations):
             augmented_inputs_batch = []
-            print(f"Applying augmentation n : {i}")
+            print(f"  Loading augmentation {i+1}/{len(augmentations)}...", end='', flush=True)
             data_loader = _get_loader(augmentation)
             for batch in data_loader:
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+            print(" done")
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
     
     else:
