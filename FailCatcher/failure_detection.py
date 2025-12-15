@@ -117,6 +117,7 @@ class FailureDetector:
         # Cache for predictions (computed once)
         self._test_predictions_cache = None
         self._test_loader_cache = None
+        self._per_fold_predictions_cache = None  # Cache per-fold predictions [M, N] to avoid recomputing
         
         # Storage for computed uncertainties and predictions
         self._uncertainties = {}
@@ -150,6 +151,46 @@ class FailureDetector:
             'correct_idx': correct_idx,
             'incorrect_idx': incorrect_idx
         }
+    
+    def _get_per_fold_predictions(self, batch_size):
+        """
+        Get per-fold predictions (vanilla, no augmentations).
+        Computes once and caches for reuse across UQ methods.
+        
+        Uses self.test_dataset (normalized) to ensure predictions match
+        the cached ensemble predictions used for all benchmarks.
+        
+        Args:
+            batch_size: Batch size for inference
+        
+        Returns:
+            np.ndarray: Per-fold predictions [M, N]
+        """
+        if self._per_fold_predictions_cache is not None:
+            return self._per_fold_predictions_cache
+        
+        print("  Computing per-fold predictions (vanilla inference, no augmentations)...")
+        predictions_per_fold = []
+        test_loader = DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False)
+        
+        for model_idx, model in enumerate(self.models):
+            fold_preds = []
+            for batch_imgs, _ in test_loader:
+                with torch.no_grad():
+                    model.eval()
+                    batch_imgs = batch_imgs.to(self.device)
+                    logits = model(batch_imgs)
+                    if logits.shape[1] == 1:
+                        probs = torch.sigmoid(logits)
+                        probs = torch.cat([1 - probs, probs], dim=1)
+                    else:
+                        probs = torch.softmax(logits, dim=1)
+                    fold_preds.append(torch.argmax(probs, dim=1).cpu().numpy())
+            predictions_per_fold.append(np.concatenate(fold_preds))
+        
+        self._per_fold_predictions_cache = np.array(predictions_per_fold)  # [M, N]
+        print(f"    ✓ Cached per-fold predictions [{len(self.models)} folds × {len(predictions_per_fold[0])} samples]")
+        return self._per_fold_predictions_cache
     
     def run_msr(
         self,
@@ -611,24 +652,9 @@ class FailureDetector:
                 seed=seed  # Pass seed to TTA
             )
             
-            # Get per-fold predictions for accurate per-fold metrics
-            predictions_per_fold = []
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-            for model_idx, model in enumerate(self.models):
-                fold_preds = []
-                for batch_imgs, _ in test_loader:
-                    with torch.no_grad():
-                        model.eval()
-                        batch_imgs = batch_imgs.to(self.device)
-                        logits = model(batch_imgs)
-                        if logits.shape[1] == 1:
-                            probs = torch.sigmoid(logits)
-                            probs = torch.cat([1 - probs, probs], dim=1)
-                        else:
-                            probs = torch.softmax(logits, dim=1)
-                        fold_preds.append(torch.argmax(probs, dim=1).cpu().numpy())
-                predictions_per_fold.append(np.concatenate(fold_preds))
-            predictions_per_fold = np.array(predictions_per_fold)  # [M, N]
+            # Get per-fold predictions (use cache to avoid redundant inference)
+            # Uses self.test_dataset (normalized) for consistency with ensemble predictions
+            predictions_per_fold = self._get_per_fold_predictions(batch_size)
             
             # Difference between modes: what we return and how we compute metrics
             if per_fold_evaluation:
@@ -668,10 +694,11 @@ class FailureDetector:
         # Store results
         if per_fold_evaluation:
             # Per-fold mode: store per-fold [M, N], averaged [N], and ensemble reference [N]
-            self._uncertainties['TTA'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            averaged_uncertainties = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['TTA'] = averaged_uncertainties
             self._uncertainties['TTA_per_fold'] = uncertainties  # [M, N] for plotting all curves
-            # Ensemble reference: same averaged uncertainties, will use ensemble predictions for ROC
-            self._uncertainties['TTA_ensemble'] = np.mean(uncertainties, axis=0)  # [N]
+            # Ensemble baseline: same averaged uncertainties, but evaluated against ensemble predictions
+            self._uncertainties['TTA_ensemble'] = averaged_uncertainties  # [N] for ensemble ROC baseline
             self._predictions_per_fold['TTA'] = predictions_per_fold  # [M, N]
         else:
             # Ensemble mode: store single averaged uncertainty [N]
@@ -909,26 +936,10 @@ class FailureDetector:
                 uncertainties = np.mean(per_fold_uncertainties, axis=0)  # [N] averaged
                 # Keep per_fold_uncertainties for internal storage, don't set to None
         
-        # Get predictions for metrics
+        # Get predictions for metrics (use cache to avoid redundant inference)
+        # Uses self.test_dataset (normalized) for consistency with ensemble predictions
         if per_fold_evaluation:
-            # Get per-fold predictions
-            predictions_per_fold = []
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-            for model_idx, model in enumerate(self.models):
-                fold_preds = []
-                for batch_imgs, _ in test_loader:
-                    with torch.no_grad():
-                        model.eval()
-                        batch_imgs = batch_imgs.to(self.device)
-                        logits = model(batch_imgs)
-                        if logits.shape[1] == 1:
-                            probs = torch.sigmoid(logits)
-                            probs = torch.cat([1 - probs, probs], dim=1)
-                        else:
-                            probs = torch.softmax(logits, dim=1)
-                        fold_preds.append(torch.argmax(probs, dim=1).cpu().numpy())
-                predictions_per_fold.append(np.concatenate(fold_preds))
-            predictions_per_fold = np.array(predictions_per_fold)  # [M, N]
+            predictions_per_fold = self._get_per_fold_predictions(batch_size)
         else:
             predictions_per_fold = None
         
@@ -951,10 +962,11 @@ class FailureDetector:
         # Store results (matching TTA pattern)
         if per_fold_evaluation:
             # Per-fold mode: store per-fold [M, N], averaged [N], and ensemble reference [N]
-            self._uncertainties['GPS'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            averaged_uncertainties = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['GPS'] = averaged_uncertainties
             self._uncertainties['GPS_per_fold'] = uncertainties  # [M, N] for plotting all curves
-            # Note: No GPS_ensemble since GPS uses ensemble-optimized policies anyway
-            # The per-fold curves already represent applying ensemble-optimized policies to individual models
+            # Ensemble baseline: same averaged uncertainties, but evaluated against ensemble predictions
+            self._uncertainties['GPS_ensemble'] = averaged_uncertainties  # [N] for ensemble ROC baseline
             self._predictions_per_fold['GPS'] = predictions_per_fold  # [M, N]
         else:
             # Ensemble mode: store single averaged uncertainty [N]

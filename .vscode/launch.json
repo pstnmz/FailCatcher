@@ -10,7 +10,7 @@
             "console": "integratedTerminal",
             "args": ["--flag", "breastmnist", "--methods", "TTA", "--per-fold-eval"],
             "justMyCode": false,
-            "python": "/home/lito/Documents/Codes/UQ_toolbox/.venv/bin/python3.12"
+            
         }
     ]
 }

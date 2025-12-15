@@ -1,0 +1,23 @@
+{
+  "flag": "breastmnist",
+  "model_backbone": "resnet18",
+  "setup": "",
+  "timestamp": "20251215_185659",
+  "test_accuracy": 0.9102564102564102,
+  "test_size": 156,
+  "methods": {
+    "TTA": {
+      "auroc_f": 0.7595573440643864,
+      "aurc": 0.03017812878099886,
+      "augrc": 0.02366863905325444,
+      "accuracy": 0.9102564102564102,
+      "error_rate": 0.08974358974358974,
+      "n_correct": 142,
+      "n_incorrect": 14,
+      "n_total": 156,
+      "time_seconds": 6.218389492481947
+    }
+  },
+  "metrics_file": "/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/uq_benchmark_results/all_metrics_breastmnist_resnet18_20251215_185659.npz",
+  "figures_dir": "/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/uq_benchmark_results/figures/breastmnist/20251215_185659"
+}
