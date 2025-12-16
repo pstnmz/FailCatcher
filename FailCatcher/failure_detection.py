@@ -1022,6 +1022,14 @@ class FailureDetector:
             print(f"\n  Applying {len(gps.policies)} selected policies to test set...")
             print(f"  Computing per-model uncertainties, then averaging: avg(std(models))...")
             
+            # CRITICAL: Reset random state before applying augmentations for reproducibility
+            # Augmentation operations (Rotate, ShearX, etc.) use random.random() internally
+            # and the global state may have been modified by previous methods
+            import random as pyrandom
+            pyrandom.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            
             # Always compute per-model uncertainties first
             _, per_fold_uncertainties = gps.compute(
                 self.models, test_dataset, self.device,
@@ -1130,15 +1138,23 @@ class FailureDetector:
             correct_idx = np.where(y_pred == y_true)[0]
             incorrect_idx = np.where(y_pred != y_true)[0]
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        # Get per-fold predictions if needed for per-fold metrics
+        predictions_per_fold = None
+        if uncertainties.ndim == 2:  # Per-fold uncertainties
+            predictions_per_fold = self._get_per_fold_predictions(test_loader)
+        
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true,
+                                       predictions_per_fold=predictions_per_fold)
         metrics['time_seconds'] = timer.elapsed
         
         # Store results
         if uncertainties.ndim == 2:
-            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots), and ensemble averaged
-            self._uncertainties['KNN_Raw'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots), and ensemble reference
+            averaged_uncertainties = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['KNN_Raw'] = averaged_uncertainties
             self._uncertainties['KNN_Raw_per_fold'] = uncertainties  # [num_folds, N]
-            # Note: KNN_Raw doesn't compute ensemble separately, so no _ensemble key
+            self._uncertainties['KNN_Raw_ensemble'] = averaged_uncertainties  # [N] for ensemble ROC baseline
+            self._predictions_per_fold['KNN_Raw'] = predictions_per_fold  # [M, N]
         else:
             # Ensemble: store single uncertainty
             self._uncertainties['KNN_Raw'] = uncertainties
@@ -1212,15 +1228,23 @@ class FailureDetector:
             correct_idx = np.where(y_pred == y_true)[0]
             incorrect_idx = np.where(y_pred != y_true)[0]
         
-        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true)
+        # Get per-fold predictions if needed for per-fold metrics
+        predictions_per_fold = None
+        if uncertainties.ndim == 2:  # Per-fold uncertainties
+            predictions_per_fold = self._get_per_fold_predictions(test_loader)
+        
+        metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true,
+                                       predictions_per_fold=predictions_per_fold)
         metrics['time_seconds'] = timer.elapsed
         
         # Store results
         if uncertainties.ndim == 2:
-            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots)
-            self._uncertainties['KNN_SHAP'] = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots), and ensemble reference
+            averaged_uncertainties = np.mean(uncertainties, axis=0)  # [N] averaged across folds
+            self._uncertainties['KNN_SHAP'] = averaged_uncertainties
             self._uncertainties['KNN_SHAP_per_fold'] = uncertainties  # [num_folds, N]
-            # Note: KNN_SHAP doesn't compute ensemble separately, so no _ensemble key
+            self._uncertainties['KNN_SHAP_ensemble'] = averaged_uncertainties  # [N] for ensemble ROC baseline
+            self._predictions_per_fold['KNN_SHAP'] = predictions_per_fold  # [M, N]
         else:
             # Ensemble: store single uncertainty
             self._uncertainties['KNN_SHAP'] = uncertainties

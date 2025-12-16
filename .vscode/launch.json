@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+
         {
             "name": "run_medmnist_benchmark.py",
             "type": "debugpy",
@@ -8,7 +9,7 @@
             "program": "${workspaceFolder}/benchmarks/medMNIST/run_medmnist_benchmark.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["--flag", "breastmnist", "--methods", "TTA", "--per-fold-eval"],
+            "args": ["--flag", "breastmnist", "--model", "resnet18", "--methods", "GPS", "--per-fold-eval", "--gpu", "2"],
             "justMyCode": false,
             
         }

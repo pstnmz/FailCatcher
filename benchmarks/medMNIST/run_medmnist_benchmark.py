@@ -309,6 +309,17 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print(f"Using FailCatcher v{FailCatcher.__version__}")
     print(f"{'='*80}\n")
     
+    # Set seeds for reproducibility
+    import random
+    random.seed(42)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    np.random.seed(42)
+    # Enable deterministic algorithms for CUDA
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print("🔒 Deterministic mode enabled (seed=42)\n")
+    
     # Get absolute path to workspace root (UQ_Toolbox/)
     workspace_root = Path(__file__).parent.parent.parent.absolute()
     
@@ -854,6 +865,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
 
     if 'GPS' in methods:
         print("\n🔍 Running GPS...")
+        
+        # CRITICAL: Reset test_dataset_tta transform to original state
+        # TTA may have modified it, and GPS needs clean dataset
+        test_dataset_tta.transform = transform_tta
+        
         setup_name = setup if setup else 'standard'
         # Include sample count in folder name if subsampling occurs
         folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
@@ -883,8 +899,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             # Convert numpy arrays to lists for GPS
             gps_correct_idx = gps_correct_idx.tolist()
             gps_incorrect_idx = gps_incorrect_idx.tolist()
-            print(f"  GPS will use: {len(gps_correct_idx)} correct, {len(gps_incorrect_idx)} incorrect indices")
-        
+
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
         uncertainties, metrics = detector.run_gps(

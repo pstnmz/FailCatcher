@@ -146,9 +146,19 @@ class GPSMethod(UQMethod):
         
         # Extract policies from search results
         transformation_pipeline = []
+        extracted_m = None
         for group in self.policies:
             n_group, m_group, transformations_group = extract_gps_augmentations_info(group)
             transformation_pipeline.append(transformations_group)
+            # Use M value from policy filenames (they encode the max_magnitude used during caching)
+            if m_group is not None:
+                extracted_m = m_group
+        
+        # Override m parameter with extracted M from filenames if available
+        # This ensures max_magnitude matches the scale used when policies were generated
+        if extracted_m is not None:
+            print(f"  Using M={extracted_m} extracted from policy filenames (overriding m={m})")
+            m = extracted_m
         
         print(f"  Extracted {len(transformation_pipeline)} transformation pipelines")
         
@@ -249,8 +259,8 @@ def _batched_augmentation_inference(augmented_inputs, models, device, batch_size
                 aug_preds = torch.cat(all_preds, dim=0)  # [N, M, num_classes]
                 
                 # Split by model
-                for m in range(M):
-                    preds_per_model[m].append(aug_preds[:, m, :])  # [N, num_classes]
+                for model_idx in range(M):
+                    preds_per_model[model_idx].append(aug_preds[:, model_idx, :])  # [N, num_classes]
             
             # Stack: M x [K, N, num_classes] → [M, K, N, num_classes]
             predictions = torch.stack([torch.stack(model_preds, dim=0) for model_preds in preds_per_model], dim=0)
@@ -373,7 +383,10 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
             - per_fold_stds: [M, N] array of per-model uncertainties (only if ensemble_mode=True)
     """
     # Set seed for augmentation reproducibility/randomness
+    # CRITICAL: Augmentation operations use random.random() internally!
     if seed is not None:
+        import random
+        random.seed(seed)
         torch.manual_seed(seed)
         np.random.seed(seed)
     
@@ -433,13 +446,13 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
                             )
                             
                             # Store per model: [1, N, num_classes]
-                            for m in range(M):
-                                model_policy_preds[m].append(policy_preds[m, 0])  # [N, num_classes]
+                            for model_idx in range(M):
+                                model_policy_preds[model_idx].append(policy_preds[model_idx, 0])  # [N, num_classes]
                         
                         # Stack all policies per model: [K, N, num_classes]
                         model_stds = []
-                        for m in range(M):
-                            model_preds_stacked = torch.stack(model_policy_preds[m], dim=0)  # [K, N, num_classes]
+                        for model_idx in range(M):
+                            model_preds_stacked = torch.stack(model_policy_preds[model_idx], dim=0)  # [K, N, num_classes]
                             # Compute std across K policies
                             std_per_class = torch.std(model_preds_stacked, dim=0)  # [N, num_classes]
                             
@@ -500,9 +513,9 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
                         M, K, N, num_classes = predictions.shape
                         
                         model_stds = []
-                        for m in range(M):
-                            # Std across K augmentations for model m
-                            std_per_class = torch.std(predictions[m], dim=0)  # [N, num_classes]
+                        for model_idx in range(M):
+                            # Std across K augmentations for this model
+                            std_per_class = torch.std(predictions[model_idx], dim=0)  # [N, num_classes]
                             
                             if num_classes == 1:
                                 model_std = std_per_class.squeeze(1)
@@ -566,14 +579,14 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
                     aug_preds = torch.cat(all_preds, dim=0)  # [N, M, num_classes]
                     
                     # Split by model
-                    for m in range(M):
-                        model_predictions[m].append(aug_preds[:, m, :])  # [N, num_classes]
+                    for model_idx in range(M):
+                        model_predictions[model_idx].append(aug_preds[:, model_idx, :])  # [N, num_classes]
                 
                 # Compute std per model, then average
                 model_stds = []
-                for m in range(M):
+                for model_idx in range(M):
                     # Stack augmentations for this model: [nb_augmentations, N, num_classes]
-                    model_aug_preds = torch.stack(model_predictions[m], dim=0)
+                    model_aug_preds = torch.stack(model_predictions[model_idx], dim=0)
                     # Permute to [N, nb_augmentations, num_classes]
                     model_aug_preds = model_aug_preds.permute(1, 0, 2)
                     # Compute std for this model
@@ -642,7 +655,7 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
     """
     augmented_inputs = []
     worker_count = 4 if dataloader_workers is None else dataloader_workers
-
+    
     def _get_loader(augmentation):
         if cached_dataset is not None:
             aug_dataset = _CachedRandAugDataset(cached_dataset, augmentation)
@@ -653,18 +666,31 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                 num_workers=worker_count,
                 pin_memory=True,
             )
+        
+        # Save original transform before modifying
+        saved_transforms = None
         if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
+            saved_transforms = [subds.transform for subds in dataset.dataset.datasets]
             for subds in dataset.dataset.datasets:
                 subds.transform = augmentation
         else:
+            saved_transforms = dataset.transform
             dataset.transform = augmentation
-        return DataLoader(
+        
+        # Create loader and consume all data
+        loader = DataLoader(
             dataset=dataset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=worker_count,
             pin_memory=True,
         )
+        
+        # Store saved transforms to restore later
+        loader._saved_transforms = saved_transforms
+        loader._target_dataset = dataset
+        
+        return loader
     
     if usingBetterRandAugment:
         if isinstance(transformations, list):
@@ -695,6 +721,16 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+            
+            # Restore original transform after consuming data
+            if hasattr(data_loader, '_saved_transforms') and data_loader._saved_transforms is not None:
+                target_dataset = data_loader._target_dataset
+                if hasattr(target_dataset, 'dataset') and hasattr(target_dataset.dataset, 'datasets') and isinstance(data_loader._saved_transforms, list):
+                    for subds, saved_transform in zip(target_dataset.dataset.datasets, data_loader._saved_transforms):
+                        subds.transform = saved_transform
+                else:
+                    target_dataset.transform = data_loader._saved_transforms
+            
             print(" done")
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
     
@@ -720,6 +756,15 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+            
+            # Restore original transform after consuming data
+            if hasattr(data_loader, '_saved_transforms') and data_loader._saved_transforms is not None:
+                target_dataset = data_loader._target_dataset
+                if hasattr(target_dataset, 'dataset') and hasattr(target_dataset.dataset, 'datasets') and isinstance(data_loader._saved_transforms, list):
+                    for subds, saved_transform in zip(target_dataset.dataset.datasets, data_loader._saved_transforms):
+                        subds.transform = saved_transform
+                else:
+                    target_dataset.transform = data_loader._saved_transforms
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [num_augmentations, batch_size, C, H, W]
     
     if usingBetterRandAugment : 
