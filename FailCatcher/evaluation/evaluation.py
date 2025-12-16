@@ -870,7 +870,7 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
 def save_all_evaluation_plots(uncertainties, predictions, labels, 
                                method_name='UQ Method', output_dir='./figures',
                                uncertainties_per_fold=None, ensemble_uncertainties=None,
-                               predictions_per_fold=None):
+                               predictions_per_fold=None, model_backbone=None, setup=None):
     """
     Generate and save all evaluation plots for a UQ method.
     
@@ -895,11 +895,18 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Build filename prefix with model configuration
+    prefix = ''
+    if model_backbone:
+        prefix += f'{model_backbone}_'
+    if setup:
+        prefix += f'{setup}_'
+    
     # Sanitize method name for filename
     safe_name = method_name.replace(' ', '_').replace('/', '_')
     
     # Save ROC curve for failure prediction
-    roc_path = output_dir / f'{safe_name}_roc_curve.png'
+    roc_path = output_dir / f'{prefix}{safe_name}_roc_curve.png'
     fig_roc = plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
                                                 method_name=method_name,
                                                 save_path=roc_path,
@@ -909,7 +916,7 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
     plt.close(fig_roc)
     
     # Save risk-coverage curves
-    rc_path = output_dir / f'{safe_name}_risk_coverage.png'
+    rc_path = output_dir / f'{prefix}{safe_name}_risk_coverage.png'
     fig_rc, _ = plot_risk_coverage_curve(uncertainties, predictions, labels, 
                                          save_path=rc_path,
                                          uncertainties_per_fold=uncertainties_per_fold,
@@ -918,7 +925,7 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
     plt.close(fig_rc)
     
     # Save uncertainty distributions
-    dist_path = output_dir / f'{safe_name}_distributions.png'
+    dist_path = output_dir / f'{prefix}{safe_name}_distributions.png'
     fig_dist = plot_uncertainty_distributions(uncertainties, predictions, labels,
                                               method_name=method_name,
                                               save_path=dist_path,
