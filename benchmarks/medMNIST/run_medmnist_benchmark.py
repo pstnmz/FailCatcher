@@ -495,6 +495,44 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             indiv_logits = None
             indiv_logits_calib = None
         
+        # Check if per-fold predictions are cached
+        if 'per_fold_predictions' in test_cache.files:
+            per_fold_predictions = test_cache['per_fold_predictions']  # [K, N]
+            per_fold_predictions_calib = calib_cache['per_fold_predictions']  # [K, N_calib]
+            print(f"  ✓ Loaded per-fold predictions from cache")
+        else:
+            # Old cache format - compute from indiv_scores
+            print(f"  ⚠️  Old cache format detected - computing per-fold predictions...")
+            # Compute from indiv_scores (still in [N, K, C] format at this point)
+            per_fold_predictions = np.argmax(indiv_scores, axis=2).T  # [N, K] → [K, N]
+            per_fold_predictions_calib = np.argmax(indiv_scores_calib, axis=2).T  # [N_calib, K] → [K, N_calib]
+        
+        # Check if per-fold correct/incorrect indices are cached
+        if 'per_fold_correct_idx' in test_cache.files:
+            per_fold_correct_idx = [arr for arr in test_cache['per_fold_correct_idx']]
+            per_fold_incorrect_idx = [arr for arr in test_cache['per_fold_incorrect_idx']]
+            per_fold_correct_idx_calib = [arr for arr in calib_cache['per_fold_correct_idx']]
+            per_fold_incorrect_idx_calib = [arr for arr in calib_cache['per_fold_incorrect_idx']]
+            print(f"  ✓ Loaded per-fold correct/incorrect indices from cache")
+        else:
+            # Old cache format - need to compute from per_fold_predictions
+            print(f"  ⚠️  Computing per-fold indices from predictions...")
+            per_fold_correct_idx = []
+            per_fold_incorrect_idx = []
+            per_fold_correct_idx_calib = []
+            per_fold_incorrect_idx_calib = []
+            
+            for fold_idx in range(per_fold_predictions.shape[0]):
+                fold_correct = np.where(per_fold_predictions[fold_idx] == y_true)[0]
+                fold_incorrect = np.where(per_fold_predictions[fold_idx] != y_true)[0]
+                per_fold_correct_idx.append(fold_correct)
+                per_fold_incorrect_idx.append(fold_incorrect)
+                
+                fold_correct_calib = np.where(per_fold_predictions_calib[fold_idx] == y_true_calib)[0]
+                fold_incorrect_calib = np.where(per_fold_predictions_calib[fold_idx] != y_true_calib)[0]
+                per_fold_correct_idx_calib.append(fold_correct_calib)
+                per_fold_incorrect_idx_calib.append(fold_incorrect_calib)
+        
         # Transpose to [K, N, C] format for per-fold evaluation
         indiv_scores = np.transpose(indiv_scores, (1, 0, 2))  # [K, N, C]
         indiv_scores_calib = np.transpose(indiv_scores_calib, (1, 0, 2))  # [K, N_calib, C]
@@ -563,6 +601,34 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         indiv_logits = np.transpose(indiv_logits_raw, (1, 0, 2))  # [K, N, C]
         indiv_logits_calib = np.transpose(indiv_logits_calib_raw, (1, 0, 2))  # [K, N_calib, C]
         
+        # Compute per-fold correct/incorrect indices
+        print("\n📊 Computing per-fold correct/incorrect indices...")
+        per_fold_correct_idx = []
+        per_fold_incorrect_idx = []
+        per_fold_correct_idx_calib = []
+        per_fold_incorrect_idx_calib = []
+        
+        for fold_idx in range(len(models)):
+            # Test set
+            fold_preds = np.argmax(indiv_scores[fold_idx], axis=1)  # [N]
+            fold_correct = np.where(fold_preds == y_true)[0]
+            fold_incorrect = np.where(fold_preds != y_true)[0]
+            per_fold_correct_idx.append(fold_correct)
+            per_fold_incorrect_idx.append(fold_incorrect)
+            
+            # Calibration set
+            fold_preds_calib = np.argmax(indiv_scores_calib[fold_idx], axis=1)  # [N_calib]
+            fold_correct_calib = np.where(fold_preds_calib == y_true_calib)[0]
+            fold_incorrect_calib = np.where(fold_preds_calib != y_true_calib)[0]
+            per_fold_correct_idx_calib.append(fold_correct_calib)
+            per_fold_incorrect_idx_calib.append(fold_incorrect_calib)
+            
+            print(f"  Fold {fold_idx}: {len(fold_correct)} correct, {len(fold_incorrect)} incorrect (test)")
+        
+        # Compute per-fold predictions [M, N] for caching
+        per_fold_predictions = np.argmax(indiv_scores, axis=2)  # [K, N, C] → [K, N]
+        per_fold_predictions_calib = np.argmax(indiv_scores_calib, axis=2)  # [K, N_calib, C] → [K, N_calib]
+        
         # Save to cache for next time
         print("\n💾 Saving evaluation results to cache...")
         np.savez_compressed(
@@ -574,7 +640,10 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             incorrect_idx=incorrect_idx_calib,
             indiv_scores=indiv_scores_calib_raw,  # Save as [N, K, C]
             logits=logits_calib,
-            indiv_logits=indiv_logits_calib_raw  # Save as [N, K, C]
+            indiv_logits=indiv_logits_calib_raw,  # Save as [N, K, C]
+            per_fold_correct_idx=np.array(per_fold_correct_idx_calib, dtype=object),  # Object array of variable-length arrays
+            per_fold_incorrect_idx=np.array(per_fold_incorrect_idx_calib, dtype=object),  # Object array
+            per_fold_predictions=per_fold_predictions_calib  # [K, N_calib]
         )
         np.savez_compressed(
             test_cache_path,
@@ -585,7 +654,10 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             incorrect_idx=incorrect_idx,
             indiv_scores=indiv_scores_raw,  # Save as [N, K, C]
             logits=logits,
-            indiv_logits=indiv_logits_raw  # Save as [N, K, C]
+            indiv_logits=indiv_logits_raw,  # Save as [N, K, C]
+            per_fold_correct_idx=np.array(per_fold_correct_idx, dtype=object),  # Object array of variable-length arrays
+            per_fold_incorrect_idx=np.array(per_fold_incorrect_idx, dtype=object),  # Object array
+            per_fold_predictions=per_fold_predictions  # [K, N]
         )
         print(f"  ✓ Cached to {cache_dir}")
     
@@ -603,6 +675,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     # Set predictions once to avoid recomputing for each method
     detector.set_test_predictions(y_scores, y_true, y_pred)
+    
+    # Set per-fold predictions to avoid redundant vanilla inference
+    # This is especially important when running multiple UQ methods
+    detector.set_per_fold_predictions(per_fold_predictions)
+    print("  ✓ Pre-cached per-fold predictions - vanilla inference will be skipped")
     
     # Create CV train loaders for KNN methods
     cv_gen = create_cv_generator(n_splits=5, seed=42, batch_size=batch_size)
