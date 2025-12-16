@@ -398,51 +398,132 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
             all_groups_stds = []
             all_groups_model_stds = [] if ensemble_mode else None
             
+            # Memory-efficient mode: process one policy at a time if group is large
+            # Heuristic: if K policies * N samples * batch_size might exceed RAM, go sequential
+            memory_efficient_threshold = 5  # Process sequentially if > 5 policies in a group (typical with top_k=3)
+            
             for group_idx, policy_group in enumerate(transformations):
-                print(f"  Applying policy group {group_idx + 1}/{len(transformations)}...")
+                print(f"  Applying policy group {group_idx + 1}/{len(transformations)} ({len(policy_group)} policies)...")
                 
-                # Get augmented inputs: [K, N, C, H, W]
-                augmented_inputs, _ = apply_augmentations(
-                    dataset, len(policy_group), usingBetterRandAugment, n, m, 
-                    image_normalization, nb_channels, mean, std, image_size, 
-                    policy_group, batch_size=batch_size
-                )
+                K = len(policy_group)
+                use_sequential = K > memory_efficient_threshold
                 
-                # Use batched inference
-                predictions = _batched_augmentation_inference(
-                    augmented_inputs, models, device, batch_size, ensemble_mode=ensemble_mode
-                )  # [K, N, num_classes] or [M, K, N, num_classes] if ensemble_mode
-                
-                if ensemble_mode:
-                    # Compute std per-model, then average across models
-                    # predictions: [M, K, N, num_classes]
-                    M, K, N, num_classes = predictions.shape
-                    
-                    model_stds = []
-                    for m in range(M):
-                        # Std across K augmentations for model m
-                        std_per_class = torch.std(predictions[m], dim=0)  # [N, num_classes]
+                if use_sequential:
+                    print(f"    Using memory-efficient mode (processing {K} policies one at a time)")
+                    # Process one policy at a time to avoid RAM buildup
+                    if ensemble_mode:
+                        # Track predictions per model: [M] → list of [K, N, num_classes]
+                        M = len(models) if isinstance(models, list) else 1
+                        model_policy_preds = [[] for _ in range(M)]
                         
-                        if num_classes == 1:
-                            model_std = std_per_class.squeeze(1)
-                        else:
-                            model_std = torch.mean(std_per_class, dim=1)  # [N]
+                        for policy_idx, single_policy in enumerate(policy_group):
+                            if policy_idx % 10 == 0:
+                                print(f"      Policy {policy_idx+1}/{K}...")
+                            
+                            # Apply single policy: [1, N, C, H, W]
+                            augmented_inputs, _ = apply_augmentations(
+                                dataset, 1, usingBetterRandAugment, n, m, 
+                                image_normalization, nb_channels, mean, std, image_size, 
+                                [single_policy], batch_size=batch_size
+                            )
+                            
+                            # Inference: [M, 1, N, num_classes]
+                            policy_preds = _batched_augmentation_inference(
+                                augmented_inputs, models, device, batch_size, ensemble_mode=True
+                            )
+                            
+                            # Store per model: [1, N, num_classes]
+                            for m in range(M):
+                                model_policy_preds[m].append(policy_preds[m, 0])  # [N, num_classes]
                         
-                        model_stds.append(model_std.cpu().numpy())
-                    
-                    # Store per-model stds for this group
-                    all_groups_model_stds.append(np.array(model_stds))  # [M, N]
-                    
-                    # Average across models for group-level uncertainty
-                    group_stds = np.mean(model_stds, axis=0)  # [N]
-                else:
-                    # Standard: compute std across K augmentations (models already averaged)
-                    std_per_class = torch.std(predictions, dim=0)  # [N, num_classes]
-                    
-                    if std_per_class.shape[1] == 1:
-                        group_stds = std_per_class.squeeze(1).cpu().numpy()
+                        # Stack all policies per model: [K, N, num_classes]
+                        model_stds = []
+                        for m in range(M):
+                            model_preds_stacked = torch.stack(model_policy_preds[m], dim=0)  # [K, N, num_classes]
+                            # Compute std across K policies
+                            std_per_class = torch.std(model_preds_stacked, dim=0)  # [N, num_classes]
+                            
+                            if std_per_class.shape[1] == 1:
+                                model_std = std_per_class.squeeze(1).cpu().numpy()
+                            else:
+                                model_std = torch.mean(std_per_class, dim=1).cpu().numpy()
+                            
+                            model_stds.append(model_std)
+                        
+                        all_groups_model_stds.append(np.array(model_stds))  # [M, N]
+                        group_stds = np.mean(model_stds, axis=0)  # [N]
                     else:
-                        group_stds = torch.mean(std_per_class, dim=1).cpu().numpy()
+                        # Ensemble averaging: track [K, N, num_classes]
+                        all_policy_preds = []
+                        
+                        for policy_idx, single_policy in enumerate(policy_group):
+                            if policy_idx % 10 == 0:
+                                print(f"      Policy {policy_idx+1}/{K}...")
+                            
+                            augmented_inputs, _ = apply_augmentations(
+                                dataset, 1, usingBetterRandAugment, n, m, 
+                                image_normalization, nb_channels, mean, std, image_size, 
+                                [single_policy], batch_size=batch_size
+                            )
+                            
+                            # Inference: [1, N, num_classes]
+                            policy_preds = _batched_augmentation_inference(
+                                augmented_inputs, models, device, batch_size, ensemble_mode=False
+                            )
+                            all_policy_preds.append(policy_preds[0])  # [N, num_classes]
+                        
+                        # Stack and compute std: [K, N, num_classes]
+                        all_preds_stacked = torch.stack(all_policy_preds, dim=0)
+                        std_per_class = torch.std(all_preds_stacked, dim=0)  # [N, num_classes]
+                        
+                        if std_per_class.shape[1] == 1:
+                            group_stds = std_per_class.squeeze(1).cpu().numpy()
+                        else:
+                            group_stds = torch.mean(std_per_class, dim=1).cpu().numpy()
+                else:
+                    # Standard batched mode (fast but uses more RAM)
+                    # Get augmented inputs: [K, N, C, H, W]
+                    augmented_inputs, _ = apply_augmentations(
+                        dataset, len(policy_group), usingBetterRandAugment, n, m, 
+                        image_normalization, nb_channels, mean, std, image_size, 
+                        policy_group, batch_size=batch_size
+                    )
+                    
+                    # Use batched inference
+                    predictions = _batched_augmentation_inference(
+                        augmented_inputs, models, device, batch_size, ensemble_mode=ensemble_mode
+                    )  # [K, N, num_classes] or [M, K, N, num_classes] if ensemble_mode
+                    
+                    if ensemble_mode:
+                        # Compute std per-model, then average across models
+                        # predictions: [M, K, N, num_classes]
+                        M, K, N, num_classes = predictions.shape
+                        
+                        model_stds = []
+                        for m in range(M):
+                            # Std across K augmentations for model m
+                            std_per_class = torch.std(predictions[m], dim=0)  # [N, num_classes]
+                            
+                            if num_classes == 1:
+                                model_std = std_per_class.squeeze(1)
+                            else:
+                                model_std = torch.mean(std_per_class, dim=1)  # [N]
+                            
+                            model_stds.append(model_std.cpu().numpy())
+                        
+                        # Store per-model stds for this group
+                        all_groups_model_stds.append(np.array(model_stds))  # [M, N]
+                        
+                        # Average across models for group-level uncertainty
+                        group_stds = np.mean(model_stds, axis=0)  # [N]
+                    else:
+                        # Standard: compute std across K augmentations (models already averaged)
+                        std_per_class = torch.std(predictions, dim=0)  # [N, num_classes]
+                        
+                        if std_per_class.shape[1] == 1:
+                            group_stds = std_per_class.squeeze(1).cpu().numpy()
+                        else:
+                            group_stds = torch.mean(std_per_class, dim=1).cpu().numpy()
                 
                 all_groups_stds.append(group_stds)
             
