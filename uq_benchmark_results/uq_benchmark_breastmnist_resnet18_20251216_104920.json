@@ -1,0 +1,82 @@
+{
+  "flag": "breastmnist",
+  "model_backbone": "resnet18",
+  "setup": "",
+  "timestamp": "20251216_104920",
+  "test_accuracy": 0.9102564102564102,
+  "test_size": 156,
+  "methods": {
+    "GPS": {
+      "auroc_f": 0.7696177062374245,
+      "aurc": 0.033259200390090164,
+      "augrc": 0.022846811308349774,
+      "accuracy": 0.9102564102564102,
+      "error_rate": 0.08974358974358974,
+      "n_correct": 142,
+      "n_incorrect": 14,
+      "n_total": 156,
+      "auroc_f_mean": 0.7385221506644508,
+      "auroc_f_std": 0.05700151831127533,
+      "aurc_mean": 0.058627205739209966,
+      "aurc_std": 0.008901381314499107,
+      "augrc_mean": 0.034808514135437216,
+      "augrc_std": 0.0030826867163524924,
+      "num_folds": 5,
+      "per_fold_metrics": [
+        {
+          "auroc_f": 0.6584821428571428,
+          "aurc": 0.05597841048734607,
+          "augrc": 0.03669460880999342,
+          "accuracy": 0.8974358974358975,
+          "error_rate": 0.10256410256410256,
+          "n_correct": 140,
+          "n_incorrect": 16,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7194041867954912,
+          "aurc": 0.06073776736825381,
+          "augrc": 0.03529750164365549,
+          "accuracy": 0.8846153846153846,
+          "error_rate": 0.11538461538461539,
+          "n_correct": 138,
+          "n_incorrect": 18,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.8336489898989898,
+          "aurc": 0.0429969360198852,
+          "augrc": 0.03348948060486523,
+          "accuracy": 0.8461538461538461,
+          "error_rate": 0.15384615384615385,
+          "n_correct": 132,
+          "n_incorrect": 24,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7549724925941599,
+          "aurc": 0.06451068729587185,
+          "augrc": 0.02972961867192639,
+          "accuracy": 0.891025641025641,
+          "error_rate": 0.10897435897435898,
+          "n_correct": 139,
+          "n_incorrect": 17,
+          "n_total": 156
+        },
+        {
+          "auroc_f": 0.7261029411764706,
+          "aurc": 0.06891222752469292,
+          "augrc": 0.03883136094674556,
+          "accuracy": 0.8717948717948718,
+          "error_rate": 0.1282051282051282,
+          "n_correct": 136,
+          "n_incorrect": 20,
+          "n_total": 156
+        }
+      ],
+      "time_seconds": 83.60098548512906
+    }
+  },
+  "metrics_file": "/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/uq_benchmark_results/all_metrics_breastmnist_resnet18_20251216_104920.npz",
+  "figures_dir": "/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/uq_benchmark_results/figures/breastmnist/20251216_104920"
+}

@@ -124,6 +124,22 @@ class FailureDetector:
         self._predictions_per_fold = {}  # Store per-fold predictions for accurate ROC curves
         self._results = {}
     
+    def set_per_fold_predictions(
+        self,
+        per_fold_predictions: np.ndarray
+    ):
+        """
+        Set pre-computed per-fold predictions to avoid vanilla inference.
+        
+        This is much more efficient than recomputing predictions for each UQ method.
+        The predictions can be computed once during initial caching and reused.
+        
+        Args:
+            per_fold_predictions: Per-fold predictions [M, N] where M = num_folds, N = num_samples
+        """
+        self._per_fold_predictions_cache = per_fold_predictions
+        print(f"  ✓ Set per-fold predictions cache {per_fold_predictions.shape}")
+    
     def set_test_predictions(
         self,
         y_scores: np.ndarray,
@@ -157,6 +173,10 @@ class FailureDetector:
         Get per-fold predictions (vanilla, no augmentations).
         Computes once and caches for reuse across UQ methods.
         
+        If per-fold predictions are already set via set_per_fold_predictions(),
+        returns the cached values WITHOUT running vanilla inference.
+        This saves significant time when running multiple UQ methods.
+        
         Uses self.test_dataset (normalized) to ensure predictions match
         the cached ensemble predictions used for all benchmarks.
         
@@ -169,6 +189,7 @@ class FailureDetector:
         if self._per_fold_predictions_cache is not None:
             return self._per_fold_predictions_cache
         
+        # Compute via vanilla inference
         print("  Computing per-fold predictions (vanilla inference, no augmentations)...")
         predictions_per_fold = []
         test_loader = DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False)
