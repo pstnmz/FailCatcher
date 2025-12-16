@@ -57,6 +57,12 @@ def get_layer_from_model(model, layer_name='avgpool'):
         for attr in ['avgpool', 'global_pool', 'avg_pool']:
             if hasattr(model, attr):
                 return getattr(model, attr)
+        
+        # For ViT models: use encoder as the feature extraction layer
+        # ViT models have: conv_proj -> encoder -> heads
+        if hasattr(model, 'encoder'):
+            return model.encoder
+        
         # Fallback: search for adaptive pooling in modules
         for name, module in model.named_modules():
             if 'pool' in name.lower() and 'adaptive' in str(type(module)).lower():
@@ -197,7 +203,7 @@ class ClassifierHeadWrapper(nn.Module):
         Forward pass from latent features to predictions.
         
         Args:
-            x: Latent features (B, feature_dim) - already flattened
+            x: Latent features (B, feature_dim) - already flattened/CLS token extracted
         
         Returns:
             Predictions (logits or probabilities)
@@ -206,11 +212,18 @@ class ClassifierHeadWrapper(nn.Module):
         if hasattr(self.model, 'fc'):
             return self.model.fc(x)
         
-        # For ViTs: typically has 'head' or 'heads'
-        elif hasattr(self.model, 'head'):
-            return self.model.head(x)
+        # For ViTs: encoder CLS token -> ln (layer norm) -> heads
         elif hasattr(self.model, 'heads'):
+            # Apply layer norm if present (ViT architecture)
+            if hasattr(self.model.encoder, 'ln'):
+                x = self.model.encoder.ln(x)
             return self.model.heads(x)
+        
+        elif hasattr(self.model, 'head'):
+            # Apply layer norm if present
+            if hasattr(self.model, 'encoder') and hasattr(self.model.encoder, 'ln'):
+                x = self.model.encoder.ln(x)
+            return self.model.head(x)
         
         # For EfficientNet/MobileNet: usually 'classifier'
         elif hasattr(self.model, 'classifier'):
@@ -861,7 +874,14 @@ def extract_latent_space_and_compute_shap_importance(
     predictions = []
     
     def hook(module, input, output):
-        penultimate_features.append(output.detach().flatten(1))
+        # Handle ViT encoder output: [B, num_patches+1, hidden_dim]
+        # Extract CLS token (first token) for ViT models
+        if output.dim() == 3 and hasattr(model, 'encoder'):
+            # ViT encoder output: take CLS token [:, 0, :]
+            penultimate_features.append(output[:, 0, :].detach())
+        else:
+            # Standard CNNs: flatten spatial dimensions
+            penultimate_features.append(output.detach().flatten(1))
 
     hook_handle = layer_to_be_hooked.register_forward_hook(hook)
 
