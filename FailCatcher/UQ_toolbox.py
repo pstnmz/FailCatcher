@@ -30,6 +30,7 @@ from .methods.tta import (
 # Ensemble methods
 from .methods.ensemble import (
     EnsembleSTDMethod,
+    MCDropoutMethod,
     ensembling_predictions,
     ensembling_stds_computation,
     ensembling_variance_computation,

@@ -751,6 +751,19 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         results['Ensemble'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
+    if 'MCDropout' in methods:
+        print("\n🔍 Running MC Dropout...")
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
+        uncertainties, metrics = detector.run_mcdropout(
+            test_dataset, y_true,
+            batch_size=batch_size,
+            num_samples=5,
+            per_fold_evaluation=per_fold_eval
+        )
+        results['MCDropout'] = metrics
+        print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+    
     if 'TTA' in methods:
         print("\n🔍 Running TTA...")
         mode_str = "per-fold" if per_fold_eval else "ensemble"
@@ -997,8 +1010,8 @@ if __name__ == '__main__':
     
     parser.add_argument(
         '--methods', nargs='+',
-        default=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP'],
-        choices=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP'],
+        default=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP', 'MCDropout'],
+        choices=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP', 'MCDropout'],
         help='UQ methods to run'
     )
     parser.add_argument(
