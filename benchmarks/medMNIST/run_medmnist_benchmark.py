@@ -767,7 +767,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         setup_name = setup if setup else 'standard'
         # Include sample count in folder name if subsampling occurs
         folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
-        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}_test')
         
         # If TTA_calib was run, use the subsampled indices
         # Otherwise, compute them now (GPS can run independently of TTA_calib)

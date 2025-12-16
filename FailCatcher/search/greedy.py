@@ -18,10 +18,14 @@ def perform_greedy_policy_search(
     npz_dir, good_idx, bad_idx, max_iterations=50, num_workers=1, num_searches=10, top_k=5, plot=True, method='top_k_policies', seed=None
 ):
     print('Loading predictions...')
-    all_preds, all_keys = load_npz_files_for_greedy_search(npz_dir)
-    # shapes: [num_policies, num_samples, num_classes]
-    num_samples = all_preds.shape[1]
-    num_classes = all_preds.shape[2]
+    all_preds, all_keys, format_version = load_npz_files_for_greedy_search(npz_dir)
+    # shapes: [num_policies, num_samples, num_classes] (v1) or [num_policies, num_models, num_samples, num_classes] (v2)
+    if format_version == 1:
+        num_samples = all_preds.shape[1]
+        num_classes = all_preds.shape[2]
+    else:
+        num_samples = all_preds.shape[2]
+        num_classes = all_preds.shape[3]
 
     # Clip indices if they exceed available samples
     if len(good_idx) or len(bad_idx):
@@ -42,7 +46,8 @@ def perform_greedy_policy_search(
         num_searches=num_searches,
         top_k=top_k,
         method=method,
-        seed=seed
+        seed=seed,
+        format_version=format_version
     )
 
     if isinstance(selected_policies, list) and all(isinstance(policy, list) for policy in selected_policies):
@@ -53,7 +58,10 @@ def perform_greedy_policy_search(
     if plot:
         plot_auc_curves(results)
 
-    print(f"Loaded predictions shape: {all_preds.shape} (policies, samples, classes={num_classes})")
+    if format_version == 1:
+        print(f"Loaded predictions shape: {all_preds.shape} (policies, samples, classes={num_classes})")
+    else:
+        print(f"Loaded predictions shape: {all_preds.shape} (policies, models, samples, classes={num_classes})")
     return selected_policy_names
 
 
@@ -63,9 +71,13 @@ def perform_greedy_policy_search(
 
 def select_greedily_on_ens(
     all_preds, good_idx, bad_idx, keys, search_set_len, select_only=50,
-    num_workers=1, num_searches=10, top_k=5, method='top_policies', seed=None
+    num_workers=1, num_searches=10, top_k=5, method='top_policies', seed=None, format_version=1
 ):
-    val_preds = np.copy(all_preds[:, :search_set_len, :])
+    # Extract calibration set: keep all dimensions, slice samples at appropriate axis
+    if format_version == 1:
+        val_preds = np.copy(all_preds[:, :search_set_len, :])  # [P, N, C]
+    else:
+        val_preds = np.copy(all_preds[:, :, :search_set_len, :])  # [P, M, N, C]
 
     # Prepare random starts
     # deterministic initial starts when `seed` is provided
@@ -75,7 +87,7 @@ def select_greedily_on_ens(
     def _run_sequential():
         out = []
         for init_aug in initial_augmentations:
-            out.append(greedy_search(init_aug, val_preds, good_idx, bad_idx, select_only))
+            out.append(greedy_search(init_aug, val_preds, good_idx, bad_idx, select_only, format_version))
         return out
 
     results = []
@@ -84,7 +96,7 @@ def select_greedily_on_ens(
             with mp.Pool(processes=min(num_workers, mp.cpu_count() or num_workers)) as pool:
                 results = pool.starmap(
                     greedy_search,
-                    [(init_aug, val_preds, good_idx, bad_idx, select_only) for init_aug in initial_augmentations]
+                    [(init_aug, val_preds, good_idx, bad_idx, select_only, format_version) for init_aug in initial_augmentations]
                 )
         except Exception as e:
             print(f"Parallel greedy_search failed: {repr(e)}; falling back to sequential.")
@@ -110,9 +122,13 @@ def select_greedily_on_ens(
     return policies, results
 
 
-def greedy_search(initial_aug_idx, val_preds, good_idx, bad_idx, select_only, min_improvement=0.005, patience=5):
+def greedy_search(initial_aug_idx, val_preds, good_idx, bad_idx, select_only, format_version=1, min_improvement=0.005, patience=5):
     """
     Single greedy search instance starting from a random initial augmentation.
+    
+    Args:
+        val_preds: [P, N, C] (v1) or [P, M, N, C] (v2)
+        format_version: 1 = std(ensemble), 2 = avg(std(models))
     """
     group_indices = [initial_aug_idx]
     best_metric = -np.inf
@@ -131,15 +147,31 @@ def greedy_search(initial_aug_idx, val_preds, good_idx, bad_idx, select_only, mi
 
             current_augmentations = group_indices + [np.int64(new_i)]
             
-            # Compute std - MATCH OLD CODE EXACTLY
-            if val_preds[np.array(current_augmentations), :, :].shape[2] == 1:
-                # Binary: (num_policies, num_samples, 1)
-                preds_std = np.std(val_preds[current_augmentations, :, :], axis=0)  # (num_samples, 1)
-                preds_std = preds_std.flatten()  # ← FLATTEN to (num_samples,) for indexing
-            elif val_preds[np.array(current_augmentations), :, :].shape[2] != 1 or val_preds[np.array(current_augmentations), :, :].ndim == 3:
-                # Multiclass: (num_policies, num_samples, num_classes)
-                stds_per_class = np.std(val_preds[current_augmentations, :, :], axis=0)  # (num_samples, num_classes)
-                preds_std = np.mean(stds_per_class, axis=1)  # (num_samples,)
+            # Compute std based on format
+            if format_version == 1:
+                # Old format: [P, N, C] → std across policies
+                preds_subset = val_preds[current_augmentations, :, :]  # [len(current_augmentations), N, C]
+                if preds_subset.shape[2] == 1:
+                    # Binary: (num_policies, num_samples, 1)
+                    preds_std = np.std(preds_subset, axis=0)  # (num_samples, 1)
+                    preds_std = preds_std.flatten()  # ← FLATTEN to (num_samples,) for indexing
+                else:
+                    # Multiclass: (num_policies, num_samples, num_classes)
+                    stds_per_class = np.std(preds_subset, axis=0)  # (num_samples, num_classes)
+                    preds_std = np.mean(stds_per_class, axis=1)  # (num_samples,)
+            else:
+                # New format: [P, M, N, C] → std per model, then average across models
+                preds_subset = val_preds[current_augmentations, :, :, :]  # [len(current_augmentations), M, N, C]
+                # Compute std across policies per model: [M, N, C]
+                std_per_model = np.std(preds_subset, axis=0)  # [M, N, C]
+                
+                if std_per_model.shape[2] == 1:
+                    # Binary: average across models → [N, 1]
+                    preds_std = np.mean(std_per_model, axis=0).flatten()  # [N]
+                else:
+                    # Multiclass: average std per class across models → [N, C], then mean across classes → [N]
+                    avg_std_per_model = np.mean(std_per_model, axis=0)  # [N, C]
+                    preds_std = np.mean(avg_std_per_model, axis=1)  # [N]
             
             # Compute ROC AUC
             roc_auc = roc_curve_UQ_method_computation(
@@ -186,11 +218,22 @@ def greedy_search(initial_aug_idx, val_preds, good_idx, bad_idx, select_only, mi
             
             current_augmentations = best_group_indices + [new_i]
             
-            if val_preds[current_augmentations, :, :].shape[2] == 1:
-                preds_std = np.std(val_preds[current_augmentations, :, :], axis=0).flatten()
+            # Compute std based on format
+            if format_version == 1:
+                preds_subset = val_preds[current_augmentations, :, :]
+                if preds_subset.shape[2] == 1:
+                    preds_std = np.std(preds_subset, axis=0).flatten()
+                else:
+                    stds_per_class = np.std(preds_subset, axis=0)
+                    preds_std = np.mean(stds_per_class, axis=1)
             else:
-                stds_per_class = np.std(val_preds[current_augmentations, :, :], axis=0)
-                preds_std = np.mean(stds_per_class, axis=1)
+                preds_subset = val_preds[current_augmentations, :, :, :]
+                std_per_model = np.std(preds_subset, axis=0)  # [M, N, C]
+                if std_per_model.shape[2] == 1:
+                    preds_std = np.mean(std_per_model, axis=0).flatten()
+                else:
+                    avg_std_per_model = np.mean(std_per_model, axis=0)
+                    preds_std = np.mean(avg_std_per_model, axis=1)
             
             roc_auc = roc_curve_UQ_method_computation(
                 [preds_std[k] for k in good_idx],
@@ -215,34 +258,71 @@ def greedy_search(initial_aug_idx, val_preds, good_idx, bad_idx, select_only, mi
 def load_npz_files_for_greedy_search(npz_dir):
     """
     Load all .npz files from the specified directory.
-    Return stacked predictions [num_policies, num_samples, num_classes] and filenames.
+    Return stacked predictions and filenames.
+    
+    Supports two formats:
+    - v1 (old): predictions = [num_samples, num_classes] → returns [num_policies, num_samples, num_classes]
+    - v2 (new): predictions = [num_models, num_samples, num_classes] → returns [num_policies, num_models, num_samples, num_classes]
+    
+    Returns:
+        all_preds: [P, N, C] or [P, M, N, C] depending on format
+        all_keys: List of filenames
+        format_version: 1 or 2
     """
     npz_files = sorted([f for f in os.listdir(npz_dir) if f.endswith('.npz')])
     all_preds_list, all_keys = [], []
+    format_version = None
+    
     for npz_file in npz_files:
         file_path = os.path.join(npz_dir, npz_file)
         try:
             data = np.load(file_path)
             preds = np.asarray(data['predictions'])
-            # normalize to (N, C)
-            if preds.ndim == 1:
-                preds = preds.reshape(-1, 1)
-            if preds.ndim != 2:
-                print(f"Skipping {npz_file}: expected 2D array, got {preds.shape}")
+            
+            # Detect format version
+            version = data.get('version', 1)
+            if format_version is None:
+                format_version = version
+            elif format_version != version:
+                print(f"Warning: {npz_file} has version {version}, expected {format_version}. Skipping.")
                 continue
+            
+            # Handle old format (v1): [N, C]
+            if format_version == 1:
+                if preds.ndim == 1:
+                    preds = preds.reshape(-1, 1)
+                if preds.ndim != 2:
+                    print(f"Skipping {npz_file}: expected 2D array for v1, got {preds.shape}")
+                    continue
+            # Handle new format (v2): [M, N, C]
+            else:
+                if preds.ndim != 3:
+                    print(f"Skipping {npz_file}: expected 3D array for v2, got {preds.shape}")
+                    continue
+            
             all_preds_list.append(preds.astype(np.float32, copy=False))
             all_keys.append(npz_file)
         except Exception as e:
             print(f"Error loading {npz_file}: {e}")
+    
     if not all_preds_list:
         raise RuntimeError(f"No valid .npz predictions found in {npz_dir}")
-
+    
     # Ensure equal sample count; trim to min if needed
-    min_len = min(arr.shape[0] for arr in all_preds_list)
-    if any(arr.shape[0] != min_len for arr in all_preds_list):
-        print(f"Warning: differing sample counts; trimming to {min_len}")
-    all_preds = np.stack([arr[:min_len] for arr in all_preds_list], axis=0)  # [P, N, C]
-    return all_preds, all_keys
+    if format_version == 1:
+        min_len = min(arr.shape[0] for arr in all_preds_list)
+        if any(arr.shape[0] != min_len for arr in all_preds_list):
+            print(f"Warning: differing sample counts; trimming to {min_len}")
+        all_preds = np.stack([arr[:min_len] for arr in all_preds_list], axis=0)  # [P, N, C]
+    else:
+        # v2: [M, N, C] per file
+        min_len = min(arr.shape[1] for arr in all_preds_list)  # N is at axis 1
+        if any(arr.shape[1] != min_len for arr in all_preds_list):
+            print(f"Warning: differing sample counts; trimming to {min_len}")
+        all_preds = np.stack([arr[:, :min_len, :] for arr in all_preds_list], axis=0)  # [P, M, N, C]
+    
+    print(f"Loaded format version {format_version}: predictions shape = {all_preds.shape}")
+    return all_preds, all_keys, format_version
 
 
 def plot_auc_curves(results):
