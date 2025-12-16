@@ -1379,7 +1379,9 @@ class FailureDetector:
                         output_dir=figures_dir,
                         uncertainties_per_fold=uncertainties_per_fold,
                         ensemble_uncertainties=ensemble_uncertainties,
-                        predictions_per_fold=predictions_per_fold
+                        predictions_per_fold=predictions_per_fold,
+                        model_backbone=model_backbone,
+                        setup=setup
                     )
                     print(f"  ✓ {method_name}: {len(fig_paths)} plots saved")
                 except Exception as e:
