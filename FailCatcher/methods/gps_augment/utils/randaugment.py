@@ -233,6 +233,17 @@ class BetterRandAugment:
     def set_transform_str(self, s):
         return self.set_transform(eval(s))
 
+    def __getstate__(self):
+        # Explicitly save all instance variables for pickling
+        return self.__dict__.copy()
+    
+    def __setstate__(self, state):
+        # Restore instance variables from pickle
+        self.__dict__.update(state)
+        # Ensure max_magnitude is set correctly (in case it was corrupted during pickling)
+        if not hasattr(self, 'max_magnitude') or self.max_magnitude is None:
+            self.max_magnitude = self.m
+
     def __call__(self, img):
         if self.resample:
             if self.verbose:
