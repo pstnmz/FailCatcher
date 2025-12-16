@@ -689,8 +689,6 @@ def apply_randaugment_and_store_results(
         ...     use_monai_cache=True, batch_size=128
         ... )
     """
-    # Add _test suffix to folder name for new v2 format
-    folder_name = folder_name + '_test'
     os.makedirs(folder_name, exist_ok=True)
     cached_dataset = None
     
@@ -722,19 +720,14 @@ def apply_randaugment_and_store_results(
                 ]) for rand_aug in rand_aug_policies
             ]
 
-        # Infer num_classes and num_models once (BEFORE chunk loop)
-        print("Inferring model configuration...")
+        # Infer num_classes once
         with torch.no_grad():
             dummy = torch.zeros(1, nb_channels, image_size, image_size, device=device)
             try:
                 dp = get_batch_predictions(models, dummy, device)
-                num_models = dp.shape[1]  # M = num_models
-                num_classes = dp.shape[2]  # num_classes
-                print(f"  Detected: {num_models} models, {num_classes} classes")
-            except Exception as e:
-                print(f"  Warning: Could not infer from dummy batch ({e}), using fallback")
-                num_models = len(models) if isinstance(models, list) else 1
-                num_classes = 1
+                nc = average_predictions(dp).shape[1]
+            except Exception:
+                nc = 1
 
         # Process policies in chunks
         for start in range(0, num_policies, policy_chunk_size):
@@ -775,14 +768,14 @@ def apply_randaugment_and_store_results(
             if K_actual != K_chunk:
                 print(f"Warning: K_actual ({K_actual}) != K_chunk ({K_chunk}); using K_actual")
 
-            # Create memory-mapped files for each policy (with per-model dimension)
+            # Create memory-mapped files for each policy
             memmaps, memmap_paths = [], []
             for idx in range(K_actual):
                 mmap_path = os.path.join(folder_name, f"tmp_policy_{start+idx}.mmap")
-                # Pre-create the file with correct size: [num_models, num_samples, num_classes]
+                # Pre-create the file with correct size
                 with open(mmap_path, 'wb') as f:
-                    f.write(b'\0' * (num_models * num_samples * num_classes * 4))  # 4 bytes per float32
-                mem = np.memmap(mmap_path, dtype='float32', mode='r+', shape=(num_models, num_samples, num_classes))
+                    f.write(b'\0' * (num_samples * nc * 4))  # 4 bytes per float32
+                mem = np.memmap(mmap_path, dtype='float32', mode='r+', shape=(num_samples, nc))
                 memmaps.append(mem)
                 memmap_paths.append(mmap_path)
 
@@ -790,42 +783,30 @@ def apply_randaugment_and_store_results(
             sample_ptr = 0
             
             def _process_batch(imgs_stacked_local):
-                """Process a batch and return per-model predictions.
-                
-                NEW (Option B): Save per-model predictions for consistency with inference.
-                - Each model processes all K augmentations independently
-                - Return predictions for ALL models (not averaged)
-                - Shape: [B, K, M, num_classes] where M = num_models
-                This matches ensemble_mode=True at inference time.
-                """
+                """Process a batch and return predictions."""
                 B, K, C, H, W = imgs_stacked_local.shape
                 imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float().to(device)
                 batch_predictions = get_batch_predictions(models, imgs_flat, device)
-                # batch_predictions: [B*K, M, num_classes] where M = num_models
-                M = batch_predictions.shape[1]
-                per_model_preds = batch_predictions.view(B, K, M, -1).cpu().numpy()
-                # per_model_preds: [B, K, M, num_classes] - all models separately
+                avg_preds = average_predictions(batch_predictions).view(B, K, -1).cpu().numpy()
                 # Explicitly free GPU tensors
                 del imgs_flat, batch_predictions
-                return B, K, M, per_model_preds
+                return B, K, avg_preds
 
             # Process first batch
-            B, K, M_batch, per_model_preds = _process_batch(imgs_stacked)
+            B, K, avg_preds = _process_batch(imgs_stacked)
             for local_k in range(K):
-                # per_model_preds: [B, K, M, num_classes]
-                # memmaps[local_k]: [M, num_samples, num_classes]
-                memmaps[local_k][:, sample_ptr:sample_ptr + B, :] = per_model_preds[:, local_k, :, :].transpose(1, 0, 2)
+                memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
             sample_ptr += B
-            del imgs_stacked, per_model_preds  # Free after use
+            del imgs_stacked, avg_preds  # Free after use
             
             # Process remaining batches
             for batch in it:
                 imgs_stacked = batch[0]
-                B, K, M_batch, per_model_preds = _process_batch(imgs_stacked)
+                B, K, avg_preds = _process_batch(imgs_stacked)
                 for local_k in range(K):
-                    memmaps[local_k][:, sample_ptr:sample_ptr + B, :] = per_model_preds[:, local_k, :, :].transpose(1, 0, 2)
+                    memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
                 sample_ptr += B
-                del imgs_stacked, per_model_preds  # Free after each batch
+                del imgs_stacked, avg_preds  # Free after each batch
 
             if sample_ptr != num_samples:
                 raise RuntimeError(f"Expected {num_samples} samples but wrote {sample_ptr}")
@@ -850,10 +831,9 @@ def apply_randaugment_and_store_results(
                 safe_key = re.sub(r'[^A-Za-z0-9_.-]', '_', policy_key)
                 out_fname = os.path.join(folder_name, f'N{N}_M{M}_{safe_key}.npz')
                 
-                arr = np.asarray(mem)  # Shape: [num_models, num_samples, num_classes]
-                # Save with version marker for backwards compatibility
-                np.savez_compressed(out_fname, predictions=arr, version=2, num_models=num_models)
-                print(f"Saved policy {start + local_k} -> {out_fname} (shape: {arr.shape})")
+                arr = np.asarray(mem)
+                np.savez_compressed(out_fname, predictions=arr)
+                print(f"Saved policy {start + local_k} -> {out_fname}")
                 del arr, mem  # Free memory immediately after saving
 
             # Cleanup memmap files
