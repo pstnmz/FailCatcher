@@ -870,7 +870,8 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
 def save_all_evaluation_plots(uncertainties, predictions, labels, 
                                method_name='UQ Method', output_dir='./figures',
                                uncertainties_per_fold=None, ensemble_uncertainties=None,
-                               predictions_per_fold=None, model_backbone=None, setup=None):
+                               predictions_per_fold=None, model_backbone=None, setup=None,
+                               corruption_info=None):
     """
     Generate and save all evaluation plots for a UQ method.
     
@@ -901,6 +902,8 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
         prefix += f'{model_backbone}_'
     if setup:
         prefix += f'{setup}_'
+    if corruption_info:
+        prefix += f'corrupt_{corruption_info}_'
     
     # Sanitize method name for filename
     safe_name = method_name.replace(' ', '_').replace('/', '_')

@@ -35,7 +35,9 @@ DERMAMNIST_E_INFO = {
     'n_samples': {
         'train': 10015,
         'val': 193,
-        'test': 1511
+        'test': 1511,
+        'test_id': 1195,  # ID test centers (rosendahl, vidir_modern, vidir_molemax, vienna_dias)
+        'test_external': 316  # External test center
     },
     'license': 'CC BY-NC 4.0'
     }
@@ -46,7 +48,22 @@ class DermaMNIST_E(MedMNIST):
     available_sizes = (224,)  # only 224 supported
     
     def __init__(self, split='train', transform=None, target_transform=None,
-                 download=False, as_rgb=True, size=224, root=None, **kwargs):
+                 download=False, as_rgb=True, size=224, root=None, 
+                 test_subset='all', **kwargs):
+        """
+        Args:
+            split: 'train', 'val', or 'test'
+            transform: Image transformations
+            target_transform: Label transformations
+            download: Unused (data is local)
+            as_rgb: Convert to RGB
+            size: Image size (only 224 supported)
+            root: Root directory for data
+            test_subset: For split='test' only. Options:
+                - 'all': Use all test samples (default)
+                - 'id': Use only ID test centers (rosendahl, vidir_modern, vidir_molemax, vienna_dias)
+                - 'external': Use only external test center
+        """
         # Use custom filename for local file
         # File is located at: benchmarks/medMNIST/Data/ISIC_2018/dermamnist_extended_224_wsitesources.npz
         if root is None:
@@ -73,23 +90,43 @@ class DermaMNIST_E(MedMNIST):
         self.target_transform = target_transform
         self.as_rgb = as_rgb
         self.size = size
+        self.test_subset = test_subset
         
         # Load the NPZ file
         npz_data = np.load(npz_path, allow_pickle=True)
         
         # Load images and labels for the specified split
-        self.imgs = npz_data[f'{split}_images']
-        self.labels = npz_data[f'{split}_labels']
+        imgs = npz_data[f'{split}_images']
+        labels = npz_data[f'{split}_labels']
         
-        # Store as 'data' and 'targets' for compatibility
-        self.data = self.imgs
-        self.targets = self.labels
-
         # Load extra metadata if present (test centers, etc.)
         if self.split == 'test' and 'test_centers' in npz_data.files:
             self.test_centers = npz_data['test_centers']
+            
+            # Filter by test_subset if specified
+            if test_subset == 'id':
+                # ID centers: all except 'external'
+                id_mask = self.test_centers != 'external'
+                imgs = imgs[id_mask]
+                labels = labels[id_mask]
+                self.test_centers = self.test_centers[id_mask]
+                print(f"  Using ID test centers: {len(imgs)} samples")
+            elif test_subset == 'external':
+                # External center only
+                ext_mask = self.test_centers == 'external'
+                imgs = imgs[ext_mask]
+                labels = labels[ext_mask]
+                self.test_centers = self.test_centers[ext_mask]
+                print(f"  Using external test center: {len(imgs)} samples")
+            # else: test_subset == 'all', use all samples
         else:
             self.test_centers = None
+        
+        # Store as standard attributes
+        self.imgs = imgs
+        self.labels = labels
+        self.data = self.imgs
+        self.targets = self.labels
     def __len__(self):
         # Prefer explicit length attributes if present
         if hasattr(self, "data"):

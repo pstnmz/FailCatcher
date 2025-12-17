@@ -297,7 +297,7 @@ def _append_log(path, text):
     with open(path, 'a') as f:
         f.write(text.rstrip() + '\n')
 
-def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=False, transform=None, transform_test=None):
+def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=False, transform=None, transform_test=None, test_subset='all'):
     if random_seed is not None:
         torch.manual_seed(random_seed)
         np.random.seed(random_seed)
@@ -332,7 +332,12 @@ def get_datasets(data_flag, download=True, random_seed=None, im_size=28, color=F
     val_dataset = DataClass(split='val', transform=transform, size=im_size, download=download)
     if transform_test is None:
         transform_test = transform
-    test_dataset = DataClass(split='test', transform=transform_test, size=im_size, download=download)
+    
+    # Pass test_subset for dermamnist-e
+    if data_flag == 'dermamnist-e':
+        test_dataset = DataClass(split='test', transform=transform_test, size=im_size, download=download, test_subset=test_subset)
+    else:
+        test_dataset = DataClass(split='test', transform=transform_test, size=im_size, download=download)
 
     return [train_dataset, val_dataset, test_dataset], info
 
@@ -1254,7 +1259,7 @@ def load_models(flag, device, waugmentation=False, size=224, model_backbone='res
     print(f"Loaded {len(models)} models: {model_backbone} with setup '{setup or 'standard'}' from {model_filename.rsplit('_', 1)[0]}_*")
     return models
 
-def load_datasets(dataflag, color, im_size, transform, batch_size, cache_test=False, transform_test=None):
+def load_datasets(dataflag, color, im_size, transform, batch_size, cache_test=False, transform_test=None, test_subset='all'):
     """
     Load and prepare datasets for training and evaluation.
     
@@ -1279,13 +1284,14 @@ def load_datasets(dataflag, color, im_size, transform, batch_size, cache_test=Fa
         batch_size: Batch size for dataloaders
         cache_test: Whether to cache test set
         transform_test: Optional separate transform for test set
+        test_subset: For dermamnist-e only. 'all' (default), 'id', or 'external'
     
     Returns:
         tuple: ([train_dataset, calibration_dataset, test_dataset], 
                 [train_loader, calib_loader, test_loader], 
                 info)
     """
-    datasets, info = get_datasets(dataflag, im_size=im_size, color=color, transform=transform, transform_test=transform_test)
+    datasets, info = get_datasets(dataflag, im_size=im_size, color=color, transform=transform, transform_test=transform_test, test_subset=test_subset)
     # Combine train_dataset and val_dataset
     combined_train_dataset = ConcatDataset([datasets[0], datasets[1]])
 
