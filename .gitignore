@@ -12,3 +12,4 @@ __pycache__/
 
 __pycache__/
 uq_benchmark_results/
+benchmarks/medMNIST/Data/
