@@ -57,6 +57,12 @@ def get_layer_from_model(model, layer_name='avgpool'):
         for attr in ['avgpool', 'global_pool', 'avg_pool']:
             if hasattr(model, attr):
                 return getattr(model, attr)
+        
+        # For ViT models: use encoder as the feature extraction layer
+        # ViT models have: conv_proj -> encoder -> heads
+        if hasattr(model, 'encoder'):
+            return model.encoder
+        
         # Fallback: search for adaptive pooling in modules
         for name, module in model.named_modules():
             if 'pool' in name.lower() and 'adaptive' in str(type(module)).lower():
@@ -197,7 +203,7 @@ class ClassifierHeadWrapper(nn.Module):
         Forward pass from latent features to predictions.
         
         Args:
-            x: Latent features (B, feature_dim) - already flattened
+            x: Latent features (B, feature_dim) - already flattened/CLS token extracted
         
         Returns:
             Predictions (logits or probabilities)
@@ -206,11 +212,18 @@ class ClassifierHeadWrapper(nn.Module):
         if hasattr(self.model, 'fc'):
             return self.model.fc(x)
         
-        # For ViTs: typically has 'head' or 'heads'
-        elif hasattr(self.model, 'head'):
-            return self.model.head(x)
+        # For ViTs: encoder CLS token -> ln (layer norm) -> heads
         elif hasattr(self.model, 'heads'):
+            # Apply layer norm if present (ViT architecture)
+            if hasattr(self.model.encoder, 'ln'):
+                x = self.model.encoder.ln(x)
             return self.model.heads(x)
+        
+        elif hasattr(self.model, 'head'):
+            # Apply layer norm if present
+            if hasattr(self.model, 'encoder') and hasattr(self.model.encoder, 'ln'):
+                x = self.model.encoder.ln(x)
+            return self.model.head(x)
         
         # For EfficientNet/MobileNet: usually 'classifier'
         elif hasattr(self.model, 'classifier'):
@@ -298,8 +311,21 @@ class KNNLatentMethod(UQMethod):
         print(f"  ✓ Fitted {len(models)} fold(s)")
         return self
     
-    def compute(self, models, data_loader, device):
-        """Compute KNN distances, averaged across folds."""
+    def compute(self, models, data_loader, device, return_per_fold=True):
+        """
+        Compute KNN distances per fold (or averaged for backward compatibility).
+        
+        Args:
+            models: List of models (one per fold)
+            data_loader: Test data loader
+            device: torch device
+            return_per_fold: If True, return [num_folds, N]. If False, return [N] (averaged, legacy)
+        
+        Returns:
+            np.ndarray: 
+                - If return_per_fold=True: [num_folds, N] distances per fold
+                - If return_per_fold=False: [N] averaged distances (backward compatible)
+        """
         if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
         
@@ -326,11 +352,16 @@ class KNNLatentMethod(UQMethod):
             avg_distances = distances.mean(axis=1)
             all_distances.append(avg_distances)
         
-        # Average across folds
-        final_distances = np.mean(all_distances, axis=0)
+        all_distances = np.array(all_distances)  # [num_folds, N]
         
-        print(f"  ✓ Computed KNN distances (averaged over {len(models)} folds)")
-        return final_distances
+        if return_per_fold:
+            print(f"  ✓ Computed KNN distances for {len(models)} folds (per-fold mode)")
+            return all_distances  # [num_folds, N]
+        else:
+            # Legacy mode: average across folds
+            final_distances = np.mean(all_distances, axis=0)
+            print(f"  ✓ Computed KNN distances (averaged over {len(models)} folds)")
+            return final_distances
 
 
 class KNNLatentSHAPMethod(UQMethod):
@@ -638,9 +669,20 @@ class KNNLatentSHAPMethod(UQMethod):
         
         return model_knns
     
-    def compute(self, models, data_loader, device):
+    def compute(self, models, data_loader, device, return_per_fold=True):
         """
-        Compute KNN distances for test samples.
+        Compute KNN-SHAP distances per fold (or averaged for backward compatibility).
+        
+        Args:
+            models: List of models (one per fold)
+            data_loader: Test data loader
+            device: torch device
+            return_per_fold: If True, return [num_folds, N]. If False, return [N] (averaged, legacy)
+        
+        Returns:
+            np.ndarray: 
+                - If return_per_fold=True: [num_folds, N] distances per fold
+                - If return_per_fold=False: [N] averaged distances (backward compatible)
         """
         if not self.fitted_models:
             raise RuntimeError("Call fit() before compute()")
@@ -732,12 +774,16 @@ class KNNLatentSHAPMethod(UQMethod):
             
             all_distances.append(distances_per_sample)
         
-        # Average across models
-        final_distances = np.mean(all_distances, axis=0)
+        all_distances = np.array(all_distances)  # [num_folds, N]
         
-        print(f"\n  ✓ Final averaged distances: {final_distances.mean():.3f}±{final_distances.std():.3f}")
-        
-        return final_distances
+        if return_per_fold:
+            print(f"\n  ✓ Computed KNN-SHAP distances for {len(self.fitted_models)} folds (per-fold mode)")
+            return all_distances  # [num_folds, N]
+        else:
+            # Legacy mode: average across models
+            final_distances = np.mean(all_distances, axis=0)
+            print(f"\n  ✓ Final averaged distances: {final_distances.mean():.3f}±{final_distances.std():.3f}")
+            return final_distances
 
 class HyperplaneDistanceMethod(UQMethod):
     """
@@ -828,7 +874,14 @@ def extract_latent_space_and_compute_shap_importance(
     predictions = []
     
     def hook(module, input, output):
-        penultimate_features.append(output.detach().flatten(1))
+        # Handle ViT encoder output: [B, num_patches+1, hidden_dim]
+        # Extract CLS token (first token) for ViT models
+        if output.dim() == 3 and hasattr(model, 'encoder'):
+            # ViT encoder output: take CLS token [:, 0, :]
+            penultimate_features.append(output[:, 0, :].detach())
+        else:
+            # Standard CNNs: flatten spatial dimensions
+            penultimate_features.append(output.detach().flatten(1))
 
     hook_handle = layer_to_be_hooked.register_forward_hook(hook)
 

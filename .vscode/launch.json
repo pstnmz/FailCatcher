@@ -1,15 +1,17 @@
 {
     "version": "0.2.0",
     "configurations": [
+
         {
-            "name": "Debug launch_uq_methods.py",
+            "name": "run_medmnist_benchmark.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/launch_uq_methods.py",
+            "program": "${workspaceFolder}/benchmarks/medMNIST/run_medmnist_benchmark.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["--flag", "organamnist", "--methods", "KNN_SHAP"],
-            "justMyCode": false
+            "args": ["--flag", "breastmnist", "--model", "resnet18", "--methods", "GPS", "--per-fold-eval", "--gpu", "2"],
+            "justMyCode": false,
+            
         }
     ]
 }

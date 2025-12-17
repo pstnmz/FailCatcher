@@ -1,0 +1,101 @@
+=== fold_0 start: epochs=100, lr=0.0001, model=ViT-B/16 ===
+Epoch 1/100 | train_loss=0.4759 | val_loss=0.4737 | val_acc=0.2700 | time=4.15s
+Epoch 2/100 | train_loss=0.3564 | val_loss=0.3236 | val_acc=0.8100 | time=3.29s
+Epoch 3/100 | train_loss=0.2598 | val_loss=0.3392 | val_acc=0.8300 | time=3.33s
+Epoch 4/100 | train_loss=0.1773 | val_loss=0.2582 | val_acc=0.8300 | time=3.35s
+Epoch 5/100 | train_loss=0.1134 | val_loss=0.2941 | val_acc=0.8300 | time=3.40s
+Epoch 6/100 | train_loss=0.0529 | val_loss=0.3210 | val_acc=0.8500 | time=3.42s
+Epoch 7/100 | train_loss=0.0221 | val_loss=0.3591 | val_acc=0.8600 | time=3.36s
+Epoch 8/100 | train_loss=0.0091 | val_loss=0.4117 | val_acc=0.8700 | time=3.39s
+Epoch 9/100 | train_loss=0.0053 | val_loss=0.6430 | val_acc=0.8500 | time=3.37s
+Epoch 10/100 | train_loss=0.0020 | val_loss=0.8462 | val_acc=0.8400 | time=3.42s
+Epoch 11/100 | train_loss=0.0241 | val_loss=0.6459 | val_acc=0.8700 | time=3.37s
+Epoch 12/100 | train_loss=0.0013 | val_loss=1.3275 | val_acc=0.7900 | time=3.36s
+Epoch 13/100 | train_loss=0.0829 | val_loss=0.4853 | val_acc=0.8200 | time=3.47s
+Epoch 14/100 | train_loss=0.0511 | val_loss=0.8473 | val_acc=0.8300 | time=3.43s
+Early stopping at epoch 14
+[2025-11-28 17:28:08] fold_0 acc=0.8590 bal_acc=0.8434 auc=0.8920
+=== fold_0 end: test_acc=0.8590 ===
+=== fold_1 start: epochs=100, lr=0.0001, model=ViT-B/16 ===
+Epoch 1/100 | train_loss=0.4915 | val_loss=0.3610 | val_acc=0.3000 | time=3.86s
+Epoch 2/100 | train_loss=0.3455 | val_loss=0.3226 | val_acc=0.3600 | time=3.41s
+Epoch 3/100 | train_loss=0.3038 | val_loss=0.2682 | val_acc=0.8800 | time=3.36s
+Epoch 4/100 | train_loss=0.2427 | val_loss=0.2055 | val_acc=0.8900 | time=3.39s
+Epoch 5/100 | train_loss=0.1682 | val_loss=0.1944 | val_acc=0.8900 | time=3.42s
+Epoch 6/100 | train_loss=0.0937 | val_loss=0.3177 | val_acc=0.8500 | time=3.40s
+Epoch 7/100 | train_loss=0.0633 | val_loss=0.2683 | val_acc=0.8800 | time=3.39s
+Epoch 8/100 | train_loss=0.0201 | val_loss=0.3288 | val_acc=0.8800 | time=3.45s
+Epoch 9/100 | train_loss=0.0105 | val_loss=0.2836 | val_acc=0.8900 | time=3.41s
+Epoch 10/100 | train_loss=0.0035 | val_loss=0.3512 | val_acc=0.9000 | time=3.45s
+Epoch 11/100 | train_loss=0.0016 | val_loss=0.4316 | val_acc=0.8900 | time=3.44s
+Epoch 12/100 | train_loss=0.0010 | val_loss=0.4816 | val_acc=0.8800 | time=3.48s
+Epoch 13/100 | train_loss=0.0007 | val_loss=0.5152 | val_acc=0.8800 | time=3.38s
+Epoch 14/100 | train_loss=0.0005 | val_loss=0.5388 | val_acc=0.8800 | time=3.48s
+Epoch 15/100 | train_loss=0.0004 | val_loss=0.5586 | val_acc=0.8800 | time=3.45s
+Early stopping at epoch 15
+[2025-11-28 17:29:07] fold_1 acc=0.8718 bal_acc=0.8446 auc=0.8766
+=== fold_1 end: test_acc=0.8718 ===
+=== fold_2 start: epochs=100, lr=0.0001, model=ViT-B/16 ===
+Epoch 1/100 | train_loss=0.5197 | val_loss=0.3712 | val_acc=0.6100 | time=3.96s
+Epoch 2/100 | train_loss=0.3447 | val_loss=0.3576 | val_acc=0.2900 | time=3.44s
+Epoch 3/100 | train_loss=0.3413 | val_loss=0.3639 | val_acc=0.2900 | time=3.43s
+Epoch 4/100 | train_loss=0.3326 | val_loss=0.2964 | val_acc=0.8100 | time=3.44s
+Epoch 5/100 | train_loss=0.2695 | val_loss=0.3182 | val_acc=0.8200 | time=3.43s
+Epoch 6/100 | train_loss=0.2773 | val_loss=0.2767 | val_acc=0.6500 | time=3.44s
+Epoch 7/100 | train_loss=0.2294 | val_loss=0.2082 | val_acc=0.8800 | time=3.43s
+Epoch 8/100 | train_loss=0.1655 | val_loss=0.1990 | val_acc=0.8700 | time=3.45s
+Epoch 9/100 | train_loss=0.1175 | val_loss=0.1889 | val_acc=0.8700 | time=3.42s
+Epoch 10/100 | train_loss=0.0696 | val_loss=0.1992 | val_acc=0.9000 | time=3.46s
+Epoch 11/100 | train_loss=0.0297 | val_loss=0.2397 | val_acc=0.8800 | time=3.41s
+Epoch 12/100 | train_loss=0.0145 | val_loss=0.2650 | val_acc=0.8900 | time=3.49s
+Epoch 13/100 | train_loss=0.0072 | val_loss=0.2863 | val_acc=0.8700 | time=3.41s
+Epoch 14/100 | train_loss=0.0095 | val_loss=0.3230 | val_acc=0.8600 | time=3.45s
+Epoch 15/100 | train_loss=0.0072 | val_loss=0.4684 | val_acc=0.8700 | time=3.49s
+Epoch 16/100 | train_loss=0.0174 | val_loss=0.3766 | val_acc=0.8800 | time=3.45s
+Epoch 17/100 | train_loss=0.0105 | val_loss=0.3384 | val_acc=0.8700 | time=3.45s
+Epoch 18/100 | train_loss=0.0083 | val_loss=0.3982 | val_acc=0.8900 | time=3.40s
+Epoch 19/100 | train_loss=0.0182 | val_loss=0.4610 | val_acc=0.8500 | time=3.47s
+Early stopping at epoch 19
+[2025-11-28 17:30:22] fold_2 acc=0.8782 bal_acc=0.8415 auc=0.8883
+=== fold_2 end: test_acc=0.8782 ===
+=== fold_3 start: epochs=100, lr=0.0001, model=ViT-B/16 ===
+Epoch 1/100 | train_loss=0.5962 | val_loss=0.4163 | val_acc=0.2700 | time=3.96s
+Epoch 2/100 | train_loss=0.3865 | val_loss=0.3687 | val_acc=0.7300 | time=3.43s
+Epoch 3/100 | train_loss=0.3573 | val_loss=0.3600 | val_acc=0.8200 | time=3.40s
+Epoch 4/100 | train_loss=0.3470 | val_loss=0.3481 | val_acc=0.5900 | time=3.39s
+Epoch 5/100 | train_loss=0.3256 | val_loss=0.3294 | val_acc=0.8100 | time=3.36s
+Epoch 6/100 | train_loss=0.3035 | val_loss=0.2685 | val_acc=0.7300 | time=3.37s
+Epoch 7/100 | train_loss=0.2524 | val_loss=0.2762 | val_acc=0.6500 | time=3.38s
+Epoch 8/100 | train_loss=0.2186 | val_loss=0.2016 | val_acc=0.8600 | time=3.39s
+Epoch 9/100 | train_loss=0.1634 | val_loss=0.2751 | val_acc=0.8900 | time=3.44s
+Epoch 10/100 | train_loss=0.1059 | val_loss=0.2803 | val_acc=0.6800 | time=3.39s
+Epoch 11/100 | train_loss=0.0768 | val_loss=0.5036 | val_acc=0.8300 | time=3.39s
+Epoch 12/100 | train_loss=0.0535 | val_loss=0.3173 | val_acc=0.7400 | time=3.41s
+Epoch 13/100 | train_loss=0.0293 | val_loss=0.6016 | val_acc=0.8400 | time=3.38s
+Epoch 14/100 | train_loss=0.0318 | val_loss=0.3758 | val_acc=0.7300 | time=3.49s
+Epoch 15/100 | train_loss=0.0296 | val_loss=0.4057 | val_acc=0.8900 | time=3.40s
+Epoch 16/100 | train_loss=0.0180 | val_loss=0.2636 | val_acc=0.8400 | time=3.41s
+Epoch 17/100 | train_loss=0.0086 | val_loss=0.2850 | val_acc=0.8600 | time=3.41s
+Epoch 18/100 | train_loss=0.0027 | val_loss=0.2902 | val_acc=0.8700 | time=3.42s
+Early stopping at epoch 18
+[2025-11-28 17:31:31] fold_3 acc=0.9167 bal_acc=0.8678 auc=0.8981
+=== fold_3 end: test_acc=0.9167 ===
+=== fold_4 start: epochs=100, lr=0.0001, model=ViT-B/16 ===
+Epoch 1/100 | train_loss=0.5263 | val_loss=0.3924 | val_acc=0.2727 | time=3.98s
+Epoch 2/100 | train_loss=0.3257 | val_loss=0.3739 | val_acc=0.3939 | time=3.36s
+Epoch 3/100 | train_loss=0.2545 | val_loss=0.2255 | val_acc=0.8889 | time=3.43s
+Epoch 4/100 | train_loss=0.1904 | val_loss=0.2062 | val_acc=0.8283 | time=3.40s
+Epoch 5/100 | train_loss=0.1413 | val_loss=0.2176 | val_acc=0.8687 | time=3.38s
+Epoch 6/100 | train_loss=0.0802 | val_loss=0.2448 | val_acc=0.8889 | time=3.42s
+Epoch 7/100 | train_loss=0.0272 | val_loss=0.2793 | val_acc=0.8586 | time=3.45s
+Epoch 8/100 | train_loss=0.0109 | val_loss=0.3112 | val_acc=0.8687 | time=3.41s
+Epoch 9/100 | train_loss=0.0035 | val_loss=0.3580 | val_acc=0.8788 | time=3.38s
+Epoch 10/100 | train_loss=0.0020 | val_loss=0.3854 | val_acc=0.8586 | time=3.45s
+Epoch 11/100 | train_loss=0.0011 | val_loss=0.4065 | val_acc=0.8586 | time=3.40s
+Epoch 12/100 | train_loss=0.0008 | val_loss=0.4303 | val_acc=0.8485 | time=3.40s
+Epoch 13/100 | train_loss=0.0006 | val_loss=0.4533 | val_acc=0.8485 | time=3.49s
+Epoch 14/100 | train_loss=0.0005 | val_loss=0.4750 | val_acc=0.8485 | time=3.40s
+Early stopping at epoch 14
+[2025-11-28 17:32:27] fold_4 acc=0.8718 bal_acc=0.8446 auc=0.9202
+=== fold_4 end: test_acc=0.8718 ===
+[2025-11-28 17:32:31] ensemble acc=0.8846 bal_acc=0.8534 auc=0.9004

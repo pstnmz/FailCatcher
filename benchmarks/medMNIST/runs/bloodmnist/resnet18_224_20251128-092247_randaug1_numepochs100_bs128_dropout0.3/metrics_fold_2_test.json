@@ -1,0 +1,110 @@
+{
+  "data_flag": "bloodmnist",
+  "num_classes": 8,
+  "class_names": [
+    "basophil",
+    "eosinophil",
+    "erythroblast",
+    "immature granulocytes(myelocytes, metamyelocytes and promyelocytes)",
+    "lymphocyte",
+    "monocyte",
+    "neutrophil",
+    "platelet"
+  ],
+  "is_ensemble": false,
+  "metrics": {
+    "accuracy": 0.9742765273311897,
+    "balanced_accuracy": 0.9725515868450909,
+    "auc": 0.998985134734993
+  },
+  "confusion_matrix": [
+    [
+      243,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      620,
+      0,
+      1,
+      0,
+      0,
+      2,
+      1
+    ],
+    [
+      0,
+      0,
+      302,
+      3,
+      4,
+      2,
+      0,
+      0
+    ],
+    [
+      7,
+      0,
+      0,
+      547,
+      2,
+      0,
+      23,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      1,
+      242,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      13,
+      14,
+      255,
+      2,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      10,
+      0,
+      0,
+      655,
+      0
+    ],
+    [
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      469
+    ]
+  ],
+  "counts": {
+    "n_samples": 3421
+  },
+  "timing": {
+    "eval_wall_sec": 1.3118946552276611,
+    "throughput_img_per_s": 2607.6788912645834,
+    "latency_ms_per_img": 0.3834827989557618
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "data_flag": "breastmnist",
+  "num_classes": 2,
+  "class_names": [
+    "malignant",
+    "normal, benign"
+  ],
+  "is_ensemble": false,
+  "metrics": {
+    "accuracy": 0.8397435897435898,
+    "balanced_accuracy": 0.8151629072681704,
+    "auc": 0.8799081035923141
+  },
+  "confusion_matrix": [
+    [
+      32,
+      10
+    ],
+    [
+      15,
+      99
+    ]
+  ],
+  "counts": {
+    "n_samples": 156
+  },
+  "timing": {
+    "eval_wall_sec": 0.23221421241760254,
+    "throughput_img_per_s": 671.7935064175027,
+    "latency_ms_per_img": 1.4885526437025804
+  }
+}

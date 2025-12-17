@@ -30,6 +30,7 @@ from .methods.tta import (
 # Ensemble methods
 from .methods.ensemble import (
     EnsembleSTDMethod,
+    MCDropoutMethod,
     ensembling_predictions,
     ensembling_stds_computation,
     ensembling_variance_computation,
@@ -93,6 +94,7 @@ from .evaluation.evaluation import (
     compute_aurc,
     compute_augrc,
     compute_all_metrics,
+    compute_all_metrics_per_fold,
     plot_risk_coverage_curve,
     plot_roc_curve_failure_prediction,
     plot_uncertainty_distributions,
@@ -169,6 +171,7 @@ __all__ = [
     "compute_aurc",
     "compute_augrc",
     "compute_all_metrics",
+    "compute_all_metrics_per_fold",
     "plot_risk_coverage_curve",
     "plot_roc_curve_failure_prediction",
     "plot_uncertainty_distributions",

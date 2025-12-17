@@ -41,6 +41,123 @@ class EnsembleSTDMethod(UQMethod):
         return stds
 
 
+class MCDropoutMethod(UQMethod):
+    """
+    Monte Carlo Dropout for uncertainty quantification.
+    
+    Performs multiple stochastic forward passes with dropout enabled at test time.
+    Uncertainty is measured as standard deviation across predictions.
+    
+    Requirements:
+    - Models must have dropout layers
+    - Dropout is enabled during inference (not eval mode)
+    
+    Args:
+        num_samples: Number of MC dropout samples per model (default: 5)
+    """
+    def __init__(self, num_samples=5):
+        super().__init__("MC-Dropout")
+        self.num_samples = num_samples
+    
+    def _has_dropout(self, model):
+        """Check if model has any dropout layers."""
+        for module in model.modules():
+            if isinstance(module, (torch.nn.Dropout, torch.nn.Dropout1d, torch.nn.Dropout2d, torch.nn.Dropout3d)):
+                return True
+        return False
+    
+    def _enable_dropout(self, model):
+        """Enable dropout layers for MC sampling."""
+        for module in model.modules():
+            if isinstance(module, (torch.nn.Dropout, torch.nn.Dropout1d, torch.nn.Dropout2d, torch.nn.Dropout3d)):
+                module.train()  # Enable dropout
+    
+    def compute(self, models, data_loader, device, ensemble_mode=False, return_per_fold=False):
+        """
+        Compute MC Dropout uncertainty.
+        
+        Args:
+            models: List of PyTorch models or single model
+            data_loader: DataLoader for evaluation
+            device: torch.device
+            ensemble_mode: If True, compute per-model uncertainty then average (for per-fold evaluation)
+            return_per_fold: If True, return per-fold uncertainties [M, N]
+        
+        Returns:
+            np.ndarray: Per-sample uncertainty scores
+                - If return_per_fold=True: [M, N] per-model uncertainties
+                - Otherwise: [N] averaged uncertainties
+        """
+        if not isinstance(models, list):
+            models = [models]
+        
+        # Check if models have dropout
+        models_with_dropout = [self._has_dropout(m) for m in models]
+        if not any(models_with_dropout):
+            raise ValueError("No dropout layers found in any model. MC Dropout requires models with dropout layers.")
+        
+        print(f"  Models with dropout: {sum(models_with_dropout)}/{len(models)}")
+        print(f"  Performing {self.num_samples} MC samples per model...")
+        
+        all_model_uncertainties = []
+        
+        for model_idx, model in enumerate(models):
+            if not models_with_dropout[model_idx]:
+                print(f"  Warning: Model {model_idx} has no dropout, skipping")
+                continue
+            
+            # Enable dropout for this model
+            self._enable_dropout(model)
+            
+            # Collect predictions from multiple forward passes
+            mc_predictions = []
+            
+            for sample_idx in range(self.num_samples):
+                sample_preds = []
+                
+                with torch.no_grad():
+                    for batch in data_loader:
+                        if isinstance(batch, dict):
+                            images = batch["image"].to(device)
+                        else:
+                            images, _ = batch
+                            images = images.to(device)
+                        
+                        logits = model(images)
+                        
+                        # Convert to probabilities
+                        if logits.shape[1] == 1:
+                            probs = torch.sigmoid(logits)
+                            probs = torch.cat([1 - probs, probs], dim=1)
+                        else:
+                            probs = torch.softmax(logits, dim=1)
+                        
+                        sample_preds.append(probs.cpu().numpy())
+                
+                mc_predictions.append(np.concatenate(sample_preds, axis=0))  # [N, C]
+            
+            # Stack MC samples: [num_samples, N, C]
+            mc_predictions = np.stack(mc_predictions, axis=0)
+            
+            # Compute std across MC samples
+            std_per_class = np.std(mc_predictions, axis=0)  # [N, C]
+            model_uncertainty = np.mean(std_per_class, axis=1)  # [N]
+            
+            all_model_uncertainties.append(model_uncertainty)
+            
+            # Return model to eval mode
+            model.eval()
+        
+        # Stack uncertainties: [M, N]
+        all_model_uncertainties = np.array(all_model_uncertainties)
+        
+        if return_per_fold:
+            return all_model_uncertainties  # [M, N]
+        else:
+            # Average across models
+            return np.mean(all_model_uncertainties, axis=0)  # [N]
+
+
 # ============================================================================
 # FUNCTIONAL API (existing, for backward compatibility)
 # ============================================================================

@@ -8,7 +8,7 @@ import torch
 import numpy as np
 from torchvision import transforms
 from torch.utils.data import DataLoader, TensorDataset
-from gps_augment.utils.randaugment import BetterRandAugment
+from .gps_augment.utils.randaugment import BetterRandAugment
 
 from ..core.base import UQMethod
 from ..core.utils import (
@@ -47,15 +47,37 @@ class TTAMethod(UQMethod):
         self.nb_augmentations = nb_augmentations
         self.kwargs = kwargs
     
-    def compute(self, models, dataset, device, **run_kwargs):
-        """Compute per-sample std across augmentations."""
-        stds, _ = TTA(
+    def compute(self, models, dataset, device, ensemble_mode=False, return_per_fold=False, seed=None, **run_kwargs):
+        """
+        Compute per-sample std across augmentations.
+        
+        Args:
+            models: List of models or single model
+            dataset: Dataset to evaluate
+            device: torch.device
+            ensemble_mode: If True, compute per-model uncertainty then average (for per-fold evaluation)
+            return_per_fold: If True, return per-fold uncertainties [M, N] instead of averaging
+            seed: Random seed for augmentations (None = use current RNG state)
+            **run_kwargs: Additional arguments
+        
+        Returns:
+            tuple or np.ndarray: 
+                - If return_per_fold=True: (stds, per_fold_stds) where stds is [M, N] or [N]
+                - Otherwise: stds [N]
+        """
+        stds, _, per_fold_stds = TTA(
             self.transformations, models, dataset, device,
-            nb_augmentations=self.nb_augmentations,  # ← ADD THIS
-            usingBetterRandAugment=False,
+            nb_augmentations=self.nb_augmentations,
+            usingBetterRandAugment=False,  # Use torchvision.RandAugment for TTA
             n=self.n, m=self.m,
+            ensemble_mode=ensemble_mode,
+            return_per_fold=return_per_fold,
+            seed=seed,
             **{**self.kwargs, **run_kwargs}
         )
+        
+        if return_per_fold:
+            return stds, per_fold_stds
         return np.array(stds)
 
 
@@ -98,22 +120,53 @@ class GPSMethod(UQMethod):
         )
         return self.policies
     
-    def compute(self, models, dataset, device, n=2, m=45, **kwargs):
-        """Compute uncertainty using discovered policies."""
+    def compute(self, models, dataset, device, n=2, m=45, ensemble_mode=False, return_per_fold=False, **kwargs):
+        """
+        Compute uncertainty using discovered policies.
+        
+        Args:
+            models: List of models or single model
+            dataset: Dataset to evaluate
+            device: torch.device
+            n: Number of ops per augmentation
+            m: Magnitude parameter
+            ensemble_mode: If True, compute per-model uncertainty then average (for per-fold evaluation)
+            return_per_fold: If True, return per-fold uncertainties
+            **kwargs: Additional arguments
+        
+        Returns:
+            tuple or np.ndarray: 
+                - If return_per_fold=True: (stds, per_fold_stds)
+                - Otherwise: stds [N]
+        """
         if self.policies is None:
             raise RuntimeError("Call search_policies() before compute()")
         
+        print(f"  Extracting {len(self.policies)} policy groups...")
+        
         # Extract policies from search results
         transformation_pipeline = []
+        extracted_m = None
         for group in self.policies:
             n_group, m_group, transformations_group = extract_gps_augmentations_info(group)
             transformation_pipeline.append(transformations_group)
+            # Use M value from policy filenames (they encode the max_magnitude used during caching)
+            if m_group is not None:
+                extracted_m = m_group
+        
+        # Override m parameter with extracted M from filenames if available
+        # This ensures max_magnitude matches the scale used when policies were generated
+        if extracted_m is not None:
+            print(f"  Using M={extracted_m} extracted from policy filenames (overriding m={m})")
+            m = extracted_m
+        
+        print(f"  Extracted {len(transformation_pipeline)} transformation pipelines")
         
         if not transformation_pipeline:
             raise RuntimeError("No valid policies extracted from search results")
         
         # Call TTA in GPS mode
-        stds, _ = TTA(
+        stds, _, per_fold_stds = TTA(
             transformations=transformation_pipeline,
             models=models,
             dataset=dataset,
@@ -122,9 +175,13 @@ class GPSMethod(UQMethod):
             n=n, m=m,
             is_gps_mode=True,
             average_groups=True,
+            ensemble_mode=ensemble_mode,
+            return_per_fold=return_per_fold,
             **kwargs
         )
         
+        if return_per_fold:
+            return stds, per_fold_stds
         return np.array(stds)
 
 
@@ -132,7 +189,7 @@ class GPSMethod(UQMethod):
 # FUNCTIONAL API (existing, for backward compatibility)
 # ============================================================================
 
-def _batched_augmentation_inference(augmented_inputs, models, device, batch_size):
+def _batched_augmentation_inference(augmented_inputs, models, device, batch_size, ensemble_mode=False):
     """
     Process multiple augmentations in a single forward pass (faster).
     
@@ -141,11 +198,20 @@ def _batched_augmentation_inference(augmented_inputs, models, device, batch_size
         models: List of models
         device: torch.device
         batch_size: Max batch size
+        ensemble_mode: If True, return per-model predictions [M, K, N, num_classes]
+                       If False, average across models first [K, N, num_classes]
     
     Returns:
-        torch.Tensor: Predictions [K, N, num_classes]
+        torch.Tensor: 
+            - If ensemble_mode=False: [K, N, num_classes] (averaged across models)
+            - If ensemble_mode=True: [M, K, N, num_classes] (per-model predictions)
     """
     K, N, C, H, W = augmented_inputs.shape
+    
+    # Ensure models is a list
+    if not isinstance(models, list):
+        models = [models]
+    M = len(models)
     
     # Check if we can fit all augmentations in memory
     total_samples = K * N
@@ -158,33 +224,65 @@ def _batched_augmentation_inference(augmented_inputs, models, device, batch_size
         # Reshape: [K, N, C, H, W] → [K*N, C, H, W]
         imgs_batched = augmented_inputs.reshape(total_samples, C, H, W)
         
-        # Single forward pass
-        batch_preds = get_batch_predictions(models, imgs_batched, device)  # [K*N, num_classes]
-        avg_preds = average_predictions(batch_preds)  # [K*N, num_classes]
+        # Single forward pass - returns [K*N, M, num_classes]
+        batch_preds = get_batch_predictions(models, imgs_batched, device)  # [K*N, M, num_classes]
         
-        # Reshape back: [K*N, num_classes] → [K, N, num_classes]
-        predictions = avg_preds.reshape(K, N, -1)
+        if ensemble_mode:
+            # Reshape to [M, K, N, num_classes]
+            num_classes = batch_preds.shape[2]
+            predictions = batch_preds.reshape(K, N, M, num_classes).permute(2, 0, 1, 3)  # [M, K, N, num_classes]
+        else:
+            # Average across models first
+            avg_preds = average_predictions(batch_preds)  # [K*N, num_classes]
+            # Reshape back: [K*N, num_classes] → [K, N, num_classes]
+            predictions = avg_preds.reshape(K, N, -1)
         
         return predictions
     else:
         # Fallback: process each augmentation separately with proper batching
         print(f"  Using sequential inference (total samples {total_samples} > batch_size {batch_size})")
-        preds_list = []
         
-        for k in range(K):
-            dataset_aug = TensorDataset(augmented_inputs[k])
-            loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+        if ensemble_mode:
+            # Store per-model predictions: [M, K, N, num_classes]
+            preds_per_model = [[] for _ in range(M)]
             
-            all_preds = []
-            for batch in loader:
-                imgs = batch[0].to(device)
-                batch_predictions = get_batch_predictions(models, imgs, device)
-                avg_preds = average_predictions(batch_predictions)
-                all_preds.append(avg_preds)
+            for k in range(K):
+                dataset_aug = TensorDataset(augmented_inputs[k])
+                loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+                
+                all_preds = []
+                for batch in loader:
+                    imgs = batch[0].to(device)
+                    batch_predictions = get_batch_predictions(models, imgs, device)  # [B, M, C]
+                    all_preds.append(batch_predictions)
+                
+                aug_preds = torch.cat(all_preds, dim=0)  # [N, M, num_classes]
+                
+                # Split by model
+                for model_idx in range(M):
+                    preds_per_model[model_idx].append(aug_preds[:, model_idx, :])  # [N, num_classes]
             
-            preds_list.append(torch.cat(all_preds, dim=0))  # [N, num_classes]
+            # Stack: M x [K, N, num_classes] → [M, K, N, num_classes]
+            predictions = torch.stack([torch.stack(model_preds, dim=0) for model_preds in preds_per_model], dim=0)
+        else:
+            # Average across models during inference
+            preds_list = []
+            
+            for k in range(K):
+                dataset_aug = TensorDataset(augmented_inputs[k])
+                loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+                
+                all_preds = []
+                for batch in loader:
+                    imgs = batch[0].to(device)
+                    batch_predictions = get_batch_predictions(models, imgs, device)
+                    avg_preds = average_predictions(batch_predictions)
+                    all_preds.append(avg_preds)
+                
+                preds_list.append(torch.cat(all_preds, dim=0))  # [N, num_classes]
+            
+            predictions = torch.stack(preds_list, dim=0)  # [K, N, num_classes]
         
-        predictions = torch.stack(preds_list, dim=0)  # [K, N, num_classes]
         return predictions
     
 def extract_gps_augmentations_info(policies):
@@ -260,7 +358,8 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
         usingBetterRandAugment=False, n=2, m=45, image_normalization=False, 
         nb_channels=1, mean=None, std=None, image_size=51, batch_size=None, 
         use_monai_cache=False, cache_rate=1.0, cache_num_workers=0, 
-        dataloader_workers=None, is_gps_mode=False, average_groups=True):
+        dataloader_workers=None, is_gps_mode=False, average_groups=True,
+        ensemble_mode=False, return_per_fold=False, seed=None):
     """
     Perform Test-Time Augmentation (TTA) on a batch of images.
     
@@ -268,13 +367,31 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
         ...existing args...
         is_gps_mode: If True, expect transformations = [[group1], [group2], [group3]]
         average_groups: If True (default), average std across groups in GPS mode
+        ensemble_mode: If True, compute uncertainty per-model then average (for per-fold evaluation)
+                       If False (default), average models first then compute uncertainty (ensemble evaluation)
+        return_per_fold: If True, return per-fold uncertainties [M, N] instead of averaging
+        seed: Random seed for augmentations. If None (default), uses current PyTorch RNG state.
+              Set to an integer for reproducibility, or use time.time_ns() for randomness.
     
     Returns:
-        tuple: (stds, averaged_predictions)
+        tuple: (stds, averaged_predictions, per_fold_stds)
+            - If return_per_fold=True: stds is [M, N] per-model uncertainties
+            - If ensemble_mode=True and return_per_fold=False: stds is [N] (averaged across models)
             - If GPS mode with average_groups=True: stds is [N] averaged across groups
             - If GPS mode with average_groups=False: stds is [G, N] per-group stds
             - Otherwise: stds is [N] for standard TTA
+            - per_fold_stds: [M, N] array of per-model uncertainties (only if ensemble_mode=True)
     """
+    # Set seed for augmentation reproducibility/randomness
+    # CRITICAL: Augmentation operations use random.random() internally!
+    if seed is not None:
+        import random
+        random.seed(seed)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+    
+    if usingBetterRandAugment and transformations is not None and not isinstance(transformations, list):
+        raise ValueError("Transformations must be a list (or None for random policies) when usingBetterRandAugment.")
     if usingBetterRandAugment and transformations is not None and not isinstance(transformations, list):
         raise ValueError("Transformations must be a list (or None for random policies) when usingBetterRandAugment.")
     
@@ -292,30 +409,136 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
         if is_gps_mode:
             # GPS mode: transformations is [[group1_policies], [group2_policies], [group3_policies]]
             all_groups_stds = []
+            all_groups_model_stds = [] if ensemble_mode else None
+            
+            # Memory-efficient mode: process one policy at a time if group is large
+            # Heuristic: if K policies * N samples * batch_size might exceed RAM, go sequential
+            memory_efficient_threshold = 5  # Process sequentially if > 5 policies in a group (typical with top_k=3)
+            
             for group_idx, policy_group in enumerate(transformations):
-                print(f"  Applying policy group {group_idx + 1}/{len(transformations)}...")
+                print(f"  Applying policy group {group_idx + 1}/{len(transformations)} ({len(policy_group)} policies)...")
                 
-                # Get augmented inputs: [K, N, C, H, W]
-                augmented_inputs, _ = apply_augmentations(
-                    dataset, len(policy_group), usingBetterRandAugment, n, m, 
-                    image_normalization, nb_channels, mean, std, image_size, 
-                    policy_group, batch_size=batch_size
-                )
+                K = len(policy_group)
+                use_sequential = K > memory_efficient_threshold
                 
-                # NEW: Use batched inference if possible
-                predictions = _batched_augmentation_inference(
-                    augmented_inputs, models, device, batch_size
-                )  # [K, N, num_classes]
-                
-                # Compute std across K augmentations
-                std_per_class = torch.std(predictions, dim=0)  # [N, num_classes]
-                
-                if std_per_class.shape[1] == 1:
-                    group_stds = std_per_class.squeeze(1)
+                if use_sequential:
+                    print(f"    Using memory-efficient mode (processing {K} policies one at a time)")
+                    # Process one policy at a time to avoid RAM buildup
+                    if ensemble_mode:
+                        # Track predictions per model: [M] → list of [K, N, num_classes]
+                        M = len(models) if isinstance(models, list) else 1
+                        model_policy_preds = [[] for _ in range(M)]
+                        
+                        for policy_idx, single_policy in enumerate(policy_group):
+                            if policy_idx % 10 == 0:
+                                print(f"      Policy {policy_idx+1}/{K}...")
+                            
+                            # Apply single policy: [1, N, C, H, W]
+                            augmented_inputs, _ = apply_augmentations(
+                                dataset, 1, usingBetterRandAugment, n, m, 
+                                image_normalization, nb_channels, mean, std, image_size, 
+                                [single_policy], batch_size=batch_size
+                            )
+                            
+                            # Inference: [M, 1, N, num_classes]
+                            policy_preds = _batched_augmentation_inference(
+                                augmented_inputs, models, device, batch_size, ensemble_mode=True
+                            )
+                            
+                            # Store per model: [1, N, num_classes]
+                            for model_idx in range(M):
+                                model_policy_preds[model_idx].append(policy_preds[model_idx, 0])  # [N, num_classes]
+                        
+                        # Stack all policies per model: [K, N, num_classes]
+                        model_stds = []
+                        for model_idx in range(M):
+                            model_preds_stacked = torch.stack(model_policy_preds[model_idx], dim=0)  # [K, N, num_classes]
+                            # Compute std across K policies
+                            std_per_class = torch.std(model_preds_stacked, dim=0)  # [N, num_classes]
+                            
+                            if std_per_class.shape[1] == 1:
+                                model_std = std_per_class.squeeze(1).cpu().numpy()
+                            else:
+                                model_std = torch.mean(std_per_class, dim=1).cpu().numpy()
+                            
+                            model_stds.append(model_std)
+                        
+                        all_groups_model_stds.append(np.array(model_stds))  # [M, N]
+                        group_stds = np.mean(model_stds, axis=0)  # [N]
+                    else:
+                        # Ensemble averaging: track [K, N, num_classes]
+                        all_policy_preds = []
+                        
+                        for policy_idx, single_policy in enumerate(policy_group):
+                            if policy_idx % 10 == 0:
+                                print(f"      Policy {policy_idx+1}/{K}...")
+                            
+                            augmented_inputs, _ = apply_augmentations(
+                                dataset, 1, usingBetterRandAugment, n, m, 
+                                image_normalization, nb_channels, mean, std, image_size, 
+                                [single_policy], batch_size=batch_size
+                            )
+                            
+                            # Inference: [1, N, num_classes]
+                            policy_preds = _batched_augmentation_inference(
+                                augmented_inputs, models, device, batch_size, ensemble_mode=False
+                            )
+                            all_policy_preds.append(policy_preds[0])  # [N, num_classes]
+                        
+                        # Stack and compute std: [K, N, num_classes]
+                        all_preds_stacked = torch.stack(all_policy_preds, dim=0)
+                        std_per_class = torch.std(all_preds_stacked, dim=0)  # [N, num_classes]
+                        
+                        if std_per_class.shape[1] == 1:
+                            group_stds = std_per_class.squeeze(1).cpu().numpy()
+                        else:
+                            group_stds = torch.mean(std_per_class, dim=1).cpu().numpy()
                 else:
-                    group_stds = torch.mean(std_per_class, dim=1)
+                    # Standard batched mode (fast but uses more RAM)
+                    # Get augmented inputs: [K, N, C, H, W]
+                    augmented_inputs, _ = apply_augmentations(
+                        dataset, len(policy_group), usingBetterRandAugment, n, m, 
+                        image_normalization, nb_channels, mean, std, image_size, 
+                        policy_group, batch_size=batch_size
+                    )
+                    
+                    # Use batched inference
+                    predictions = _batched_augmentation_inference(
+                        augmented_inputs, models, device, batch_size, ensemble_mode=ensemble_mode
+                    )  # [K, N, num_classes] or [M, K, N, num_classes] if ensemble_mode
+                    
+                    if ensemble_mode:
+                        # Compute std per-model, then average across models
+                        # predictions: [M, K, N, num_classes]
+                        M, K, N, num_classes = predictions.shape
+                        
+                        model_stds = []
+                        for model_idx in range(M):
+                            # Std across K augmentations for this model
+                            std_per_class = torch.std(predictions[model_idx], dim=0)  # [N, num_classes]
+                            
+                            if num_classes == 1:
+                                model_std = std_per_class.squeeze(1)
+                            else:
+                                model_std = torch.mean(std_per_class, dim=1)  # [N]
+                            
+                            model_stds.append(model_std.cpu().numpy())
+                        
+                        # Store per-model stds for this group
+                        all_groups_model_stds.append(np.array(model_stds))  # [M, N]
+                        
+                        # Average across models for group-level uncertainty
+                        group_stds = np.mean(model_stds, axis=0)  # [N]
+                    else:
+                        # Standard: compute std across K augmentations (models already averaged)
+                        std_per_class = torch.std(predictions, dim=0)  # [N, num_classes]
+                        
+                        if std_per_class.shape[1] == 1:
+                            group_stds = std_per_class.squeeze(1).cpu().numpy()
+                        else:
+                            group_stds = torch.mean(std_per_class, dim=1).cpu().numpy()
                 
-                all_groups_stds.append(group_stds.cpu().numpy())
+                all_groups_stds.append(group_stds)
             
             # Average across groups if requested
             if average_groups:
@@ -324,26 +547,88 @@ def TTA(transformations, models, dataset, device, nb_augmentations=10,
                 stds = all_groups_stds  # [G, N] - return per-group stds
             
             averaged_predictions = None # not computed in GPS mode
+            
+            # Handle per-fold mode for GPS
+            if ensemble_mode and return_per_fold:
+                # Average per-model stds across groups: [G, M, N] → [M, N]
+                per_fold_stds = np.mean(all_groups_model_stds, axis=0)  # [M, N]
+            else:
+                per_fold_stds = None
         else:
             # Single policy or standard TTA: process each augmentation one by one
-            for aug_idx in range(nb_augmentations):
-                augmented_inputs = apply_augmentations(
-                    dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations, batch_size=batch_size, cached_dataset=cached_dataset, dataloader_workers=dataloader_workers
-                )
-                # augmented_inputs shape: [1, batch_size, C, H, W]
-                dataset_aug = TensorDataset(augmented_inputs[0])
-                loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
-                all_preds = []
-                for batch in loader:
-                    batch_predictions = get_batch_predictions(models, batch[0], device)
-                    avg_preds = average_predictions(batch_predictions)
-                    all_preds.append(avg_preds)
-                predictions.append(torch.cat(all_preds, dim=0))
-            # Stack predictions: [nb_augmentations, batch_size, num_classes]
-            averaged_predictions = torch.stack(predictions, dim=0).permute(1, 0, 2)  # [batch_size, nb_augmentations, num_classes]
-            stds = compute_stds(averaged_predictions)
+            if ensemble_mode:
+                # Ensemble mode: store per-model predictions
+                if not isinstance(models, list):
+                    models = [models]
+                M = len(models)
+                
+                model_predictions = [[] for _ in range(M)]
+                
+                for aug_idx in range(nb_augmentations):
+                    augmented_inputs = apply_augmentations(
+                        dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations, batch_size=batch_size, cached_dataset=cached_dataset, dataloader_workers=dataloader_workers
+                    )
+                    # augmented_inputs shape: [1, batch_size, C, H, W]
+                    dataset_aug = TensorDataset(augmented_inputs[0])
+                    loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+                    all_preds = []
+                    for batch in loader:
+                        batch_predictions = get_batch_predictions(models, batch[0], device)  # [B, M, C]
+                        all_preds.append(batch_predictions)
+                    
+                    aug_preds = torch.cat(all_preds, dim=0)  # [N, M, num_classes]
+                    
+                    # Split by model
+                    for model_idx in range(M):
+                        model_predictions[model_idx].append(aug_preds[:, model_idx, :])  # [N, num_classes]
+                
+                # Compute std per model, then average
+                model_stds = []
+                for model_idx in range(M):
+                    # Stack augmentations for this model: [nb_augmentations, N, num_classes]
+                    model_aug_preds = torch.stack(model_predictions[model_idx], dim=0)
+                    # Permute to [N, nb_augmentations, num_classes]
+                    model_aug_preds = model_aug_preds.permute(1, 0, 2)
+                    # Compute std for this model
+                    model_std = compute_stds(model_aug_preds)  # Returns numpy array
+                    model_stds.append(model_std)
+                
+                # Convert to numpy array: [M, N]
+                model_stds_array = np.array(model_stds)
+                
+                # Return per-fold or averaged
+                if return_per_fold:
+                    stds = model_stds_array  # [M, N]
+                else:
+                    stds = np.mean(model_stds_array, axis=0)  # [N]
+                
+                per_fold_stds = model_stds_array  # Always keep for reference
+                averaged_predictions = None  # Not needed in ensemble mode
+            else:
+                # Standard mode: average models first
+                for aug_idx in range(nb_augmentations):
+                    augmented_inputs = apply_augmentations(
+                        dataset, 1, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations, batch_size=batch_size, cached_dataset=cached_dataset, dataloader_workers=dataloader_workers
+                    )
+                    # augmented_inputs shape: [1, batch_size, C, H, W]
+                    dataset_aug = TensorDataset(augmented_inputs[0])
+                    loader = DataLoader(dataset_aug, batch_size=batch_size, pin_memory=True)
+                    all_preds = []
+                    for batch in loader:
+                        batch_predictions = get_batch_predictions(models, batch[0], device)
+                        avg_preds = average_predictions(batch_predictions)
+                        all_preds.append(avg_preds)
+                    predictions.append(torch.cat(all_preds, dim=0))
+                # Stack predictions: [nb_augmentations, batch_size, num_classes]
+                averaged_predictions = torch.stack(predictions, dim=0).permute(1, 0, 2)  # [batch_size, nb_augmentations, num_classes]
+                stds = compute_stds(averaged_predictions)
+                per_fold_stds = None  # No per-fold data in standard mode
     
-    return stds, averaged_predictions
+    # Ensure stds is always a numpy array (compute_stds returns list)
+    if isinstance(stds, list):
+        stds = np.array(stds)
+    
+    return stds, averaged_predictions, per_fold_stds
 
 
 def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m, image_normalization, nb_channels, mean, std, image_size, transformations=None, batch_size=None, cached_dataset=None, dataloader_workers=None):
@@ -370,7 +655,7 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
     """
     augmented_inputs = []
     worker_count = 4 if dataloader_workers is None else dataloader_workers
-
+    
     def _get_loader(augmentation):
         if cached_dataset is not None:
             aug_dataset = _CachedRandAugDataset(cached_dataset, augmentation)
@@ -381,23 +666,36 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                 num_workers=worker_count,
                 pin_memory=True,
             )
+        
+        # Save original transform before modifying
+        saved_transforms = None
         if hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'datasets'):
+            saved_transforms = [subds.transform for subds in dataset.dataset.datasets]
             for subds in dataset.dataset.datasets:
                 subds.transform = augmentation
         else:
+            saved_transforms = dataset.transform
             dataset.transform = augmentation
-        return DataLoader(
+        
+        # Create loader and consume all data
+        loader = DataLoader(
             dataset=dataset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=worker_count,
             pin_memory=True,
         )
+        
+        # Store saved transforms to restore later
+        loader._saved_transforms = saved_transforms
+        loader._target_dataset = dataset
+        
+        return loader
     
     if usingBetterRandAugment:
         if isinstance(transformations, list):
             # Case 1: Explicit policies provided
-            rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=True, randomize_sign=False, image_size=image_size) for policy in transformations]
+            rand_aug_policies = [BetterRandAugment(n=n, m=m, resample=False, transform=policy, verbose=False, randomize_sign=False, image_size=image_size) for policy in transformations]
         
         # Case 2: Random policies (transformations is None or False)
         else:
@@ -417,12 +715,23 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
 
         for i, augmentation in enumerate(augmentations):
             augmented_inputs_batch = []
-            print(f"Applying augmentation n : {i}")
+            print(f"  Loading augmentation {i+1}/{len(augmentations)}...", end='', flush=True)
             data_loader = _get_loader(augmentation)
             for batch in data_loader:
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+            
+            # Restore original transform after consuming data
+            if hasattr(data_loader, '_saved_transforms') and data_loader._saved_transforms is not None:
+                target_dataset = data_loader._target_dataset
+                if hasattr(target_dataset, 'dataset') and hasattr(target_dataset.dataset, 'datasets') and isinstance(data_loader._saved_transforms, list):
+                    for subds, saved_transform in zip(target_dataset.dataset.datasets, data_loader._saved_transforms):
+                        subds.transform = saved_transform
+                else:
+                    target_dataset.transform = data_loader._saved_transforms
+            
+            print(" done")
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [ num_augmentations, batch_size, C, H, W]
     
     else:
@@ -447,6 +756,15 @@ def apply_augmentations(dataset, nb_augmentations, usingBetterRandAugment, n, m,
                 augmented_images = batch[0]
                 augmented_inputs_batch.append(augmented_images)
             augmented_inputs.append(torch.cat(augmented_inputs_batch, dim=0))
+            
+            # Restore original transform after consuming data
+            if hasattr(data_loader, '_saved_transforms') and data_loader._saved_transforms is not None:
+                target_dataset = data_loader._target_dataset
+                if hasattr(target_dataset, 'dataset') and hasattr(target_dataset.dataset, 'datasets') and isinstance(data_loader._saved_transforms, list):
+                    for subds, saved_transform in zip(target_dataset.dataset.datasets, data_loader._saved_transforms):
+                        subds.transform = saved_transform
+                else:
+                    target_dataset.transform = data_loader._saved_transforms
         augmented_inputs = torch.stack(augmented_inputs, dim=0)  # Shape: [num_augmentations, batch_size, C, H, W]
     
     if usingBetterRandAugment : 
@@ -508,7 +826,7 @@ def apply_randaugment_and_store_results(
     # Streaming mode with cached dataset (memory-efficient)
     if cached_dataset is not None:
         print(f"Streaming {num_policies} policies in chunks to avoid RAM overload")
-        policy_chunk_size = min(25, num_policies)
+        policy_chunk_size = min(15, num_policies)  # Conservative chunk size for memory safety
         num_samples = len(cached_dataset)
 
         def build_augmentations_chunk(k_chunk):
@@ -547,15 +865,20 @@ def apply_randaugment_and_store_results(
             augmentations = build_augmentations_chunk(K_chunk)
             worker_count = dataloader_workers or 0
             aug_dataset = _CachedRandAugDataset(cached_dataset, augmentations)
+            
+            # Conservative prefetch to avoid OOM - with K policies, memory multiplies fast
+            # prefetch_factor * num_workers * batch_size * K_chunk can easily exceed GPU memory
+            safe_prefetch = min(2, dataloader_prefetch) if worker_count > 0 else None
+            
             loader = DataLoader(
                 dataset=aug_dataset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=worker_count,
-                pin_memory=True,
+                pin_memory=True,  # Disable to save GPU memory
                 worker_init_fn=_dl_worker_init,
-                persistent_workers=False,
-                prefetch_factor=(int(dataloader_prefetch) if worker_count > 0 else None),
+                persistent_workers=(worker_count > 0),  # Keep workers alive for speed
+                prefetch_factor=safe_prefetch,
             )
 
             # Get first batch to determine actual K
@@ -575,7 +898,10 @@ def apply_randaugment_and_store_results(
             memmaps, memmap_paths = [], []
             for idx in range(K_actual):
                 mmap_path = os.path.join(folder_name, f"tmp_policy_{start+idx}.mmap")
-                mem = np.memmap(mmap_path, dtype='float32', mode='w+', shape=(num_samples, nc))
+                # Pre-create the file with correct size
+                with open(mmap_path, 'wb') as f:
+                    f.write(b'\0' * (num_samples * nc * 4))  # 4 bytes per float32
+                mem = np.memmap(mmap_path, dtype='float32', mode='r+', shape=(num_samples, nc))
                 memmaps.append(mem)
                 memmap_paths.append(mmap_path)
 
@@ -585,9 +911,11 @@ def apply_randaugment_and_store_results(
             def _process_batch(imgs_stacked_local):
                 """Process a batch and return predictions."""
                 B, K, C, H, W = imgs_stacked_local.shape
-                imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float()
-                batch_predictions = get_batch_predictions(models, imgs_flat, device, use_amp=True)
+                imgs_flat = imgs_stacked_local.reshape(B * K, C, H, W).float().to(device)
+                batch_predictions = get_batch_predictions(models, imgs_flat, device)
                 avg_preds = average_predictions(batch_predictions).view(B, K, -1).cpu().numpy()
+                # Explicitly free GPU tensors
+                del imgs_flat, batch_predictions
                 return B, K, avg_preds
 
             # Process first batch
@@ -595,6 +923,7 @@ def apply_randaugment_and_store_results(
             for local_k in range(K):
                 memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
             sample_ptr += B
+            del imgs_stacked, avg_preds  # Free after use
             
             # Process remaining batches
             for batch in it:
@@ -603,11 +932,12 @@ def apply_randaugment_and_store_results(
                 for local_k in range(K):
                     memmaps[local_k][sample_ptr:sample_ptr + B, :] = avg_preds[:, local_k, :]
                 sample_ptr += B
+                del imgs_stacked, avg_preds  # Free after each batch
 
             if sample_ptr != num_samples:
                 raise RuntimeError(f"Expected {num_samples} samples but wrote {sample_ptr}")
 
-            # Compress each memmap to .npz and cleanup
+            # Cleanup memmaps and free memory
             for local_k, (mem, mempath) in enumerate(zip(memmaps, memmap_paths)):
                 # Extract policy key for filename
                 rand_transform = None
@@ -630,15 +960,26 @@ def apply_randaugment_and_store_results(
                 arr = np.asarray(mem)
                 np.savez_compressed(out_fname, predictions=arr)
                 print(f"Saved policy {start + local_k} -> {out_fname}")
+                del arr, mem  # Free memory immediately after saving
 
-            # Cleanup memmaps
+            # Cleanup memmap files
             try:
                 for mempath in memmap_paths:
                     os.remove(mempath)
             except Exception as e:
                 print(f"Warning: Failed to remove memmap files: {e}")
             
-            del memmaps
+            # Shutdown persistent workers explicitly
+            if hasattr(loader, '_iterator'):
+                loader._iterator = None
+            
+            # Aggressive cleanup to free GPU memory
+            del memmaps, memmap_paths, augmentations, loader, aug_dataset
+            
+            # Clear GPU cache and synchronize to ensure memory is freed
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Wait for all operations to complete
 
     else:
         # Fallback: no cache (process one policy at a time)

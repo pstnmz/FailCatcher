@@ -13,8 +13,7 @@ setup(
         "matplotlib>=3.4",
         "seaborn>=0.11",
         "shap>=0.40",
-        "monai>=0.9",
-        "gps_augment",  # if available
+        "monai>=0.9"
     ],
     python_requires=">=3.8",
 )
