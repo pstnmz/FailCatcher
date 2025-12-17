@@ -196,7 +196,7 @@ def ensembling_stds_computation(individual_scores):
     stds_per_class = np.std(individual_scores, axis=1)  # [N, C]
     stds = np.mean(stds_per_class, axis=1)  # [N]
     
-    return stds.tolist()
+    return stds  # Return numpy array, not list
 
 
 def ensembling_predictions(individual_scores):

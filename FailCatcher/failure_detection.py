@@ -574,7 +574,7 @@ class FailureDetector:
         Run ensemble standard deviation.
         
         Args:
-            indiv_scores: Individual model scores [num_models, N, num_classes]
+            indiv_scores: Individual model scores [K, N, C] or [N, K, C]
             y_true: True labels [N]
         
         Returns:
@@ -582,7 +582,24 @@ class FailureDetector:
         """
         timer = Timer("Ensemble STD computation")
         with timer:
+            # Handle both [K, N, C] and [N, K, C] formats
+            if indiv_scores.ndim != 3:
+                raise ValueError(f"indiv_scores must be 3D, got shape {indiv_scores.shape}")
+            
+            K, N, C = indiv_scores.shape
+            # If K looks like number of samples (much larger than C), assume [N, K, C] format
+            if K > 100 and K > C * 10:
+                # Already in [N, K, C] format
+                pass
+            else:
+                # Assume [K, N, C] format, transpose to [N, K, C]
+                indiv_scores = np.transpose(indiv_scores, (1, 0, 2))
+            
             uncertainties = uq.ensembling_stds_computation(indiv_scores)
+            
+            # Ensure output is numpy array
+            if isinstance(uncertainties, list):
+                uncertainties = np.array(uncertainties)
         
         # Use cached predictions if available
         if self._test_predictions_cache is not None:

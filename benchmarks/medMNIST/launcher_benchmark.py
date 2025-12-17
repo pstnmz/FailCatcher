@@ -1,0 +1,434 @@
+#!/usr/bin/env python3
+"""
+Comprehensive benchmark launcher for medMNIST UQ methods.
+
+Automatically runs all combinations of:
+- Datasets (internal test sets and external test sets)
+- Model backbones (ResNet-18, ViT-B/16)
+- Training setups (standard, DA, DO, DADO)
+- UQ methods (with setup-specific filtering)
+
+Usage:
+    python launcher_benchmark.py --python /path/to/venv/bin/python --gpu 0
+    
+    # Dry run (just print commands)
+    python launcher_benchmark.py --dry-run
+    
+    # Run specific datasets only
+    python launcher_benchmark.py --datasets breastmnist organamnist
+    
+    # Run specific models only
+    python launcher_benchmark.py --models resnet18
+    
+    # Run specific setups only
+    python launcher_benchmark.py --setups DA DO
+"""
+
+import subprocess
+import argparse
+from pathlib import Path
+from typing import List, Dict
+import sys
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+# Dataset definitions
+DATASETS_ID = [
+    'organamnist', 
+    'pneumoniamnist', 
+    'dermamnist-e-id', 
+    'octmnist', 
+    'pathmnist', 
+    'bloodmnist', 
+    'tissuemnist', 
+    'breastmnist'
+]
+
+DATASETS_EXTERNAL = [
+    'amos2022',  # OrganaMNIST → AMOS-2022 external test
+    'dermamnist-e-external'  # DermaMNIST-E external centers
+]
+
+# Model backbones
+MODEL_BACKBONES = ['resnet18', 'vit_b_16']
+
+# Training setups
+TRAINING_SETUPS = ['', 'DA', 'DO', 'DADO']  # '' = standard training
+
+# UQ methods
+ALL_METHODS = [
+    'MSR', 
+    'MSR_calibrated', 
+    'MLS',
+    'Ensembling',
+    'TTA', 
+    'GPS', 
+    'KNN_Raw', 
+    #'KNN_SHAP', 
+    'MCDropout'
+]
+
+# Setup constraints: which methods work with which setups
+SETUP_METHOD_COMPATIBILITY = {
+    '': [m for m in ALL_METHODS if m != 'MCDropout'],  # Standard: no dropout
+    'DA': [m for m in ALL_METHODS if m != 'MCDropout'],  # DA only: no dropout
+    'DO': ALL_METHODS,  # Dropout: all methods work
+    'DADO': ALL_METHODS,  # DA + Dropout: all methods work
+}
+
+# Dataset-specific configurations
+DATASET_CONFIG = {
+    'breastmnist': {'batch_size': 4000, 'gps_subsample': None},  # Binary, small → no subsampling
+    'pneumoniamnist': {'batch_size': 4000, 'gps_subsample': None},  # Binary, small → no subsampling
+    'organamnist': {'batch_size': 128, 'gps_subsample': 5000},  # 11 classes, large
+    'octmnist': {'batch_size': 256, 'gps_subsample': 5000},
+    'pathmnist': {'batch_size': 128, 'gps_subsample': 5000},
+    'bloodmnist': {'batch_size': 256, 'gps_subsample': 5000},
+    'tissuemnist': {'batch_size': 512, 'gps_subsample': 5000},
+    'dermamnist-e-id': {'batch_size': 256, 'gps_subsample': 5000},
+    'dermamnist-e-external': {'batch_size': 256, 'gps_subsample': 5000},
+    'amos2022': {'batch_size': 128, 'gps_subsample': 5000},
+}
+
+
+# =============================================================================
+# Command Generation
+# =============================================================================
+
+def get_methods_for_setup(setup: str, exclude_methods: List[str] = None) -> List[str]:
+    """
+    Get compatible methods for a given training setup.
+    
+    Args:
+        setup: Training setup ('', 'DA', 'DO', 'DADO')
+        exclude_methods: Optional list of methods to exclude
+    
+    Returns:
+        List of compatible method names
+    """
+    methods = SETUP_METHOD_COMPATIBILITY[setup].copy()
+    
+    if exclude_methods:
+        methods = [m for m in methods if m not in exclude_methods]
+    
+    return methods
+
+
+def generate_command(
+    dataset: str,
+    model: str,
+    setup: str,
+    methods: List[str],
+    python_path: str,
+    script_path: Path,
+    gpu: int,
+    per_fold_eval: bool = True,
+    output_dir: str = './uq_benchmark_results',
+    **kwargs
+) -> str:
+    """
+    Generate a benchmark command for a specific configuration.
+    
+    Args:
+        dataset: Dataset name (e.g., 'breastmnist')
+        model: Model backbone ('resnet18' or 'vit_b_16')
+        setup: Training setup ('', 'DA', 'DO', 'DADO')
+        methods: List of UQ methods to run
+        python_path: Path to Python executable
+        script_path: Path to run_medmnist_benchmark.py
+        gpu: GPU device ID
+        per_fold_eval: Use per-fold evaluation
+        output_dir: Output directory for results
+        **kwargs: Additional arguments (batch_size, gps_subsample, etc.)
+    
+    Returns:
+        Command string
+    """
+    # Get dataset-specific config
+    config = DATASET_CONFIG.get(dataset, {'batch_size': 256, 'gps_subsample': 5000})
+    batch_size = kwargs.get('batch_size', config['batch_size'])
+    gps_subsample = kwargs.get('gps_subsample', config['gps_subsample'])
+    
+    # Build command
+    cmd_parts = [
+        python_path,
+        str(script_path),
+        f"--flag {dataset}",
+        f"--model {model}",
+    ]
+    
+    # Add setup if not standard
+    if setup:
+        cmd_parts.append(f"--setup {setup}")
+    
+    # Add methods
+    methods_str = ' '.join(methods)
+    cmd_parts.append(f"--methods {methods_str}")
+    
+    # Add other arguments
+    cmd_parts.append(f"--batch-size {batch_size}")
+    cmd_parts.append(f"--gpu {gpu}")
+    cmd_parts.append(f"--output-dir {output_dir}")
+    
+    # Per-fold evaluation flag
+    if per_fold_eval:
+        cmd_parts.append("--per-fold-eval")
+    
+    # GPS subsampling (always set min-failure-ratio for reproducibility)
+    if gps_subsample is not None and 'GPS' in methods:
+        cmd_parts.append(f"--gps-calib-samples {gps_subsample}")
+    cmd_parts.append("--min-failure-ratio 0.3")
+    
+    return ' '.join(cmd_parts)
+
+
+def generate_all_commands(
+    datasets: List[str],
+    models: List[str],
+    setups: List[str],
+    python_path: str,
+    script_path: Path,
+    gpu: int,
+    exclude_methods: List[str] = None,
+    per_fold_eval: bool = True,
+    output_dir: str = './uq_benchmark_results'
+) -> List[Dict]:
+    """
+    Generate all benchmark commands for specified configurations.
+    
+    Returns:
+        List of dicts with 'config' (metadata) and 'command' (command string)
+    """
+    commands = []
+    
+    for dataset in datasets:
+        for model in models:
+            for setup in setups:
+                # Get compatible methods for this setup
+                methods = get_methods_for_setup(setup, exclude_methods)
+                
+                if not methods:
+                    print(f"⚠️  Skipping {dataset}/{model}/{setup or 'standard'}: no compatible methods")
+                    continue
+                
+                cmd = generate_command(
+                    dataset=dataset,
+                    model=model,
+                    setup=setup,
+                    methods=methods,
+                    python_path=python_path,
+                    script_path=script_path,
+                    gpu=gpu,
+                    per_fold_eval=per_fold_eval,
+                    output_dir=output_dir
+                )
+                
+                commands.append({
+                    'config': {
+                        'dataset': dataset,
+                        'model': model,
+                        'setup': setup or 'standard',
+                        'methods': methods,
+                        'num_methods': len(methods)
+                    },
+                    'command': cmd
+                })
+    
+    return commands
+
+
+# =============================================================================
+# Execution
+# =============================================================================
+
+def run_commands(commands: List[Dict], dry_run: bool = False, verbose: bool = True):
+    """
+    Execute generated commands sequentially.
+    
+    Args:
+        commands: List of command dicts
+        dry_run: If True, only print commands without executing
+        verbose: Print progress information
+    """
+    total = len(commands)
+    
+    print(f"\n{'='*80}")
+    print(f"Benchmark Launcher: {total} configurations to run")
+    print(f"{'='*80}\n")
+    
+    if dry_run:
+        print("🔍 DRY RUN MODE - Commands will not be executed\n")
+    
+    for idx, cmd_dict in enumerate(commands, 1):
+        config = cmd_dict['config']
+        command = cmd_dict['command']
+        
+        print(f"\n[{idx}/{total}] Running configuration:")
+        print(f"  Dataset: {config['dataset']}")
+        print(f"  Model: {config['model']}")
+        print(f"  Setup: {config['setup']}")
+        print(f"  Methods ({config['num_methods']}): {', '.join(config['methods'])}")
+        print(f"\n  Command: {command}\n")
+        
+        if dry_run:
+            print("  ⏭️  Skipped (dry run)\n")
+            continue
+        
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                check=True,
+                capture_output=not verbose,
+                text=True
+            )
+            print(f"  ✓ Completed successfully\n")
+        except subprocess.CalledProcessError as e:
+            print(f"  ❌ Failed with exit code {e.returncode}")
+            if not verbose and e.stderr:
+                print(f"  Error output:\n{e.stderr}")
+            print(f"  Continuing to next configuration...\n")
+            continue
+    
+    print(f"\n{'='*80}")
+    print(f"Benchmark complete: {total} configurations processed")
+    print(f"{'='*80}\n")
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Comprehensive medMNIST UQ benchmark launcher',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    
+    # Python and script paths
+    parser.add_argument(
+        '--python', type=str, 
+        default=sys.executable,
+        help='Path to Python executable (default: current Python)'
+    )
+    parser.add_argument(
+        '--script', type=str,
+        default=str(Path(__file__).parent / 'run_medmnist_benchmark.py'),
+        help='Path to run_medmnist_benchmark.py script'
+    )
+    
+    # Dataset selection
+    parser.add_argument(
+        '--datasets', nargs='+',
+        default=DATASETS_ID + DATASETS_EXTERNAL,
+        choices=DATASETS_ID + DATASETS_EXTERNAL,
+        help='Datasets to benchmark (default: all)'
+    )
+    parser.add_argument(
+        '--id-only', action='store_true',
+        help='Run only internal test sets (ID datasets)'
+    )
+    parser.add_argument(
+        '--external-only', action='store_true',
+        help='Run only external test sets'
+    )
+    
+    # Model and setup selection
+    parser.add_argument(
+        '--models', nargs='+',
+        default=MODEL_BACKBONES,
+        choices=MODEL_BACKBONES,
+        help='Model backbones to test (default: all)'
+    )
+    parser.add_argument(
+        '--setups', nargs='+',
+        default=TRAINING_SETUPS,
+        choices=TRAINING_SETUPS,
+        metavar='SETUP',
+        help='Training setups to test (default: all). Use "" or "standard" for standard training'
+    )
+    
+    # Method selection
+    parser.add_argument(
+        '--exclude-methods', nargs='+',
+        default=[],
+        choices=ALL_METHODS,
+        help='Methods to exclude from all runs'
+    )
+    
+    # Execution options
+    parser.add_argument(
+        '--gpu', type=int, default=0,
+        help='GPU device ID (default: 0)'
+    )
+    parser.add_argument(
+        '--output-dir', type=str, default='./uq_benchmark_results',
+        help='Output directory for results'
+    )
+    parser.add_argument(
+        '--per-fold-eval', action='store_true', default=True,
+        help='Use per-fold evaluation (default: True)'
+    )
+    parser.add_argument(
+        '--ensemble-eval', dest='per_fold_eval', action='store_false',
+        help='Use ensemble evaluation instead of per-fold'
+    )
+    
+    # Control flags
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Print commands without executing them'
+    )
+    parser.add_argument(
+        '--quiet', action='store_true',
+        help='Suppress command output (only show summaries)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle dataset selection
+    if args.id_only:
+        datasets = [d for d in args.datasets if d in DATASETS_ID]
+    elif args.external_only:
+        datasets = [d for d in args.datasets if d in DATASETS_EXTERNAL]
+    else:
+        datasets = args.datasets
+    
+    # Handle "standard" setup alias
+    setups = args.setups
+    if 'standard' in setups:
+        setups = ['' if s == 'standard' else s for s in setups]
+    
+    # Validate paths
+    script_path = Path(args.script)
+    if not script_path.exists():
+        print(f"❌ Error: Script not found at {script_path}")
+        sys.exit(1)
+    
+    # Generate commands
+    commands = generate_all_commands(
+        datasets=datasets,
+        models=args.models,
+        setups=setups,
+        python_path=args.python,
+        script_path=script_path,
+        gpu=args.gpu,
+        exclude_methods=args.exclude_methods,
+        per_fold_eval=args.per_fold_eval,
+        output_dir=args.output_dir
+    )
+    
+    if not commands:
+        print("❌ No valid configurations to run")
+        sys.exit(1)
+    
+    # Execute
+    run_commands(commands, dry_run=args.dry_run, verbose=not args.quiet)
+
+
+if __name__ == '__main__':
+    main()

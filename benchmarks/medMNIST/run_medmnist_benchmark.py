@@ -671,7 +671,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             train_loaders=train_loaders,
             y_true=y_true,
             layer_name='avgpool',
-            k=5,
+            k=1,
             per_fold_evaluation=per_fold_eval
         )
         results['KNN_Raw'] = metrics

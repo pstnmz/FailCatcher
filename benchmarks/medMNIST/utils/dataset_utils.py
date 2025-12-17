@@ -107,7 +107,26 @@ def load_amos_dataset(transform, transform_tta, batch_size=256, workspace_root=N
     
     print("  Loading AMOS external test dataset...")
     amos_path = workspace_root / 'benchmarks' / 'medMNIST' / 'Data' / 'AMOS_2022' / 'amos_external_test_224.npz'
-    amos_data = np.load(str(amos_path))
+    
+    # Check if file is a Git LFS pointer (not the actual data)
+    if amos_path.stat().st_size < 1000:  # Real file should be ~133MB
+        raise FileNotFoundError(
+            f"\n❌ AMOS dataset file appears to be a Git LFS pointer.\n"
+            f"   Please download the actual file using:\n"
+            f"   git lfs pull\n"
+            f"   Or manually download from the repository."
+        )
+    
+    try:
+        amos_data = np.load(str(amos_path), allow_pickle=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"\n❌ Failed to load AMOS dataset from {amos_path}\n"
+            f"   Error: {e}\n"
+            f"   File size: {amos_path.stat().st_size} bytes\n"
+            f"   If this is a Git LFS pointer, run: git lfs pull"
+        ) from e
+    
     amos_images = amos_data['test_images']  # (N, 224, 224, 1)
     amos_labels = amos_data['test_labels']  # (N, 15) - AMOS organ labels
     
