@@ -1317,7 +1317,8 @@ class FailureDetector:
         flag: str = None,
         timestamp: str = None,
         model_backbone: str = None,
-        setup: str = None
+        setup: str = None,
+        corruption_info: str = None
     ) -> Dict[str, str]:
         """
         Save all computed uncertainties, evaluation plots, and results summary.
@@ -1350,6 +1351,8 @@ class FailureDetector:
             config_suffix += f'_{model_backbone}'
         if setup:
             config_suffix += f'_{setup}'
+        if corruption_info:
+            config_suffix += f'_corrupt_{corruption_info}'
         
         os.makedirs(output_dir, exist_ok=True)
         saved_paths = {}
@@ -1405,7 +1408,8 @@ class FailureDetector:
                         ensemble_uncertainties=ensemble_uncertainties,
                         predictions_per_fold=predictions_per_fold,
                         model_backbone=model_backbone,
-                        setup=setup
+                        setup=setup,
+                        corruption_info=corruption_info
                     )
                     print(f"  ✓ {method_name}: {len(fig_paths)} plots saved")
                 except Exception as e:
@@ -1423,6 +1427,7 @@ class FailureDetector:
                 'flag': flag,
                 'model_backbone': model_backbone,
                 'setup': setup,
+                'corruption_info': corruption_info,
                 'timestamp': timestamp,
                 'test_accuracy': float(len(correct_idx) / len(y_true)),
                 'test_size': len(y_true),

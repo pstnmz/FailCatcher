@@ -31,263 +31,14 @@ from FailCatcher import UQ_toolbox as uq
 
 # Import medMNIST-specific utilities
 from benchmarks.medMNIST.utils import train_models_load_datasets as tr
-
-
-class RepeatGrayToRGB:
-    """Transform for converting grayscale to RGB."""
-    def __call__(self, x):
-        return x.repeat(3, 1, 1)
-
-
-def subsample_dataset_failure_aware(dataset, models, device, max_samples=None, 
-                                     min_failure_ratio=0.3, seed=42, batch_size=256,
-                                     eval_dataset=None):
-    """
-    Subsample calibration dataset prioritizing failures for GPS.
-    
-    **CRITICAL**: Models expect NORMALIZED inputs! If `dataset` is unnormalized (e.g., for TTA),
-    pass the normalized version via `eval_dataset` to ensure accurate failure detection.
-    
-    Returns:
-        tuple: (subsampled_dataset, correct_indices, incorrect_indices)
-            - subsampled_dataset: Subset of the dataset
-            - correct_indices: Indices of correctly predicted samples in the subset (0-indexed)
-            - incorrect_indices: Indices of incorrectly predicted samples in the subset (0-indexed)
-    
-    Strategy for GPS augmentation search:
-    1. Run ensemble inference to identify correct/incorrect predictions
-    2. Keep ALL failures if possible (up to min_failure_ratio * max_samples)
-    3. Fill remaining slots with stratified correct predictions
-    4. If not enough failures, lower the ratio and add more correct samples
-    
-    This maximizes information density for GPS by focusing on model weaknesses
-    while maintaining class distribution and reproducibility.
-    
-    Args:
-        dataset: PyTorch dataset (calibration set)
-        models: List of trained models for ensemble prediction
-        device: Device for inference
-        max_samples: Target sample count (default: None = use all)
-        min_failure_ratio: Minimum proportion of failures to target (default: 0.3)
-                          Actual ratio may be lower if not enough failures exist
-        seed: Random seed for reproducibility (default: 42)
-        batch_size: Batch size for inference (default: 256)
-    
-    Returns:
-        Subset: Subsampled dataset with bias toward failures
-    
-    Example:
-        If max_samples=2000, min_failure_ratio=0.3, and 500 failures available:
-        - Keep all 500 failures (25% of final set)
-        - Sample 1500 correct predictions (75% of final set)
-        
-        If max_samples=2000, min_failure_ratio=0.3, and 800 failures available:
-        - Keep all 800 failures (40% of final set, exceeds minimum)
-        - Sample 1200 correct predictions (60% of final set)
-    """
-    if max_samples is None or len(dataset) <= max_samples:
-        # No subsampling needed - compute indices on full dataset
-        print(f"  No subsampling needed (dataset size: {len(dataset)})")
-        
-        # Use eval_dataset if provided (for normalized inference), otherwise use dataset
-        inference_dataset = eval_dataset if eval_dataset is not None else dataset
-        
-        # Use evaluate_models_on_loader for consistent ensemble inference
-        from torch.utils.data import DataLoader
-        loader = DataLoader(inference_dataset, batch_size=batch_size, shuffle=False, 
-                           num_workers=4, pin_memory=True)
-        
-        y_true, y_scores, ensemble_preds, correct_indices, incorrect_indices, _ = \
-            uq.evaluate_models_on_loader(models, loader, device)
-        
-        print(f"    Full dataset: {len(correct_indices)} correct, {len(incorrect_indices)} incorrect")
-        return dataset, np.array(correct_indices), np.array(incorrect_indices)
-    
-    print(f"  Running ensemble inference to identify failures...")
-    
-    # Use eval_dataset if provided (for normalized inference), otherwise use dataset
-    inference_dataset = eval_dataset if eval_dataset is not None else dataset
-    print(f"  Inference dataset type: {type(inference_dataset)}, length: {len(inference_dataset)}")
-    
-    # Use evaluate_models_on_loader for consistent ensemble inference (soft voting)
-    from torch.utils.data import DataLoader
-    loader = DataLoader(inference_dataset, batch_size=batch_size, shuffle=False, 
-                       num_workers=4, pin_memory=True)
-    
-    labels, y_scores, ensemble_preds, correct_indices, incorrect_indices, _ = \
-        uq.evaluate_models_on_loader(models, loader, device)
-    
-    correct_indices = np.array(correct_indices)
-    incorrect_indices = np.array(incorrect_indices)
-    
-    n_correct = len(correct_indices)
-    n_incorrect = len(incorrect_indices)
-    
-    # Validation: counts must sum to dataset size
-    assert n_correct + n_incorrect == len(dataset), f"Count error: {n_correct} + {n_incorrect} != {len(dataset)}"
-    
-    print(f"  Ensemble evaluation: {n_correct} correct, {n_incorrect} incorrect ({n_incorrect/len(dataset)*100:.1f}% failure rate)")
-    
-    # Strategy: Keep as many failures as possible (up to min_failure_ratio * max_samples)
-    # Then fill remaining slots with correct predictions
-    
-    # Target at least min_failure_ratio of samples to be failures
-    target_min_failures = int(max_samples * min_failure_ratio)
-    
-    if n_incorrect <= target_min_failures:
-        # Not enough failures to reach target ratio - keep all failures
-        target_incorrect = n_incorrect
-        target_correct = max_samples - target_incorrect
-        actual_failure_ratio = n_incorrect / max_samples
-        print(f"  Not enough failures to reach target ratio ({min_failure_ratio:.1%})")
-        print(f"  Keeping ALL {n_incorrect} failures ({actual_failure_ratio:.1%} of final set)")
-    else:
-        # Enough failures - cap at min_failure_ratio (interpreted as maximum)
-        if n_incorrect + n_correct <= max_samples:
-            # Can keep everything
-            target_incorrect = n_incorrect
-            target_correct = n_correct
-        else:
-            # Cap failures at min_failure_ratio * max_samples, fill rest with correct
-            max_failures_allowed = int(max_samples * min_failure_ratio)
-            target_incorrect = min(n_incorrect, max_failures_allowed)
-            target_correct = max_samples - target_incorrect
-        actual_failure_ratio = target_incorrect / max_samples
-        print(f"  Target: keep {target_incorrect} failures ({actual_failure_ratio:.1%} of final set)")
-    
-    # Clamp to available samples
-    target_incorrect = min(target_incorrect, n_incorrect)
-    target_correct = min(target_correct, n_correct)
-    
-    # Final adjustment: use all budget
-    actual_total = target_correct + target_incorrect
-    if actual_total < max_samples and n_correct > target_correct:
-        target_correct = min(n_correct, max_samples - target_incorrect)
-    
-    print(f"  Target subsampling: {target_correct} correct + {target_incorrect} incorrect = {target_correct + target_incorrect} total")
-    
-    # Set random seed for reproducibility
-    np.random.seed(seed)
-    
-    # Stratified sampling from each group
-    selected_indices = []
-    
-    # Sample incorrect predictions (stratified by class)
-    if target_incorrect > 0 and n_incorrect > 0:
-        incorrect_labels = labels[incorrect_indices]
-        try:
-            if target_incorrect >= n_incorrect:
-                # Keep all failures
-                sampled_incorrect = incorrect_indices
-            else:
-                # Stratified sample from failures
-                sampled_incorrect, _ = train_test_split(
-                    incorrect_indices,
-                    train_size=target_incorrect,
-                    stratify=incorrect_labels,
-                    random_state=seed
-                )
-            selected_indices.extend(sampled_incorrect)
-        except ValueError:
-            # Fallback: random sample if stratification fails
-            sampled_incorrect = np.random.choice(incorrect_indices, size=target_incorrect, replace=False)
-            selected_indices.extend(sampled_incorrect)
-    
-    # Sample correct predictions (stratified by class)
-    if target_correct > 0 and n_correct > 0:
-        correct_labels = labels[correct_indices]
-        try:
-            if target_correct >= n_correct:
-                # Keep all correct
-                sampled_correct = correct_indices
-            else:
-                # Stratified sample from correct
-                sampled_correct, _ = train_test_split(
-                    correct_indices,
-                    train_size=target_correct,
-                    stratify=correct_labels,
-                    random_state=seed
-                )
-            selected_indices.extend(sampled_correct)
-        except ValueError:
-            # Fallback: random sample if stratification fails
-            sampled_correct = np.random.choice(correct_indices, size=target_correct, replace=False)
-            selected_indices.extend(sampled_correct)
-    
-    # Sort for consistency
-    selected_indices = sorted(selected_indices)
-    
-    # Count samples per class in final subset
-    selected_labels = labels[selected_indices]
-    unique, counts = np.unique(selected_labels, return_counts=True)
-    class_dist = dict(zip(unique, counts))
-    
-    # Count correct/incorrect in final subset and create new index arrays
-    # These are 0-indexed positions in the subsampled dataset
-    final_correct_mask = (ensemble_preds[selected_indices] == selected_labels)
-    final_correct_indices = np.where(final_correct_mask)[0]
-    final_incorrect_indices = np.where(~final_correct_mask)[0]
-    
-    print(f"  Subsampled calibration: {len(dataset)} → {len(selected_indices)} samples (failure-aware)")
-    print(f"    Final: {len(final_correct_indices)} correct, {len(final_incorrect_indices)} incorrect ({len(final_incorrect_indices)/len(selected_indices)*100:.1f}%)")
-    print(f"    Class distribution: {class_dist}")
-    
-    return Subset(dataset, selected_indices), final_correct_indices, final_incorrect_indices
-
-
-def create_cv_generator(n_splits=5, seed=42, batch_size=5000, num_workers=0):
-    """
-    Factory function to create a CV generator matching training splits.
-    
-    Returns a function that generates CV train loaders for models.
-    """
-    def cv_generator(study_dataset, models, batch_size_override=None):
-        """
-        Generate CV train loaders matching the splits used during training.
-        
-        Args:
-            study_dataset: Full training dataset
-            models: List of models (one per fold)
-            batch_size_override: Override batch size
-        
-        Returns:
-            List[DataLoader]: One train loader per model
-        """
-        bs = batch_size_override or batch_size
-        
-        # Get labels
-        labels = [label for _, label in study_dataset]
-        
-        # Create same CV splits as training (CRITICAL: same seed!)
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        
-        train_loaders = []
-        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(np.zeros(len(labels)), labels)):
-            train_subset = Subset(study_dataset, train_idx)
-            train_loader = DataLoader(
-                train_subset,
-                batch_size=bs,
-                shuffle=True,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=False
-            )
-            train_loaders.append(train_loader)
-        
-        if len(train_loaders) != len(models):
-            raise ValueError(
-                f"CV splits produced {len(train_loaders)} folds but got {len(models)} models"
-            )
-        
-        return train_loaders
-    
-    return cv_generator
+from benchmarks.medMNIST.utils import dataset_utils
 
 
 def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                            batch_size=4000, image_size=224, gpu_id=0, per_fold_eval=True,
                            model_backbone='resnet18', setup='', gps_calib_samples=None,
-                           min_failure_ratio=0.3):
+                           min_failure_ratio=0.3, corruption_severity=0,
+                           corrupt_test=False, corrupt_calib=False):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -303,10 +54,18 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         per_fold_eval: If True, compute per-fold metrics (mean±std). If False, use ensemble-based evaluation
         model_backbone: Model architecture ('resnet18' or 'vit_b_16')
         setup: Training setup - '' (standard), 'DA', 'DO', or 'DADO'
+        corruption_severity: Corruption severity (0=disabled, 1-5=mild to severe covariate shift)
+                            When enabled, randomly applies available medmnistc corruptions
+        corrupt_test: If True, apply corruption to test set (requires corruption_severity > 0)
+        corrupt_calib: If True, apply corruption to calibration set (requires corruption_severity > 0)
     """
     print(f"\n{'='*80}")
     print(f"MedMNIST Benchmark: {flag}")
     print(f"Using FailCatcher v{FailCatcher.__version__}")
+    if corruption_severity > 0:
+        print(f"Covariate Shift: Random corruptions (severity={corruption_severity}/5)")
+        print(f"  Test set: {'✓ Corrupted' if corrupt_test else '✗ Clean'}")
+        print(f"  Calibration set: {'✓ Corrupted' if corrupt_calib else '✗ Clean'}")
     print(f"{'='*80}\n")
     
     # Set seeds for reproducibility
@@ -329,8 +88,19 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     # Setup
     device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
-    color = flag in ['dermamnist', 'dermamnist-e', 'pathmnist', 'bloodmnist']
-    calib_method = 'platt' if flag in ['breastmnist', 'pneumoniamnist'] else 'temperature'
+    
+    # Parse dermamnist-e variants
+    base_flag = flag
+    test_subset = 'all'  # Default for all datasets
+    if flag == 'dermamnist-e-id':
+        base_flag = 'dermamnist-e'
+        test_subset = 'id'
+    elif flag == 'dermamnist-e-external':
+        base_flag = 'dermamnist-e'
+        test_subset = 'external'
+    
+    color = base_flag in ['dermamnist', 'dermamnist-e', 'pathmnist', 'bloodmnist']
+    calib_method = 'platt' if base_flag in ['breastmnist', 'pneumoniamnist'] else 'temperature'
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -340,34 +110,47 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print("📦 Loading medMNIST data and models...")
     
     # Transforms
-    if color:
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
-        ])
-        transform_tta = transforms.Compose([transforms.ToTensor()])
-    else:
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[.5], std=[.5]),
-            RepeatGrayToRGB(),
-        ])
-        transform_tta = transforms.Compose([
-            transforms.ToTensor(),
-            RepeatGrayToRGB(),
-        ])
+    transform, transform_tta = dataset_utils.get_transforms(color, image_size)
     
-    if flag != 'amos2022':
+    if base_flag != 'amos2022':
         # Load datasets and models
-        models = tr.load_models(flag, device=device, size=image_size, 
+        models = tr.load_models(base_flag, device=device, size=image_size, 
                                model_backbone=model_backbone, setup=setup)
         [study_dataset, calib_dataset, test_dataset], \
         [_, calib_loader, test_loader], info = \
-            tr.load_datasets(flag, color, image_size, transform, batch_size)
+            tr.load_datasets(base_flag, color, image_size, transform, batch_size, test_subset=test_subset)
         
         [_, calib_dataset_tta, test_dataset_tta], \
         [_, _, _], _ = \
-            tr.load_datasets(flag, color, image_size, transform_tta, batch_size)
+            tr.load_datasets(base_flag, color, image_size, transform_tta, batch_size, test_subset=test_subset)
+        
+        # Apply corruptions if requested
+        if corruption_severity > 0:
+            print(f"\n🔬 Applying covariate shift corruptions...")
+            if corrupt_test:
+                test_dataset = dataset_utils.apply_random_corruptions(
+                    test_dataset, args.flag, args.corruption_severity, cache=True, seed=42
+                )
+                test_dataset_tta = dataset_utils.apply_random_corruptions(
+                    test_dataset_tta, flag, corruption_severity, cache=True, seed=42
+                )
+                # Rebuild test loader with corrupted dataset
+                test_loader = DataLoader(
+                    test_dataset, batch_size=batch_size, shuffle=False, 
+                    num_workers=4, pin_memory=True
+                )
+            if corrupt_calib:
+                calib_dataset = dataset_utils.apply_random_corruptions(
+                    calib_dataset, args.flag, args.corruption_severity, cache=True, seed=42
+                )
+                calib_dataset_tta = dataset_utils.apply_random_corruptions(
+                    calib_dataset_tta, flag, corruption_severity, cache=True, seed=42
+                )
+                # Rebuild calib loader with corrupted dataset
+                calib_loader = DataLoader(
+                    calib_dataset, batch_size=batch_size, shuffle=False, 
+                    num_workers=4, pin_memory=True
+                )
     else:
         # Load datasets and models of organamnist and amos2022 as test set
         models = tr.load_models('organamnist', device=device, size=image_size,
@@ -377,70 +160,24 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             tr.load_datasets('organamnist', color, image_size, transform, batch_size)
         
         # Load AMOS external test dataset
-        print("  Loading AMOS external test dataset...")
-        project_root = Path(__file__).resolve().parent.parent.parent
-        amos_path = project_root / 'benchmarks' / 'medMNIST' / 'Data' / 'AMOS_2022' / 'amos_external_test_224.npz'
-        amos_data = np.load(str(amos_path))
-        amos_images = amos_data['test_images']  # (N, 224, 224, 1)
-        amos_labels = amos_data['test_labels']  # (N, 15) - AMOS organ labels
-        
-        # OrganaMNIST to AMOS mapping
-        amos_to_organamnist = {
-            0: 10,  # spleen → spleen
-            1: 5,   # right kidney → kidney-right
-            2: 4,   # left kidney → kidney-left
-            5: 6,   # liver → liver
-            9: 9,   # pancreas → pancreas
-            13: 0,  # bladder → bladder
-        }
-        
-        # Filter to mapped organs and convert labels
-        mapped_indices = []
-        mapped_labels = []
-        for idx in range(len(amos_labels)):
-            amos_organ_id = np.argmax(amos_labels[idx])
-            if amos_organ_id in amos_to_organamnist:
-                mapped_indices.append(idx)
-                mapped_labels.append(amos_to_organamnist[amos_organ_id])
-        
-        filtered_images = amos_images[mapped_indices]
-        filtered_labels = np.array(mapped_labels)
-        
-        # Create AMOS dataset classes
-        class AMOSDataset(torch.utils.data.Dataset):
-            def __init__(self, images, labels, transform=None):
-                self.images = images
-                self.labels = labels
-                self.transform = transform
-            
-            def __len__(self):
-                return len(self.images)
-            
-            def __getitem__(self, idx):
-                from PIL import Image as PILImage
-                img = self.images[idx].squeeze()
-                label = self.labels[idx]
-                img_pil = PILImage.fromarray(img, mode='L')
-                
-                if self.transform:
-                    img_tensor = self.transform(img_pil)
-                else:
-                    img_tensor = torch.from_numpy(img).float().unsqueeze(0) / 255.0
-                
-                # Convert to 3-channel for ResNet
-                if img_tensor.shape[0] == 1:
-                    img_tensor = img_tensor.repeat(3, 1, 1)
-                
-                return img_tensor, torch.tensor(label, dtype=torch.long)
-            
-        # Create datasets and loaders
-        test_dataset = AMOSDataset(filtered_images, filtered_labels, transform=transform)
-        test_loader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+        test_dataset, test_loader, test_dataset_tta, _, _ = dataset_utils.load_amos_dataset(
+            transform, transform_tta, batch_size, workspace_root=Path(__file__).resolve().parent.parent.parent
         )
-        test_dataset_tta = AMOSDataset(filtered_images, filtered_labels, transform=transform_tta)
-
-        print(f"  AMOS: {len(test_dataset)} samples (filtered from {len(amos_images)})")
+        
+        # Apply corruptions if requested
+        if corruption_severity > 0:
+            print(f"\n🔬 Applying covariate shift corruptions...")
+            if corrupt_test:
+                test_dataset = dataset_utils.apply_random_corruptions(
+                    test_dataset, flag, corruption_severity, cache=True, seed=42
+                )
+                test_dataset_tta = dataset_utils.apply_random_corruptions(
+                    test_dataset_tta, flag, corruption_severity, cache=True, seed=42
+                )
+                # Rebuild test loader
+                test_loader = torch.utils.data.DataLoader(
+                    test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+                )
     
     print(f"  Models: {len(models)} folds")
     # For organamnist: study=train (medMNIST), calib=val (medMNIST)
@@ -454,12 +191,22 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     # EVALUATE MODELS (or load from cache)
     # ========================================================================
     
-    # Cache file paths - include model backbone and setup to avoid mixing different model results
+    # Cache file paths - include model backbone, setup, and corruption params to avoid mixing results
     cache_dir = os.path.join(output_dir, 'cache')
     os.makedirs(cache_dir, exist_ok=True)
     setup_suffix = f"_{setup}" if setup else ""
-    calib_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}_calib_results.npz')
-    test_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}_test_results.npz')
+    
+    # Add corruption parameters to cache key
+    corruption_suffix = ""
+    if corruption_severity > 0:
+        corruption_suffix = f"_corrupt{corruption_severity}"
+        if corrupt_test:
+            corruption_suffix += "_test"
+        if corrupt_calib:
+            corruption_suffix += "_calib"
+    
+    calib_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}{corruption_suffix}_calib_results.npz')
+    test_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}{corruption_suffix}_test_results.npz')
     
     # Try to load cached results FIRST
     cache_loaded = False
@@ -693,7 +440,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print("  ✓ Pre-cached per-fold predictions - vanilla inference will be skipped")
     
     # Create CV train loaders for KNN methods
-    cv_gen = create_cv_generator(n_splits=5, seed=42, batch_size=batch_size)
+    cv_gen = dataset_utils.create_cv_generator(n_splits=5, seed=42, batch_size=batch_size)
     train_loaders = cv_gen(study_dataset, models, batch_size)
     
     # ========================================================================
@@ -806,7 +553,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         #           but return subset of unnormalized calib_dataset_tta for augmentation
         # Returns: (subsampled_dataset, correct_indices, incorrect_indices)
         calib_dataset_tta_subsampled, correct_idx_calib_subsampled, incorrect_idx_calib_subsampled = \
-            subsample_dataset_failure_aware(
+            dataset_utils.subsample_dataset_failure_aware(
                 dataset=calib_dataset_tta,
                 models=models,
                 device=device,
@@ -886,7 +633,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             # GPS running independently - need to subsample and compute indices
             print(f"  TTA_calib not run - computing subsampled calibration indices...")
             calib_dataset_tta_subsampled, gps_correct_idx, gps_incorrect_idx = \
-                subsample_dataset_failure_aware(
+                dataset_utils.subsample_dataset_failure_aware(
                     dataset=calib_dataset_tta,
                     models=models,
                     device=device,
@@ -961,13 +708,24 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
+    # Build corruption info string for filenames
+    corruption_info = None
+    if corruption_severity > 0:
+        corruption_parts = [f"severity{corruption_severity}"]
+        if corrupt_test:
+            corruption_parts.append("test")
+        if corrupt_calib:
+            corruption_parts.append("calib")
+        corruption_info = "_".join(corruption_parts)
+    
     # Save all results using the detector's save_results method
     saved_paths = detector.save_results(
         output_dir=output_dir,
         flag=flag,
         timestamp=timestamp,
         model_backbone=model_backbone,
-        setup=setup
+        setup=setup,
+        corruption_info=corruption_info
     )
     
     # ========================================================================
@@ -1008,8 +766,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '--flag', type=str, required=True,
         choices=['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'dermamnist-e',
+                'dermamnist-e-id', 'dermamnist-e-external',
                 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'amos2022'],
-        help='MedMNIST dataset to benchmark'
+        help='MedMNIST dataset to benchmark. For dermamnist-e, use -id for ID centers or -external for OOD center'
     )
     
     parser.add_argument(
@@ -1058,7 +817,42 @@ if __name__ == '__main__':
         help='Minimum target proportion of failures in GPS calibration subsampling (default: 0.3 = 30%%). Will keep all available failures if less than this ratio.'
     )
     
+    # Covariate shift / corruption arguments
+    parser.add_argument(
+        '--corruption-severity', type=int, default=0, choices=[0, 1, 2, 3, 4, 5],
+        help='Apply random covariate shift corruptions. 0=disabled (clean), 1=mild to 5=severe (default: 0)'
+    )
+    parser.add_argument(
+        '--corrupt-test', action='store_true', default=False,
+        help='Apply corruption to test set (requires --corruption-severity > 0)'
+    )
+    parser.add_argument(
+        '--corrupt-calib', action='store_true', default=False,
+        help='Apply corruption to calibration set (requires --corruption-severity > 0)'
+    )
+    parser.add_argument(
+        '--list-corruptions', action='store_true',
+        help='List available corruptions for the specified dataset and exit'
+    )
+    
     args = parser.parse_args()
+    
+    # Handle --list-corruptions flag
+    if args.list_corruptions:
+        print(f"\nAvailable corruptions for {args.flag}:")
+        corruptions = dataset_utils.list_available_corruptions(args.flag)
+        if corruptions:
+            print(f"  Random corruptions will be applied from this pool:")
+            for c in sorted(corruptions):
+                print(f"    - {c}")
+            print(f"\n  Usage example (random corruptions):")
+            print(f"    python run_medmnist_benchmark.py --flag {args.flag} --corruption-severity 3 --corrupt-test")
+            print(f"\n  Each sample gets a random corruption from the pool at the specified severity.")
+        else:
+            print(f"  No corruptions available for {args.flag}")
+            if not dataset_utils.MEDMNISTC_AVAILABLE:
+                print(f"  (medmnistc is not installed - run: pip install medmnistc)")
+        sys.exit(0)
     
     run_medmnist_benchmark(
         flag=args.flag,
@@ -1070,5 +864,8 @@ if __name__ == '__main__':
         model_backbone=args.model,
         setup=args.setup,
         gps_calib_samples=args.gps_calib_samples,
-        min_failure_ratio=args.min_failure_ratio
+        min_failure_ratio=args.min_failure_ratio,
+        corruption_severity=args.corruption_severity,
+        corrupt_test=args.corrupt_test,
+        corrupt_calib=args.corrupt_calib
     )
