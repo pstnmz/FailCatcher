@@ -83,14 +83,14 @@ SETUP_METHOD_COMPATIBILITY = {
 DATASET_CONFIG = {
     'breastmnist': {'batch_size': 4000, 'gps_subsample': None},  # Binary, small → no subsampling
     'pneumoniamnist': {'batch_size': 4000, 'gps_subsample': None},  # Binary, small → no subsampling
-    'organamnist': {'batch_size': 128, 'gps_subsample': 5000},  # 11 classes, large
-    'octmnist': {'batch_size': 256, 'gps_subsample': 5000},
-    'pathmnist': {'batch_size': 128, 'gps_subsample': 5000},
-    'bloodmnist': {'batch_size': 256, 'gps_subsample': 5000},
-    'tissuemnist': {'batch_size': 512, 'gps_subsample': 5000},
-    'dermamnist-e-id': {'batch_size': 256, 'gps_subsample': 5000},
-    'dermamnist-e-external': {'batch_size': 256, 'gps_subsample': 5000},
-    'amos2022': {'batch_size': 128, 'gps_subsample': 5000},
+    'organamnist': {'batch_size': 4000, 'gps_subsample': 5000},  # 11 classes, large
+    'octmnist': {'batch_size': 4000, 'gps_subsample': 5000},
+    'pathmnist': {'batch_size': 4000, 'gps_subsample': 5000},
+    'bloodmnist': {'batch_size': 4000, 'gps_subsample': 5000},
+    'tissuemnist': {'batch_size': 4000, 'gps_subsample': 5000},
+    'dermamnist-e-id': {'batch_size': 4000, 'gps_subsample': 5000},
+    'dermamnist-e-external': {'batch_size': 4000, 'gps_subsample': 5000},
+    'amos2022': {'batch_size': 4000, 'gps_subsample': 5000},
 }
 
 

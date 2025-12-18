@@ -887,7 +887,7 @@ def extract_latent_space_and_compute_shap_importance(
 
     with torch.no_grad():
         is_binary = None
-        for batch in data_loader:
+        for batch_idx, batch in enumerate(data_loader):
             if isinstance(batch, dict):
                 batch = (batch['image'], batch['label'])
 
@@ -912,6 +912,11 @@ def extract_latent_space_and_compute_shap_importance(
                 preds_cls = probs.argmax(dim=1)
                 success_flags.extend((preds_cls == labels_flat).cpu().numpy().astype(int).tolist())
                 predictions.extend(probs.cpu().numpy().tolist())
+            
+            # Free memory after each batch to prevent OOM with ViT models
+            del images, labels_t, logits, probs
+            if device.type == 'cuda' and batch_idx % 10 == 0:
+                torch.cuda.empty_cache()
 
     hook_handle.remove()
 

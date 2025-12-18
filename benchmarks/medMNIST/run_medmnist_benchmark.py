@@ -439,9 +439,23 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     detector.set_per_fold_predictions(per_fold_predictions)
     print("  ✓ Pre-cached per-fold predictions - vanilla inference will be skipped")
     
+    # Adaptive batch size for KNN methods based on model architecture
+    # ViT models consume significantly more memory than CNNs
+    knn_batch_size = batch_size
+    knn_test_loader = test_loader
+    if model_backbone == 'vit_b_16':
+        knn_batch_size = min(batch_size, 1024)  # Reduce to 1024 for ViT to avoid OOM
+        print(f"  ℹ️  Using reduced batch size {knn_batch_size} for KNN with ViT (avoids OOM)")
+        
+        # Create reduced batch size test loader for KNN
+        knn_test_loader = DataLoader(
+            test_dataset, batch_size=knn_batch_size, shuffle=False,
+            num_workers=4, pin_memory=True
+        )
+    
     # Create CV train loaders for KNN methods
-    cv_gen = dataset_utils.create_cv_generator(n_splits=5, seed=42, batch_size=batch_size)
-    train_loaders = cv_gen(study_dataset, models, batch_size)
+    cv_gen = dataset_utils.create_cv_generator(n_splits=5, seed=42, batch_size=knn_batch_size)
+    train_loaders = cv_gen(study_dataset, models, knn_batch_size)
     
     # ========================================================================
     # RUN UQ METHODS using FailCatcher API
@@ -667,7 +681,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
         uncertainties, metrics = detector.run_knn_raw(
-            test_loader=test_loader,
+            test_loader=knn_test_loader,
             train_loaders=train_loaders,
             y_true=y_true,
             layer_name='avgpool',
@@ -686,7 +700,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         
         uncertainties, metrics = detector.run_knn_shap(
             calib_loader=calib_loader,
-            test_loader=test_loader,
+            test_loader=knn_test_loader,
             train_loaders=train_loaders,
             y_true=y_true,
             flag=flag,
