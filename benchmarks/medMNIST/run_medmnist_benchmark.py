@@ -440,14 +440,19 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     print("  ✓ Pre-cached per-fold predictions - vanilla inference will be skipped")
     
     # Adaptive batch size for KNN methods based on model architecture
-    # ViT models consume significantly more memory than CNNs
-    knn_batch_size = batch_size
+    # KNN requires full forward passes on large datasets which can OOM
+    knn_batch_size = min(batch_size, 3000)  # Conservative default for all models
     knn_test_loader = test_loader
+    
+    # Further reduce for ViT models which consume significantly more memory
     if model_backbone == 'vit_b_16':
-        knn_batch_size = min(batch_size, 1024)  # Reduce to 1024 for ViT to avoid OOM
+        knn_batch_size = min(batch_size, 4000)  # Reduce to 4000 for ViT to avoid OOM
         print(f"  ℹ️  Using reduced batch size {knn_batch_size} for KNN with ViT (avoids OOM)")
-        
-        # Create reduced batch size test loader for KNN
+    elif knn_batch_size < batch_size:
+        print(f"  ℹ️  Using reduced batch size {knn_batch_size} for KNN (avoids OOM on large datasets)")
+    
+    # Create reduced batch size test loader if needed
+    if knn_batch_size < batch_size:
         knn_test_loader = DataLoader(
             test_dataset, batch_size=knn_batch_size, shuffle=False,
             num_workers=4, pin_memory=True
@@ -558,7 +563,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         setup_name = setup if setup else 'standard'
         # Include sample count in folder name if subsampling occurs
         folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
-        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{base_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
         
         # Subsample calibration dataset (failure-aware for GPS)
         # Prioritizes failures (incorrect predictions) to maximize information density
@@ -634,7 +639,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         setup_name = setup if setup else 'standard'
         # Include sample count in folder name if subsampling occurs
         folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
-        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{base_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
         
         # If TTA_calib was run, use the subsampled indices
         # Otherwise, compute them now (GPS can run independently of TTA_calib)

@@ -307,6 +307,10 @@ class KNNLatentMethod(UQMethod):
             })
             
             print(f"    {len(features)} train samples, {features.shape[1]} → {features_pca.shape[1]} PCA dims")
+            
+            # Clear GPU cache between folds to prevent memory buildup
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
         
         print(f"  ✓ Fitted {len(models)} fold(s)")
         return self
@@ -878,10 +882,12 @@ def extract_latent_space_and_compute_shap_importance(
         # Extract CLS token (first token) for ViT models
         if output.dim() == 3 and hasattr(model, 'encoder'):
             # ViT encoder output: take CLS token [:, 0, :]
-            penultimate_features.append(output[:, 0, :].detach())
+            # Move to CPU immediately to prevent GPU memory buildup
+            penultimate_features.append(output[:, 0, :].detach().cpu())
         else:
             # Standard CNNs: flatten spatial dimensions
-            penultimate_features.append(output.detach().flatten(1))
+            # Move to CPU immediately to prevent GPU memory buildup
+            penultimate_features.append(output.detach().flatten(1).cpu())
 
     hook_handle = layer_to_be_hooked.register_forward_hook(hook)
 
@@ -920,10 +926,14 @@ def extract_latent_space_and_compute_shap_importance(
 
     hook_handle.remove()
 
-    # Concatenate on CPU (happens once at the end)
-    features = torch.cat(penultimate_features).cpu()
+    # Concatenate features (already on CPU from hook)
+    features = torch.cat(penultimate_features)
     labels = np.array(all_labels)
     success_flags = np.array(success_flags)
+    
+    # Clear GPU cache to free memory for next fold
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     if importance:
         if classifierheadwrapper is None:

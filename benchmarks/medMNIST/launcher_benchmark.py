@@ -37,8 +37,8 @@ import sys
 
 # Dataset definitions
 DATASETS_ID = [
-    'organamnist', 
-    'pneumoniamnist', 
+    #'organamnist', 
+    #'pneumoniamnist', 
     'dermamnist-e-id', 
     'octmnist', 
     'pathmnist', 
