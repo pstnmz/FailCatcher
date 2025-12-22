@@ -121,8 +121,124 @@ class FailureDetector:
         
         # Storage for computed uncertainties and predictions
         self._uncertainties = {}
+        self._uncertainties_normalized = {}  # Store normalized versions for fair comparison
         self._predictions_per_fold = {}  # Store per-fold predictions for accurate ROC curves
         self._results = {}
+    
+    def normalize_uncertainties(self, method_names: Optional[List[str]] = None, inplace: bool = True):
+        """
+        Normalize uncertainties to [0, 1] range using min-max scaling.
+        
+        By default, only normalizes KNN-based methods which use raw Euclidean distances.
+        Other methods (MSR, Ensemble STD, TTA, GPS) are probability-based and already 
+        on comparable scales.
+        
+        KNN methods need normalization because:
+        - KNN_Raw: arbitrary Euclidean distances in latent space (scale depends on PCA dims)
+        - KNN_SHAP: distances in SHAP-selected feature space
+        
+        Note: AUROC is rank-based and invariant to monotonic transformations,
+        so normalization doesn't affect AUROC values - only visual comparisons.
+        
+        Args:
+            method_names: List of method names to normalize 
+                         (default: auto-detect KNN methods ['KNN_Raw', 'KNN_SHAP'])
+            inplace: If True, replace original uncertainties. If False, store in 
+                    self._uncertainties_normalized (default: True for KNN)
+        
+        Returns:
+            dict: Normalized uncertainties {method_name: normalized_array}
+        
+        Example:
+            >>> detector.run_knn_raw(...)
+            >>> detector.normalize_uncertainties()  # Auto-normalizes KNN methods
+        """
+        if not self._uncertainties:
+            raise ValueError("No uncertainties computed yet. Run UQ methods first.")
+        
+        if method_names is None:
+            # By default, only normalize KNN methods (distance-based, not probability-based)
+            knn_methods = ['KNN_Raw', 'KNN_SHAP', 'KNN_Latent']
+            method_names = [k for k in self._uncertainties.keys() 
+                           if any(knn in k for knn in knn_methods) and
+                           not (k.endswith('_per_fold') or 
+                                k.endswith('_ensemble') or
+                                k.endswith('_per_fold_internal'))]
+            
+            if not method_names:
+                print("  ℹ️  No KNN methods found - nothing to normalize")
+                return {}
+        
+        normalized = {}
+        
+        for method_name in method_names:
+            if method_name not in self._uncertainties:
+                print(f"  ⚠️  Method '{method_name}' not found, skipping")
+                continue
+            
+            uncertainties = self._uncertainties[method_name]
+            
+            # Check if this is averaged or per-fold data
+            per_fold_key = f'{method_name}_per_fold'
+            
+            if per_fold_key in self._uncertainties:
+                # Per-fold data exists: normalize each fold independently for fair ensembling
+                per_fold_unc = self._uncertainties[per_fold_key]  # [num_folds, N]
+                normalized_per_fold = []
+                
+                for fold_idx in range(per_fold_unc.shape[0]):
+                    fold_unc = per_fold_unc[fold_idx]
+                    u_min = np.min(fold_unc)
+                    u_max = np.max(fold_unc)
+                    
+                    if u_max - u_min < 1e-10:
+                        normalized_fold = np.full_like(fold_unc, 0.5)
+                    else:
+                        normalized_fold = (fold_unc - u_min) / (u_max - u_min)
+                    
+                    normalized_per_fold.append(normalized_fold)
+                
+                normalized[per_fold_key] = np.array(normalized_per_fold)  # [num_folds, N]
+                
+                # Re-average the normalized per-fold values for the main uncertainty
+                normalized[method_name] = np.mean(normalized[per_fold_key], axis=0)  # [N]
+                
+            else:
+                # No per-fold data: simple min-max on the single array
+                u_min = np.min(uncertainties)
+                u_max = np.max(uncertainties)
+                
+                if u_max - u_min < 1e-10:
+                    print(f"  ⚠️  {method_name}: constant uncertainties, setting to 0.5")
+                    normalized[method_name] = np.full_like(uncertainties, 0.5)
+                else:
+                    normalized[method_name] = (uncertainties - u_min) / (u_max - u_min)
+            
+            # Ensemble baseline (if exists) - normalize independently
+            ensemble_key = f'{method_name}_ensemble'
+            if ensemble_key in self._uncertainties:
+                ensemble_unc = self._uncertainties[ensemble_key]
+                e_min = np.min(ensemble_unc)
+                e_max = np.max(ensemble_unc)
+                if e_max - e_min >= 1e-10:
+                    normalized[ensemble_key] = (ensemble_unc - e_min) / (e_max - e_min)
+                else:
+                    normalized[ensemble_key] = np.full_like(ensemble_unc, 0.5)
+        
+        # Store or replace
+        if inplace:
+            for k, v in normalized.items():
+                self._uncertainties[k] = v
+            print(f"✓ Normalized {len(method_names)} method(s): {method_names}")
+            # Print range to verify normalization worked
+            for method_name in method_names:
+                unc = self._uncertainties[method_name]
+                print(f"  {method_name}: range [{np.min(unc):.4f}, {np.max(unc):.4f}]")
+        else:
+            self._uncertainties_normalized = normalized
+            print(f"✓ Normalized {len(method_names)} methods → stored in _uncertainties_normalized")
+        
+        return normalized
     
     def set_per_fold_predictions(
         self,
@@ -1117,10 +1233,13 @@ class FailureDetector:
         y_true: np.ndarray,
         layer_name: str = 'avgpool',
         k: int = 5,
-        per_fold_evaluation: bool = True
+        per_fold_evaluation: bool = True,
+        k_grid: Optional[List[int]] = None,
+        calib_loader: Optional[DataLoader] = None,
+        y_true_calib: Optional[np.ndarray] = None
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
-        Run KNN in raw latent space.
+        Run KNN in raw latent space with optional hyperparameter tuning.
         
         Args:
             test_loader: Test data loader (or single DataLoader if 1 model)
@@ -1128,8 +1247,12 @@ class FailureDetector:
                           Or single DataLoader if models is a single model
             y_true: True labels [N]
             layer_name: Layer name for feature extraction
-            k: Number of nearest neighbors
+            k: Number of nearest neighbors (used if k_grid is None)
             per_fold_evaluation: If True, compute per-fold metrics. If False, average uncertainties
+            k_grid: Optional list of k values for grid search (e.g., [1, 5, 10, 20, 50, 100, 200])
+                   If provided, will perform hyperparameter tuning on calibration set
+            calib_loader: Calibration data loader (required if k_grid is provided)
+            y_true_calib: True labels for calibration set (required if k_grid is provided)
         
         Returns:
             tuple: (uncertainties, metrics_dict)
@@ -1137,9 +1260,102 @@ class FailureDetector:
                 Otherwise: uncertainties is [N] (averaged)
         """
         timer = Timer("KNN-Raw computation")
+        
+        # Hyperparameter tuning on calibration set (if requested)
+        k_selected = k  # Default
+        if k_grid is not None:
+            if calib_loader is None or y_true_calib is None:
+                raise ValueError("calib_loader and y_true_calib required for hyperparameter tuning")
+            
+            print(f"  🔍 Grid search for k in {k_grid}...")
+            timer_tuning = Timer("Hyperparameter tuning")
+            
+            with timer_tuning:
+                # OPTIMIZATION: Fit PCA once on training data, then try all k values
+                # Step 1: Extract features and fit PCA (once per fold)
+                knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=1)  # k doesn't matter for feature extraction
+                knn_method.fit(self.models, train_loaders, self.device)
+                
+                # Step 2: Extract and transform calibration features + store training features
+                from FailCatcher.methods.latent import extract_latent_space_and_compute_shap_importance, get_layer_from_model
+                
+                calib_features_transformed = []
+                train_features_transformed = []  # Store for grid search
+                
+                for fold_idx, (model, fitted, train_loader) in enumerate(zip(self.models, knn_method.fitted_models, train_loaders)):
+                    layer = fitted['layer']
+                    
+                    # Extract and transform training features (needed for grid search)
+                    train_features, _, _, _ = extract_latent_space_and_compute_shap_importance(
+                        model, train_loader, self.device, layer, importance=False
+                    )
+                    train_features_std = fitted['scaler'].transform(train_features.numpy())
+                    train_features_pca = fitted['pca'].transform(train_features_std)
+                    train_features_transformed.append(train_features_pca)
+                    
+                    # Extract and transform calibration features
+                    calib_features, _, _, _ = extract_latent_space_and_compute_shap_importance(
+                        model, calib_loader, self.device, layer, importance=False
+                    )
+                    calib_features_std = fitted['scaler'].transform(calib_features.numpy())
+                    calib_features_pca = fitted['pca'].transform(calib_features_std)
+                    calib_features_transformed.append(calib_features_pca)
+                
+                # Get calibration predictions for AUROC computation
+                y_scores_calib = self._get_ensemble_predictions(calib_loader)
+                y_pred_calib = np.argmax(y_scores_calib, axis=1)
+                correct_idx_calib = np.where(y_pred_calib == y_true_calib)[0]
+                incorrect_idx_calib = np.where(y_pred_calib != y_true_calib)[0]
+                
+                # Step 3: Grid search over k values (fast, only KNN fitting)
+                best_auroc = -1
+                best_k = k_grid[0]
+                
+                for k_candidate in k_grid:
+                    # Fit KNN with k_candidate on ALREADY PCA-transformed training features
+                    knn_models = []
+                    for fold_idx in range(len(self.models)):
+                        from sklearn.neighbors import NearestNeighbors
+                        train_features = train_features_transformed[fold_idx]
+                        knn_model = NearestNeighbors(n_neighbors=k_candidate, metric='euclidean')
+                        knn_model.fit(train_features)
+                        knn_models.append(knn_model)
+                    
+                    # Compute uncertainties on calibration set
+                    # Use transformed calibration features
+                    uncertainties_calib_per_fold = []
+                    for fold_idx, knn_model in enumerate(knn_models):
+                        calib_feats = calib_features_transformed[fold_idx]
+                        distances, _ = knn_model.kneighbors(calib_feats)
+                        # Uncertainty = mean distance to k nearest neighbors
+                        uncertainty_fold = np.mean(distances, axis=1)  # [N_calib]
+                        uncertainties_calib_per_fold.append(uncertainty_fold)
+                    
+                    # Average across folds for ensemble evaluation
+                    uncertainties_calib = np.mean(uncertainties_calib_per_fold, axis=0)  # [N_calib]
+                    
+                    # Evaluate AUROC on calibration set
+                    from sklearn.metrics import roc_auc_score
+                    is_correct_calib = np.zeros(len(y_true_calib))
+                    is_correct_calib[correct_idx_calib] = 1
+                    
+                    # Higher uncertainty = more likely to fail → invert for AUROC
+                    auroc_calib = roc_auc_score(1 - is_correct_calib, uncertainties_calib)
+                    
+                    print(f"    k={k_candidate}: AUROC={auroc_calib:.4f}")
+                    
+                    if auroc_calib > best_auroc:
+                        best_auroc = auroc_calib
+                        best_k = k_candidate
+                
+                k_selected = best_k
+            
+            # Print selection result after timer exits
+            print(f"  ✓ Selected k={k_selected} (AUROC={best_auroc:.4f}) in {timer_tuning.elapsed:.2f}s")
+        
+        # Fit final model with selected k
         with timer:
-            # Fit and compute uncertainties
-            knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=k)
+            knn_method = uq.KNNLatentMethod(layer_name=layer_name, k=k_selected)
             knn_method.fit(self.models, train_loaders, self.device)
             uncertainties = knn_method.compute(self.models, test_loader, self.device, 
                                               return_per_fold=per_fold_evaluation)
@@ -1164,6 +1380,10 @@ class FailureDetector:
                                        predictions_per_fold=predictions_per_fold)
         metrics['time_seconds'] = timer.elapsed
         
+        # Store selected k if tuning was performed
+        if k_grid is not None:
+            metrics['k_selected'] = k_selected
+        
         # Store results
         if uncertainties.ndim == 2:
             # Per-fold: store averaged (for metrics), per-fold (for multi-curve plots), and ensemble reference
@@ -1176,6 +1396,9 @@ class FailureDetector:
             # Ensemble: store single uncertainty
             self._uncertainties['KNN_Raw'] = uncertainties
         self._results['KNN_Raw'] = metrics
+        
+        # Note: Z-score normalization now happens per-fold inside KNNLatentMethod.compute()
+        # No post-hoc normalization needed
         
         return uncertainties, metrics
     
@@ -1266,6 +1489,9 @@ class FailureDetector:
             # Ensemble: store single uncertainty
             self._uncertainties['KNN_SHAP'] = uncertainties
         self._results['KNN_SHAP'] = metrics
+        
+        # Note: Z-score normalization now happens per-fold inside KNNLatentSHAPMethod.compute()
+        # No post-hoc normalization needed
         
         return uncertainties, metrics
     

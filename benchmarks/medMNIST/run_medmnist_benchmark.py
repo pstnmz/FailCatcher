@@ -462,6 +462,15 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     cv_gen = dataset_utils.create_cv_generator(n_splits=5, seed=42, batch_size=knn_batch_size)
     train_loaders = cv_gen(study_dataset, models, knn_batch_size)
     
+    # Create KNN-specific calibration loader with reduced batch size (for hyperparameter tuning)
+    if knn_batch_size < batch_size:
+        knn_calib_loader = DataLoader(
+            calib_dataset, batch_size=knn_batch_size, shuffle=False,
+            num_workers=4, pin_memory=True
+        )
+    else:
+        knn_calib_loader = calib_loader  # Use original loader if batch size is same
+    
     # ========================================================================
     # RUN UQ METHODS using FailCatcher API
     # ========================================================================
@@ -685,16 +694,30 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         print("\n🔍 Running KNN-Raw...")
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
+        
+        # Hyperparameter tuning on calibration set
+        k_grid = [1, 5, 10, 20, 50, 100, 200]
         uncertainties, metrics = detector.run_knn_raw(
             test_loader=knn_test_loader,
             train_loaders=train_loaders,
             y_true=y_true,
             layer_name='avgpool',
-            k=1,
-            per_fold_evaluation=per_fold_eval
+            k=None,  # Will be selected via grid search
+            per_fold_evaluation=per_fold_eval,
+            k_grid=k_grid,
+            calib_loader=knn_calib_loader,
+            y_true_calib=y_true_calib
         )
         results['KNN_Raw'] = metrics
-        print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+        
+        # Print results with selected k
+        if 'k_selected' in metrics:
+            print(f"  Selected k={metrics['k_selected']}")
+        if 'auroc_f_mean' in metrics:
+            print(f"  AUROC: {metrics['auroc_f_mean']:.4f}±{metrics['auroc_f_std']:.4f}, "
+                  f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
+        else:
+            print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
     if 'KNN_SHAP' in methods:
         print("\n🔍 Running KNN-SHAP...")

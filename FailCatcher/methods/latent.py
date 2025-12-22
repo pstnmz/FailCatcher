@@ -354,17 +354,29 @@ class KNNLatentMethod(UQMethod):
             # Compute distances
             distances, _ = fitted['knn'].kneighbors(features_pca)
             avg_distances = distances.mean(axis=1)
-            all_distances.append(avg_distances)
+            
+            # Z-score normalization per fold (critical for fair ensembling)
+            # Each fold gets its own mean/std, preventing one fold from dominating
+            mean_dist = np.mean(avg_distances)
+            std_dist = np.std(avg_distances)
+            
+            if std_dist < 1e-10:
+                # Edge case: constant distances (shouldn't happen in practice)
+                zscore_distances = np.zeros_like(avg_distances)
+            else:
+                zscore_distances = (avg_distances - mean_dist) / std_dist
+            
+            all_distances.append(zscore_distances)
         
-        all_distances = np.array(all_distances)  # [num_folds, N]
+        all_distances = np.array(all_distances)  # [num_folds, N] - now z-scored per fold
         
         if return_per_fold:
-            print(f"  ✓ Computed KNN distances for {len(models)} folds (per-fold mode)")
+            print(f"  ✓ Computed KNN distances for {len(models)} folds (z-scored per fold)")
             return all_distances  # [num_folds, N]
         else:
             # Legacy mode: average across folds
             final_distances = np.mean(all_distances, axis=0)
-            print(f"  ✓ Computed KNN distances (averaged over {len(models)} folds)")
+            print(f"  ✓ Computed KNN distances (z-scored per fold, then averaged over {len(models)} folds)")
             return final_distances
 
 
@@ -772,21 +784,31 @@ class KNNLatentSHAPMethod(UQMethod):
                 if len(avg_distances) > 1:
                     class_mean = avg_distances.mean()
                     class_std = avg_distances.std()
-                    avg_distances = (avg_distances - class_mean) / class_std
+                    if class_std > 1e-10:
+                        avg_distances = (avg_distances - class_mean) / class_std
+                    else:
+                        avg_distances = np.zeros_like(avg_distances)
                 indices = np.where(class_mask)[0]
                 distances_per_sample[indices] = avg_distances
             
+            # Additional z-score normalization per fold (after per-class normalization)
+            # This ensures fair averaging across folds
+            fold_mean = np.mean(distances_per_sample)
+            fold_std = np.std(distances_per_sample)
+            if fold_std > 1e-10:
+                distances_per_sample = (distances_per_sample - fold_mean) / fold_std
+            
             all_distances.append(distances_per_sample)
         
-        all_distances = np.array(all_distances)  # [num_folds, N]
+        all_distances = np.array(all_distances)  # [num_folds, N] - z-scored per fold
         
         if return_per_fold:
-            print(f"\n  ✓ Computed KNN-SHAP distances for {len(self.fitted_models)} folds (per-fold mode)")
+            print(f"\n  ✓ Computed KNN-SHAP distances for {len(self.fitted_models)} folds (z-scored per fold)")
             return all_distances  # [num_folds, N]
         else:
             # Legacy mode: average across models
             final_distances = np.mean(all_distances, axis=0)
-            print(f"\n  ✓ Final averaged distances: {final_distances.mean():.3f}±{final_distances.std():.3f}")
+            print(f"\n  ✓ Computed KNN-SHAP distances (z-scored per fold, then averaged over {len(self.fitted_models)} folds)")
             return final_distances
 
 class HyperplaneDistanceMethod(UQMethod):
