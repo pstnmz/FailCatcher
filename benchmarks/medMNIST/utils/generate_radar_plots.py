@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from collections import defaultdict
+from sklearn.metrics import roc_auc_score
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -82,16 +83,22 @@ def parse_results_directory(results_dir='./'):
 def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
     """
     Get the test accuracy for a dataset from its JSON file.
+    Look in benchmarks/medMNIST/runs folder for accuracy data.
     
     Args:
-        results_dir: Path to results directory
+        results_dir: Path to results directory (will navigate to runs folder)
         dataset_key: Dataset key (e.g., 'breastmnist_standard', 'breastmnist_DA')
         model_name: Model name to filter by
     
     Returns:
         float: Test accuracy, or 0 if not found
     """
-    results_dir = Path(results_dir)
+    # Navigate to runs folder from results_dir
+    workspace_root = Path(results_dir).parent
+    runs_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'runs'
+    
+    if not runs_dir.exists():
+        return 0.0
     
     # Parse dataset_key to extract base name and setup
     # e.g., 'breastmnist_standard' -> ('breastmnist', 'standard')
@@ -113,7 +120,7 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
         # For standard setup, filename doesn't have setup suffix
         # Need to filter out files with setup suffixes (DA, DO, DADO)
         pattern = f"uq_benchmark_{base_name}_{model_name}_*.json"
-        all_matches = list(results_dir.glob(pattern))
+        all_matches = list(runs_dir.glob(pattern))
         # Filter out files with setup suffixes
         json_files = [f for f in all_matches if not any(
             f.stem.endswith(f'_{s}_{ts}') or f.stem.endswith(f'_{s}')
@@ -127,7 +134,7 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
     else:
         # For DA/DO/DADO, filename includes setup
         pattern = f"uq_benchmark_{base_name}_{model_name}_{setup}_*.json"
-        json_files = list(results_dir.glob(pattern))
+        json_files = list(runs_dir.glob(pattern))
     
     if not json_files:
         return 0.0
@@ -143,7 +150,91 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
         return 0.0
 
 
-def create_radar_plot(model_results, model_name, output_path, results_dir=None):
+def get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name='resnet18'):
+    """
+    Get ensemble balanced accuracy from runs/[dataset]/[model]_*/metrics_ensemble.json
+    
+    Args:
+        runs_dir: Path to runs directory (benchmarks/medMNIST/runs)
+        dataset_key: Dataset key (e.g., 'tissuemnist_standard', 'tissuemnist_DA')
+        model_name: Model name (e.g., 'resnet18', 'vit_b_16')
+    
+    Returns:
+        float: Ensemble balanced accuracy, or 0 if not found
+    """
+    runs_dir = Path(runs_dir)
+    
+    # Parse dataset_key to get base name and setup
+    if '_' in dataset_key:
+        parts = dataset_key.rsplit('_', 1)
+        base_name = parts[0]
+        setup = parts[1] if parts[1] in ['standard', 'DA', 'DO', 'DADO'] else 'standard'
+        if setup == 'standard' and parts[1] != 'standard':
+            base_name = dataset_key
+            setup = 'standard'
+    else:
+        base_name = dataset_key
+        setup = 'standard'
+    
+    # Handle dermamnist-e-id -> dermamnist-e mapping
+    if 'dermamnist-e-id' in base_name:
+        base_name = 'dermamnist-e'
+    
+    # Path: runs/[dataset]/[model]_*/metrics_ensemble.json
+    dataset_dir = runs_dir / base_name
+    if not dataset_dir.exists():
+        return 0.0
+    
+    # Map setup to training pattern
+    # standard: randaug0 (no dropout)
+    # DA: randaug1 (no dropout) 
+    # DO: randaug0 + dropout
+    # DADO: randaug1 + dropout
+    if setup == 'standard':
+        pattern = f"{model_name}_*_randaug0_*"
+        exclude_pattern = "dropout"
+    elif setup == 'DA':
+        pattern = f"{model_name}_*_randaug1_*"
+        exclude_pattern = "dropout"
+    elif setup == 'DO':
+        pattern = f"{model_name}_*_randaug0_*dropout*"
+        exclude_pattern = None
+    elif setup == 'DADO':
+        pattern = f"{model_name}_*_randaug1_*dropout*"
+        exclude_pattern = None
+    else:
+        return 0.0
+    
+    # Find matching directories
+    matching_dirs = []
+    for dir_path in dataset_dir.glob(pattern):
+        if dir_path.is_dir():
+            if exclude_pattern and exclude_pattern in dir_path.name:
+                continue
+            matching_dirs.append(dir_path)
+    
+    if not matching_dirs:
+        return 0.0
+    
+    # Use most recent directory
+    most_recent = max(matching_dirs, key=lambda p: p.stat().st_mtime)
+    
+    # Load metrics_ensemble.json
+    metrics_file = most_recent / 'metrics_ensemble.json'
+    if not metrics_file.exists():
+        return 0.0
+    
+    try:
+        with open(metrics_file, 'r') as f:
+            data = json.load(f)
+        # balanced_accuracy is nested under 'metrics'
+        metrics = data.get('metrics', {})
+        return metrics.get('balanced_accuracy', 0.0)
+    except:
+        return 0.0
+
+
+def create_radar_plot(model_results, model_name, output_path, results_dir=None, runs_dir=None):
     """
     Create a radar plot for a single model showing all dataset-setup combinations.
     
@@ -151,7 +242,8 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
         model_results: dict mapping dataset_key -> method -> auroc
         model_name: Name of the model (e.g., 'resnet18', 'vit_b_16')
         output_path: Path to save the figure
-        results_dir: Path to results directory (for sorting by accuracy)
+        results_dir: Path to results directory (for computing mean aggregation)
+        runs_dir: Path to runs directory (for ensemble balanced accuracy)
     """
     # Group datasets by family (base dataset name)
     dataset_families = defaultdict(list)
@@ -195,6 +287,16 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
         print(f"No data for {model_name}, skipping radar plot")
         return
     
+    # Add mean aggregation method for each dataset
+    print(f"  Computing mean aggregation AUROC for each dataset...")
+    mean_agg_count = 0
+    for dataset_key in dataset_keys:
+        mean_agg_auroc = compute_mean_aggregation_auroc(results_dir, dataset_key, model_name)
+        if not np.isnan(mean_agg_auroc):
+            model_results[dataset_key]['Mean_Aggregation'] = mean_agg_auroc
+            mean_agg_count += 1
+    print(f"  Successfully computed Mean_Aggregation for {mean_agg_count}/{len(dataset_keys)} datasets")
+    
     # Get all unique methods across datasets
     all_methods = set()
     for dataset_data in model_results.values():
@@ -204,57 +306,76 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
     print(f"\nCreating radar plot for {model_name}")
     print(f"  Datasets: {num_datasets}")
     print(f"  Methods: {len(all_methods)}")
+    print(f"  Dataset order: {dataset_keys[:5]}... (showing first 5)")
+    print(f"  Dataset families found: {sorted(dataset_families.keys())}")
+    print(f"  Preferred order: {preferred_order}")
     
-    # Set up the angles for radar plot with family clustering
-    # Keep datasets from same family close together with tighter angles
+    # Cluster setups from same dataset with smaller angles
+    # Allocate space per dataset family, then subdivide for setups
     angles = []
+    dataset_labels = []  # Will store just the setup name (standard, DA, DO, DADO)
+    family_angles = []  # Store angles for family name labels
+    family_names = []
     
-    # Group datasets by family (in order they appear)
-    families = []
-    current_family_datasets = []
-    current_family = None
+    # Use the actual dataset_keys order (which includes all datasets)
+    # Group by family on the fly
+    processed_families = set()
+    current_family_idx = 0
+    num_families_total = len(dataset_families)
+    angle_per_family = 2 * np.pi / num_families_total
+    within_family_factor = 0.6  # Tighter clustering within family
     
-    for dataset_key in dataset_keys:
+    i = 0
+    while i < len(dataset_keys):
+        dataset_key = dataset_keys[i]
+        # Extract base family name
         base_name = dataset_key.rsplit('_', 1)[0] if '_' in dataset_key else dataset_key
         if base_name.endswith('_standard'):
             base_name = base_name.replace('_standard', '')
         
-        if current_family != base_name:
-            if current_family_datasets:
-                families.append(current_family_datasets)
-            current_family_datasets = [dataset_key]
-            current_family = base_name
+        if base_name not in processed_families:
+            processed_families.add(base_name)
+            family_datasets = dataset_families[base_name]
+            
+            family_center = current_family_idx * angle_per_family
+            family_size = len(family_datasets)
+            
+            # Store family info for outer labels
+            family_angles.append(family_center)
+            family_names.append(base_name)
+            
+            if family_size == 1:
+                angles.append(family_center)
+                setup_name = family_datasets[0].split('_')[-1]
+                dataset_labels.append(setup_name)
+            else:
+                # Distribute setups within family's allocated space
+                family_span = angle_per_family * within_family_factor
+                for j, ds_key in enumerate(family_datasets):
+                    offset = (j - (family_size - 1) / 2) * (family_span / family_size)
+                    angle = (family_center + offset) % (2 * np.pi)  # Ensure positive
+                    angles.append(angle)
+                    setup_name = ds_key.split('_')[-1]
+                    dataset_labels.append(setup_name)
+            
+            current_family_idx += 1
+            i += len(family_datasets)
         else:
-            current_family_datasets.append(dataset_key)
+            i += 1
     
-    if current_family_datasets:
-        families.append(current_family_datasets)
+    # Ensure all angles are positive and within [0, 2π]
+    angles = [(a % (2 * np.pi)) for a in angles]
     
-    # Distribute families evenly around the circle
-    num_families = len(families)
-    angle_per_family = 2 * np.pi / num_families
+    # Store number of datasets before adding closing point
+    num_angle_points = len(angles)
+    angles = angles + [angles[0]]  # Complete the circle
     
-    # Within each family, use tighter clustering (50% of the family's allocated angle)
-    within_family_factor = 0.5
-    
-    for family_idx, family_datasets in enumerate(families):
-        family_center = family_idx * angle_per_family
-        family_size = len(family_datasets)
-        
-        if family_size == 1:
-            angles.append(family_center)
-        else:
-            # Spread datasets within the family's allocated space
-            family_span = angle_per_family * within_family_factor
-            for i, dataset_key in enumerate(family_datasets):
-                # Distribute evenly within the family span
-                offset = (i - (family_size - 1) / 2) * (family_span / family_size)
-                angles.append(family_center + offset)
-    
-    angles += angles[:1]  # Complete the circle
+    print(f"  Angle range: {min(angles):.2f} to {max(angles):.2f} radians")
+    print(f"  Families: {len(family_names)}")
+    print(f"  Angle points (before close): {num_angle_points}, dataset_keys: {num_datasets}")
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(14, 14), subplot_kw=dict(projection='polar'))
+    fig, ax = plt.subplots(figsize=(18, 18), subplot_kw=dict(projection='polar'))
     
     # Color map for methods
     colors = plt.cm.tab20(np.linspace(0, 1, len(all_methods)))
@@ -269,49 +390,82 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None):
         # Complete the circle
         values += values[:1]
         
-        # Plot lines only (removed fill)
-        ax.plot(angles, values, 'o-', linewidth=2.5, label=method_name, 
-                color=colors[method_idx], markersize=7, markeredgewidth=1.5,
-                markeredgecolor='white')
+        # Plot Mean_Aggregation with lightning icon, others with lines
+        if method_name == 'Mean_Aggregation':
+            # Plot lightning bolt markers without connecting lines
+            ax.scatter(angles[:-1], values[:-1], s=300, marker='$\u26A1$', 
+                       color=colors[method_idx], label=method_name, 
+                       zorder=99, alpha=0.9, edgecolors='black', linewidths=0.5)
+        else:
+            # Plot lines with enhanced styling for better visibility
+            ax.plot(angles, values, 'o-', linewidth=3, label=method_name, 
+                    color=colors[method_idx], markersize=8, markeredgewidth=2,
+                    markeredgecolor='white', alpha=0.85)
     
     # Add ensemble balanced accuracy scatter overlay
-    if results_dir:
+    if runs_dir:
         accuracy_values = []
-        for dataset_key in dataset_keys:
-            accuracy = get_dataset_accuracy(results_dir, dataset_key, model_name)
-            accuracy_values.append(accuracy)
+        accuracy_angles = []
+        for idx, dataset_key in enumerate(dataset_keys):
+            accuracy = get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name)
+            # Only include if valid (non-zero) accuracy
+            if accuracy > 0:
+                accuracy_values.append(accuracy)
+                accuracy_angles.append(angles[idx])
         
-        # Complete the circle
-        accuracy_values += accuracy_values[:1]
-        
-        # Plot as distinct scatter points
-        ax.scatter(angles, accuracy_values, s=120, c='red', marker='*', 
-                   edgecolors='black', linewidths=1.5, zorder=10, 
-                   label='Ensemble Balanced Accuracy', alpha=0.9)
+        # Plot as distinct scatter points (only if we have valid data)
+        if accuracy_values:
+            ax.scatter(accuracy_angles, accuracy_values, s=200, c='red', marker='*', 
+                       edgecolors='black', linewidths=2, zorder=100, 
+                       label='Ensemble Balanced Accuracy', alpha=1.0)
+            print(f"  Added {len(accuracy_values)} accuracy markers")
+        else:
+            print("  No valid accuracy values found")
     
-    # Set labels
+    # Set labels - setup names only (increased font size for readability)
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(dataset_keys, size=9)
+    ax.set_xticklabels(dataset_labels, size=9, rotation=0, fontweight='medium')
     
-    # Set y-axis (AUROC range) - fixed scale from 0.5 to 1.0
-    ax.set_ylim(0.5, 1.0)
+    # Add dataset family names (larger, further out, with background)
+    for angle, name in zip(family_angles, family_names):
+        # Add subtle background box for family names
+        # Position at 1.08 (beyond the 1.0 max AUROC but within visible range)
+        angle_positive = angle % (2 * np.pi)  # Ensure positive angle
+        ax.text(angle_positive, 1.08, name, 
+                horizontalalignment='center', verticalalignment='center',
+                size=12, fontweight='bold', transform=ax.transData,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                         edgecolor='gray', alpha=0.8))
     
-    # Set ticks every 0.1
-    y_ticks = np.arange(0.5, 1.05, 0.1)  # 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+    # Ensure full circle is visible - CRITICAL for proper display
+    ax.set_theta_offset(np.pi / 2)  # Start from top
+    ax.set_theta_direction(-1)  # Clockwise
+    ax.set_thetalim(0, 2 * np.pi)  # Force full circle view
+    
+    # Set y-axis (AUROC range) - scale from 0.4 to 1.0
+    ax.set_ylim(0.4, 1.0)
+    ax.set_rlim(0.4, 1.0)  # Also set radial limits explicitly
+    
+    # Set ticks every 0.1 with better styling
+    y_ticks = np.arange(0.4, 1.05, 0.1)  # 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
     ax.set_yticks(y_ticks)
-    ax.set_yticklabels([f'{y:.1f}' for y in y_ticks], size=10)
-    ax.set_ylabel('AUROC_f', size=12, labelpad=30)
+    ax.set_yticklabels([f'{y:.1f}' for y in y_ticks], size=11, fontweight='medium')
+    ax.set_ylabel('AUROC_f', size=13, fontweight='bold', labelpad=35)
     
-    # Grid
-    ax.grid(True, linewidth=0.5, alpha=0.5)
+    # Enhanced grid
+    ax.grid(True, linewidth=0.7, alpha=0.3, linestyle='--')
+    ax.set_axisbelow(True)  # Grid behind data
     
-    # Title
+    # Title in bottom right corner (as text annotation)
     model_display_name = model_name.replace('_', ' ').upper()
-    ax.set_title(f'UQ Methods Performance - {model_display_name}\n(Mean AUROC_f across datasets)',
-                 size=16, fontweight='bold', pad=20)
+    fig.text(0.78, 0.08, f'UQ Methods Performance\n{model_display_name}\n(Mean AUROC_f)',
+             ha='center', va='center', size=14, fontweight='bold',
+             bbox=dict(boxstyle='round,pad=0.8', facecolor='lightgray', 
+                      edgecolor='black', alpha=0.9, linewidth=2))
     
-    # Legend
-    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=10)
+    # Legend - positioned on right side with improved styling
+    ax.legend(loc='center left', bbox_to_anchor=(1.15, 0.5), fontsize=11,
+             frameon=True, fancybox=True, shadow=True, ncol=1)
     
     # Save
     plt.tight_layout()
@@ -345,6 +499,223 @@ def generate_summary_table(results, output_path):
     print(f"\n✓ Summary table saved to {output_path}")
 
 
+def compute_mean_aggregation_auroc(results_dir, dataset_key, model_name):
+    """
+    Compute AUROC_f for mean aggregation of z-scored UQ methods.
+    
+    Args:
+        results_dir: Path to results directory
+        dataset_key: Dataset key (e.g., 'breastmnist_standard')
+        model_name: Model name (e.g., 'resnet18', 'vit_b_16')
+    
+    Returns:
+        float: AUROC_f for mean aggregation, or NaN if not found
+    """
+    results_dir = Path(results_dir)
+    
+    # Parse dataset_key to get base dataset name and setup
+    if '_' in dataset_key and dataset_key.split('_')[-1] in ['standard', 'DA', 'DO', 'DADO']:
+        parts = dataset_key.rsplit('_', 1)
+        dataset_name = parts[0]
+        setup = parts[1]
+    else:
+        dataset_name = dataset_key
+        setup = 'standard'
+    
+    # Construct npz filename pattern
+    if setup == 'standard':
+        # For standard, exclude DA/DO/DADO in filename
+        pattern = f"all_metrics_{dataset_name}_{model_name}_*.npz"
+    else:
+        pattern = f"all_metrics_{dataset_name}_{model_name}_{setup}_*.npz"
+    
+    # Search in id_results subdirectory
+    search_dir = results_dir / 'id_results'
+    
+    # Find matching npz files
+    all_npz_files = list(search_dir.glob(pattern))
+    
+    # Filter for standard setup (exclude DA, DO, DADO)
+    if '_' in dataset_key and dataset_key.split('_')[-1] == 'standard':
+        npz_files = [f for f in all_npz_files if not any(
+            f'_{s}_' in f.name for s in ['DA', 'DO', 'DADO']
+        )]
+    else:
+        npz_files = all_npz_files
+    if not npz_files:
+        return np.nan
+    
+    # Use most recent file
+    npz_file = max(npz_files, key=lambda p: p.stat().st_mtime)
+    
+    try:
+        data = np.load(npz_file, allow_pickle=True)
+        
+        # Get all method keys (exclude _per_fold, _ensemble, and TTA)
+        method_keys = [k for k in data.keys() if not k.endswith('_per_fold') and not k.endswith('_ensemble') and k != 'TTA']
+        
+        if not method_keys:
+            return np.nan
+        
+        # Z-score normalize each method and compute mean
+        normalized_arrays = []
+        for method_name in method_keys:
+            uncertainties = data[method_name]
+            mean_val = np.mean(uncertainties)
+            std_val = np.std(uncertainties)
+            
+            if std_val > 0:
+                z_score = (uncertainties - mean_val) / std_val
+                normalized_arrays.append(z_score)
+        
+        if not normalized_arrays:
+            return np.nan
+        
+        # Mean aggregation
+        stacked = np.stack(normalized_arrays, axis=0)
+        aggregated = np.mean(stacked, axis=0)
+        
+        # Get labels from cached test results (not from JSON)
+        # Look for the corresponding cache file
+        cache_dir = results_dir / 'cache'
+        if setup == 'standard':
+            cache_pattern = f"{dataset_name}_{model_name}_test_results.npz"
+        else:
+            cache_pattern = f"{dataset_name}_{model_name}_{setup}_test_results.npz"
+        
+        cache_file_path = cache_dir / cache_pattern
+        
+        if not cache_file_path.exists():
+            return np.nan
+        
+        cache_data = np.load(cache_file_path, allow_pickle=True)
+        
+        # Build failure labels from correct/incorrect indices
+        correct_idx = cache_data['correct_idx']
+        incorrect_idx = cache_data['incorrect_idx']
+        n_samples = len(correct_idx) + len(incorrect_idx)
+        
+        failure_labels = np.zeros(n_samples)
+        failure_labels[incorrect_idx] = 1  # Mark failures as 1
+        
+        if len(failure_labels) != len(aggregated):
+            return np.nan
+        
+        # Compute AUROC
+        auroc = roc_auc_score(failure_labels, aggregated)
+        return auroc
+        
+    except Exception as e:
+        import traceback
+        print(f"    Warning: Could not compute mean aggregation for {dataset_key}: {e}")
+        traceback.print_exc()
+        return np.nan
+
+
+def aggregate_uq_methods(npz_path, aggregation='mean', methods=None, output_path=None):
+    """
+    Aggregate multiple UQ methods by z-score normalizing each method and combining.
+    
+    Args:
+        npz_path: Path to the npz file containing UQ method uncertainties
+        aggregation: Aggregation strategy - 'mean', 'max', 'min', or 'vote'
+        methods: List of method names to aggregate (None = all methods)
+        output_path: Optional path to save aggregated results
+    
+    Returns:
+        dict: Dictionary with aggregated uncertainties and per-method z-scores
+            {
+                'aggregated': array of aggregated uncertainties,
+                'z_scores': dict of {method_name: z_scored_array},
+                'methods_used': list of method names,
+                'aggregation': aggregation type
+            }
+    """
+    # Load the npz file
+    data = np.load(npz_path, allow_pickle=True)
+    
+    # Get available methods (exclude '_per_fold' and '_ensemble' suffixes)
+    all_keys = list(data.keys())
+    method_keys = [k for k in all_keys if not k.endswith('_per_fold') and not k.endswith('_ensemble')]
+    
+    if methods is None:
+        methods = method_keys
+    else:
+        # Filter to only requested methods that exist
+        methods = [m for m in methods if m in method_keys]
+    
+    if not methods:
+        raise ValueError(f"No valid methods found in {npz_path}. Available: {method_keys}")
+    
+    print(f"\nAggregating UQ methods from: {npz_path}")
+    print(f"  Methods to aggregate: {methods}")
+    print(f"  Aggregation strategy: {aggregation}")
+    
+    # Z-score normalize each method
+    z_scores = {}
+    normalized_arrays = []
+    
+    for method_name in methods:
+        uncertainties = data[method_name]
+        
+        # Z-score normalization: (x - mean) / std
+        mean = np.mean(uncertainties)
+        std = np.std(uncertainties)
+        
+        if std == 0:
+            print(f"  Warning: {method_name} has zero std, skipping")
+            continue
+        
+        z_score = (uncertainties - mean) / std
+        z_scores[method_name] = z_score
+        normalized_arrays.append(z_score)
+        
+        print(f"  {method_name}: mean={mean:.4f}, std={std:.4f}")
+    
+    if not normalized_arrays:
+        raise ValueError("No valid methods after normalization")
+    
+    # Stack all z-scored arrays (shape: num_methods x num_samples)
+    stacked = np.stack(normalized_arrays, axis=0)
+    
+    # Aggregate across methods
+    if aggregation == 'mean':
+        aggregated = np.mean(stacked, axis=0)
+    elif aggregation == 'max':
+        aggregated = np.max(stacked, axis=0)
+    elif aggregation == 'min':
+        aggregated = np.min(stacked, axis=0)
+    elif aggregation == 'vote':
+        # Majority vote: count how many methods have z-score > 0 (above average uncertainty)
+        aggregated = np.sum(stacked > 0, axis=0) / len(normalized_arrays)
+    else:
+        raise ValueError(f"Unknown aggregation: {aggregation}. Use 'mean', 'max', 'min', or 'vote'")
+    
+    print(f"  Aggregated shape: {aggregated.shape}")
+    print(f"  Aggregated range: [{aggregated.min():.4f}, {aggregated.max():.4f}]")
+    
+    result = {
+        'aggregated': aggregated,
+        'z_scores': z_scores,
+        'methods_used': [m for m in methods if m in z_scores],
+        'aggregation': aggregation
+    }
+    
+    # Save if output path provided
+    if output_path:
+        output_path = Path(output_path)
+        np.savez_compressed(
+            output_path,
+            aggregated=aggregated,
+            **z_scores,
+            methods_used=result['methods_used'],
+            aggregation=aggregation
+        )
+        print(f"  ✓ Saved to {output_path}")
+    
+    return result
+
+
 def main():
     """Main function to generate radar plots from benchmark results."""
     
@@ -352,12 +723,19 @@ def main():
     print("UQ Benchmark Radar Plot Generator")
     print("=" * 80)
     
-    # Get the directory where this script is located
+    # Get the workspace root (3 levels up from script: utils -> medMNIST -> benchmarks -> UQ_Toolbox)
     script_dir = Path(__file__).parent
-    print(f"Looking for JSON files in: {script_dir}")
+    workspace_root = script_dir.parent.parent.parent
+    results_dir = workspace_root / 'uq_benchmark_results'
+    id_results_dir = results_dir / 'id_results'
+    runs_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'runs'
     
-    # Parse results from the script's directory
-    results = parse_results_directory(script_dir)
+    print(f"Workspace root: {workspace_root}")
+    print(f"Looking for JSON files in: {id_results_dir}")
+    print(f"Looking for accuracy in: {runs_dir}")
+    
+    # Parse results from the results directory
+    results = parse_results_directory(id_results_dir)
     
     if not results:
         print("\n⚠️  No results found! Make sure JSON files are in the script directory.")
@@ -370,7 +748,7 @@ def main():
     # Generate radar plot for each model
     for model_name, model_results in results.items():
         output_path = output_dir / f'radar_plot_{model_name}.png'
-        create_radar_plot(model_results, model_name, output_path, results_dir=script_dir)
+        create_radar_plot(model_results, model_name, output_path, results_dir=results_dir, runs_dir=runs_dir)
     
     # Generate summary table
     summary_path = output_dir / 'results_summary.csv'
@@ -382,4 +760,29 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    
+    # If first argument is 'aggregate', run aggregation demo
+    if len(sys.argv) > 1 and sys.argv[1] == 'aggregate':
+        if len(sys.argv) < 3:
+            print("Usage: python generate_radar_plots.py aggregate <npz_file> [mean|max|min|vote]")
+            print("\nExample:")
+            print("  python generate_radar_plots.py aggregate ../../uq_benchmark_results/all_metrics_breastmnist_20251128_192502.npz mean")
+            sys.exit(1)
+        
+        npz_file = sys.argv[2]
+        aggregation = sys.argv[3] if len(sys.argv) > 3 else 'mean'
+        
+        output_path = Path(npz_file).parent / f"aggregated_{aggregation}_{Path(npz_file).stem}.npz"
+        
+        result = aggregate_uq_methods(npz_file, aggregation=aggregation, output_path=output_path)
+        
+        print(f"\n{'='*80}")
+        print(f"Aggregation complete!")
+        print(f"  Methods used: {', '.join(result['methods_used'])}")
+        print(f"  Strategy: {aggregation}")
+        print(f"  Output saved to: {output_path}")
+        print(f"{'='*80}")
+    else:
+        # Normal radar plot generation
+        main()
