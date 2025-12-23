@@ -16,9 +16,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-def parse_results_directory(results_dir='./'):
+def parse_results_directory(results_dir='./', metric='auroc_f'):
     """
     Parse all JSON result files in the directory.
+    
+    Args:
+        results_dir: Directory containing JSON result files
+        metric: Metric to extract - 'auroc_f' or 'augrc'
     
     Returns:
         dict: Nested dictionary structure:
@@ -62,15 +66,16 @@ def parse_results_directory(results_dir='./'):
             # Extract method results
             methods_data = data.get('methods', {})
             for method_name, method_results in methods_data.items():
-                # Get AUROC_f (use mean if available, otherwise single value)
-                if 'auroc_f_mean' in method_results:
-                    auroc = method_results['auroc_f_mean']
-                elif 'auroc_f' in method_results:
-                    auroc = method_results['auroc_f']
+                # Get specified metric (use mean if available, otherwise single value)
+                metric_mean_key = f'{metric}_mean'
+                if metric_mean_key in method_results:
+                    value = method_results[metric_mean_key]
+                elif metric in method_results:
+                    value = method_results[metric]
                 else:
                     continue
                 
-                results[model_backbone][dataset_key][method_name] = float(auroc)
+                results[model_backbone][dataset_key][method_name] = float(value)
             
             print(f"  Loaded: {model_backbone} - {dataset_key} ({len(methods_data)} methods)")
         
@@ -234,16 +239,17 @@ def get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name='resnet18'
         return 0.0
 
 
-def create_radar_plot(model_results, model_name, output_path, results_dir=None, runs_dir=None):
+def create_radar_plot(model_results, model_name, output_path, results_dir=None, runs_dir=None, metric='auroc_f'):
     """
     Create a radar plot for a single model showing all dataset-setup combinations.
     
     Args:
-        model_results: dict mapping dataset_key -> method -> auroc
+        model_results: dict mapping dataset_key -> method -> metric_value
         model_name: Name of the model (e.g., 'resnet18', 'vit_b_16')
         output_path: Path to save the figure
         results_dir: Path to results directory (for computing mean aggregation)
         runs_dir: Path to runs directory (for ensemble balanced accuracy)
+        metric: Metric to plot - 'auroc_f' or 'augrc'
     """
     # Group datasets by family (base dataset name)
     dataset_families = defaultdict(list)
@@ -288,12 +294,13 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
         return
     
     # Add mean aggregation method for each dataset
-    print(f"  Computing mean aggregation AUROC for each dataset...")
+    metric_name = metric.upper().replace('_', ' ')
+    print(f"  Computing mean aggregation {metric_name} for each dataset...")
     mean_agg_count = 0
     for dataset_key in dataset_keys:
-        mean_agg_auroc = compute_mean_aggregation_auroc(results_dir, dataset_key, model_name)
-        if not np.isnan(mean_agg_auroc):
-            model_results[dataset_key]['Mean_Aggregation'] = mean_agg_auroc
+        mean_agg_value = compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric=metric)
+        if not np.isnan(mean_agg_value):
+            model_results[dataset_key]['Mean_Aggregation'] = mean_agg_value
             mean_agg_count += 1
     print(f"  Successfully computed Mean_Aggregation for {mean_agg_count}/{len(dataset_keys)} datasets")
     
@@ -442,15 +449,21 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
     ax.set_theta_direction(-1)  # Clockwise
     ax.set_thetalim(0, 2 * np.pi)  # Force full circle view
     
-    # Set y-axis (AUROC range) - scale from 0.4 to 1.0
-    ax.set_ylim(0.4, 1.0)
-    ax.set_rlim(0.4, 1.0)  # Also set radial limits explicitly
+    # Set y-axis range based on metric
+    if metric == 'auroc_f':
+        y_min, y_max = 0.4, 1.0
+    else:  # augrc - inverted scale (1 to 0)
+        y_min, y_max = 1.0, 0.0
+    
+    ax.set_ylim(y_min, y_max)
+    ax.set_rlim(y_min, y_max)  # Also set radial limits explicitly
     
     # Set ticks every 0.1 with better styling
-    y_ticks = np.arange(0.4, 1.05, 0.1)  # 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+    y_ticks = np.arange(y_min, y_max + 0.05, 0.1)
     ax.set_yticks(y_ticks)
     ax.set_yticklabels([f'{y:.1f}' for y in y_ticks], size=11, fontweight='medium')
-    ax.set_ylabel('AUROC_f', size=13, fontweight='bold', labelpad=35)
+    metric_label = metric.upper().replace('_', ' ')
+    ax.set_ylabel(metric_label, size=13, fontweight='bold', labelpad=35)
     
     # Enhanced grid
     ax.grid(True, linewidth=0.7, alpha=0.3, linestyle='--')
@@ -458,7 +471,8 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
     
     # Title in bottom right corner (as text annotation)
     model_display_name = model_name.replace('_', ' ').upper()
-    fig.text(0.78, 0.08, f'UQ Methods Performance\n{model_display_name}\n(Mean AUROC_f)',
+    metric_display = metric.upper().replace('_', ' ')
+    fig.text(0.78, 0.08, f'UQ Methods Performance\n{model_display_name}\n(Mean {metric_display})',
              ha='center', va='center', size=14, fontweight='bold',
              bbox=dict(boxstyle='round,pad=0.8', facecolor='lightgray', 
                       edgecolor='black', alpha=0.9, linewidth=2))
@@ -488,7 +502,7 @@ def generate_summary_table(results, output_path):
         writer = csv.writer(f)
         
         # Header
-        writer.writerow(['Model', 'Dataset', 'Method', 'AUROC_f'])
+        writer.writerow(['Model', 'Dataset', 'Method', 'AUROC_f', 'AUGRC'])
         
         # Data
         for model_name, model_results in sorted(results.items()):
@@ -499,17 +513,18 @@ def generate_summary_table(results, output_path):
     print(f"\n✓ Summary table saved to {output_path}")
 
 
-def compute_mean_aggregation_auroc(results_dir, dataset_key, model_name):
+def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric='auroc_f'):
     """
-    Compute AUROC_f for mean aggregation of z-scored UQ methods.
+    Compute specified metric for mean aggregation of z-scored UQ methods.
     
     Args:
         results_dir: Path to results directory
         dataset_key: Dataset key (e.g., 'breastmnist_standard')
         model_name: Model name (e.g., 'resnet18', 'vit_b_16')
+        metric: Metric to compute - 'auroc_f' or 'augrc'
     
     Returns:
-        float: AUROC_f for mean aggregation, or NaN if not found
+        float: Metric value for mean aggregation, or NaN if not found
     """
     results_dir = Path(results_dir)
     
@@ -601,9 +616,34 @@ def compute_mean_aggregation_auroc(results_dir, dataset_key, model_name):
         if len(failure_labels) != len(aggregated):
             return np.nan
         
-        # Compute AUROC
-        auroc = roc_auc_score(failure_labels, aggregated)
-        return auroc
+        # Compute specified metric
+        if metric == 'auroc_f':
+            from sklearn.metrics import roc_auc_score
+            result = roc_auc_score(failure_labels, aggregated)
+        elif metric == 'augrc':
+            # Compute AUGRC: Area Under Gain-Risk Curve
+            # Sort by uncertainty (descending)
+            sorted_indices = np.argsort(-aggregated)
+            sorted_labels = failure_labels[sorted_indices]
+            
+            # Compute cumulative failure rate vs coverage
+            n_total = len(sorted_labels)
+            cumulative_failures = np.cumsum(sorted_labels)
+            coverage = np.arange(1, n_total + 1) / n_total
+            failure_rate = cumulative_failures / np.arange(1, n_total + 1)
+            
+            # Baseline is random: expected failure rate at each coverage
+            baseline_rate = np.mean(failure_labels)
+            
+            # Gain = baseline - actual failure rate (positive when we catch more failures)
+            gain = baseline_rate - failure_rate
+            
+            # AUGRC: area under the gain curve (use trapezoidal rule)
+            result = np.trapz(gain, coverage)
+        else:
+            return np.nan
+        
+        return result
         
     except Exception as e:
         import traceback
@@ -734,21 +774,29 @@ def main():
     print(f"Looking for JSON files in: {id_results_dir}")
     print(f"Looking for accuracy in: {runs_dir}")
     
-    # Parse results from the results directory
-    results = parse_results_directory(id_results_dir)
-    
-    if not results:
-        print("\n⚠️  No results found! Make sure JSON files are in the script directory.")
-        return
-    
     # Create output directory for plots in the script's directory
     output_dir = script_dir / 'radar_plots'
     output_dir.mkdir(exist_ok=True)
     
-    # Generate radar plot for each model
-    for model_name, model_results in results.items():
-        output_path = output_dir / f'radar_plot_{model_name}.png'
-        create_radar_plot(model_results, model_name, output_path, results_dir=results_dir, runs_dir=runs_dir)
+    # Generate plots for both AUROC_f and AUGRC
+    for metric in ['auroc_f', 'augrc']:
+        metric_display = metric.upper().replace('_', ' ')
+        print(f"\n{'='*80}")
+        print(f"Generating {metric_display} plots...")
+        print(f"{'='*80}")
+        
+        # Parse results for this metric
+        results = parse_results_directory(id_results_dir, metric=metric)
+        
+        if not results:
+            print(f"\n⚠️  No {metric_display} results found!")
+            continue
+        
+        # Generate radar plot for each model
+        for model_name, model_results in results.items():
+            output_path = output_dir / f'radar_plot_{model_name}_{metric}.png'
+            create_radar_plot(model_results, model_name, output_path, 
+                            results_dir=results_dir, runs_dir=runs_dir, metric=metric)
     
     # Generate summary table
     summary_path = output_dir / 'results_summary.csv'
