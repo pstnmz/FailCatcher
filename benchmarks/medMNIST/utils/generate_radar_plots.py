@@ -9,6 +9,7 @@ import json
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from pathlib import Path
 from collections import defaultdict
 from sklearn.metrics import roc_auc_score
@@ -239,17 +240,56 @@ def get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name='resnet18'
         return 0.0
 
 
-def create_radar_plot(model_results, model_name, output_path, results_dir=None, runs_dir=None, metric='auroc_f'):
+def compute_oracle_augrc(accuracy):
     """
-    Create a radar plot for a single model showing all dataset-setup combinations.
+    Compute oracle AUGRC - theoretical best AUGRC given accuracy.
+    
+    Oracle rejects all incorrect predictions first, achieving zero generalized risk
+    until coverage exceeds the fraction of correct predictions.
     
     Args:
+        accuracy: Model accuracy (between 0 and 1)
+    
+    Returns:
+        float: Oracle AUGRC = 0.5 * (1 - accuracy)^2
+    """
+    return 0.5 * (1.0 - accuracy) ** 2
+
+
+def augrc_log_transform(value, max_display=0.30, scale_factor=50.0):
+    """
+    Transform AUGRC values with scaling that gives MORE space near edges (good values).
+    Maps [0, max_display] where 0 is at edges (best) and max_display is at center (worst).
+    Uses power > 1 (1.5) for MORE space at edges, LESS at center.
+    
+    Args:
+        value: Original AUGRC value
+        max_display: Maximum display value (center), set to cover data range
+        scale_factor: Controls overall scale
+    
+    Returns:
+        Transformed value
+    """
+    # Use power 1.5 transform: scale * (max_display - value)^1.5
+    # This gives MORE space near edges (0) and LESS at center (0.30)
+    # When value = max_display: result = 0 (center)
+    # When value = 0: result = scale * max_display^1.5 (edge)
+    # Power 1.5 is less aggressive than square (2.0) but still emphasizes edges
+    return scale_factor * (max_display - np.array(value)) ** 1.5
+
+
+def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, runs_dir=None, metric='auroc_f', aggregation='mean'):
+    """
+    Create a radar plot on a given axis for a single model showing all dataset-setup combinations.
+    
+    Args:
+        ax: Matplotlib polar axis to plot on
         model_results: dict mapping dataset_key -> method -> metric_value
         model_name: Name of the model (e.g., 'resnet18', 'vit_b_16')
-        output_path: Path to save the figure
-        results_dir: Path to results directory (for computing mean aggregation)
+        results_dir: Path to results directory (for computing aggregation)
         runs_dir: Path to runs directory (for ensemble balanced accuracy)
         metric: Metric to plot - 'auroc_f' or 'augrc'
+        aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote'
     """
     # Group datasets by family (base dataset name)
     dataset_families = defaultdict(list)
@@ -293,12 +333,13 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
         print(f"No data for {model_name}, skipping radar plot")
         return
     
-    # Add mean aggregation method for each dataset
+    # Add aggregation method for each dataset
     metric_name = metric.upper().replace('_', ' ')
-    print(f"  Computing mean aggregation {metric_name} for each dataset...")
+    agg_display = aggregation.capitalize()
+    print(f"  Computing {agg_display} aggregation {metric_name} for each dataset...")
     mean_agg_count = 0
     for dataset_key in dataset_keys:
-        mean_agg_value = compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric=metric)
+        mean_agg_value = compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric=metric, aggregation=aggregation)
         if not np.isnan(mean_agg_value):
             model_results[dataset_key]['Mean_Aggregation'] = mean_agg_value
             mean_agg_count += 1
@@ -381,9 +422,6 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
     print(f"  Families: {len(family_names)}")
     print(f"  Angle points (before close): {num_angle_points}, dataset_keys: {num_datasets}")
     
-    # Create figure
-    fig, ax = plt.subplots(figsize=(18, 18), subplot_kw=dict(projection='polar'))
-    
     # Color map for methods
     colors = plt.cm.tab20(np.linspace(0, 1, len(all_methods)))
     
@@ -394,6 +432,10 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
             auroc = model_results[dataset_key].get(method_name, np.nan)
             values.append(auroc)
         
+        # Transform values to square space for AUGRC (more space at edges)
+        if metric == 'augrc':
+            values = augrc_log_transform(values, max_display=0.30, scale_factor=50.0).tolist()
+        
         # Complete the circle
         values += values[:1]
         
@@ -401,7 +443,7 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
         if method_name == 'Mean_Aggregation':
             # Plot lightning bolt markers without connecting lines
             ax.scatter(angles[:-1], values[:-1], s=300, marker='$\u26A1$', 
-                       color=colors[method_idx], label=method_name, 
+                       color=colors[method_idx], label=method_name + ' (MSR - MSR_calibrated - MLS - GPS - KNN_Raw - MC_Dropout)', 
                        zorder=99, alpha=0.9, edgecolors='black', linewidths=0.5)
         else:
             # Plot lines with enhanced styling for better visibility
@@ -421,7 +463,7 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
                 accuracy_angles.append(angles[idx])
         
         # Plot as distinct scatter points (only if we have valid data)
-        if accuracy_values:
+        if accuracy_values and 'auroc' in metric:
             ax.scatter(accuracy_angles, accuracy_values, s=200, c='red', marker='*', 
                        edgecolors='black', linewidths=2, zorder=100, 
                        label='Ensemble Balanced Accuracy', alpha=1.0)
@@ -433,17 +475,6 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(dataset_labels, size=9, rotation=0, fontweight='medium')
     
-    # Add dataset family names (larger, further out, with background)
-    for angle, name in zip(family_angles, family_names):
-        # Add subtle background box for family names
-        # Position at 1.08 (beyond the 1.0 max AUROC but within visible range)
-        angle_positive = angle % (2 * np.pi)  # Ensure positive angle
-        ax.text(angle_positive, 1.08, name, 
-                horizontalalignment='center', verticalalignment='center',
-                size=12, fontweight='bold', transform=ax.transData,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
-                         edgecolor='gray', alpha=0.8))
-    
     # Ensure full circle is visible - CRITICAL for proper display
     ax.set_theta_offset(np.pi / 2)  # Start from top
     ax.set_theta_direction(-1)  # Clockwise
@@ -452,40 +483,57 @@ def create_radar_plot(model_results, model_name, output_path, results_dir=None, 
     # Set y-axis range based on metric
     if metric == 'auroc_f':
         y_min, y_max = 0.4, 1.0
-    else:  # augrc - inverted scale (1 to 0)
-        y_min, y_max = 1.0, 0.0
+        tick_step = 0.1
+        y_ticks = np.arange(y_min, y_max + 0.05, tick_step)
+        ax.set_yticks(y_ticks)
+        ax.set_yticklabels([f'{y:.2f}' for y in y_ticks], size=11, fontweight='medium')
+    else:  # augrc - square transform for MORE space at edges (near 0), LESS at center (near 0.30)
+        # Original tick values (what we want to display) - from center (0.30) to edge (0)
+        # Using square transform to give more visual space at edges (good performance)
+        original_ticks = np.array([0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.02, 0.01, 0.0])
+        # Transform using square (where they'll actually be positioned)
+        transformed_ticks = augrc_log_transform(original_ticks, max_display=0.30, scale_factor=50.0)
+        
+        # Set limits in transformed space (0.30 at center=0, 0 at edge=large)
+        y_min, y_max = transformed_ticks[0], transformed_ticks[-1]
+        ax.set_yticks(transformed_ticks)
+        ax.set_yticklabels([f'{y:.3f}' if y < 0.01 else f'{y:.2f}' for y in original_ticks], 
+                           size=11, fontweight='medium')
     
     ax.set_ylim(y_min, y_max)
     ax.set_rlim(y_min, y_max)  # Also set radial limits explicitly
     
-    # Set ticks every 0.1 with better styling
-    y_ticks = np.arange(y_min, y_max + 0.05, 0.1)
-    ax.set_yticks(y_ticks)
-    ax.set_yticklabels([f'{y:.1f}' for y in y_ticks], size=11, fontweight='medium')
+    # Add dataset family names (larger, further out, with background)
+    # Position based on metric scale for visibility (AFTER y_max is defined)
+    if metric == 'auroc_f':
+        label_position = 1.08
+    else:  # augrc - position beyond edge in transformed space
+        # Edge is at 0 which transforms to large value (y_max)
+        # We want to be beyond that, so add extra offset to y_max
+        label_position = y_max + 0.55  # Beyond the edge
+    
+    for angle, name in zip(family_angles, family_names):
+        # Add subtle background box for family names
+        angle_positive = angle % (2 * np.pi)  # Ensure positive angle
+        # Remove 'mnist' suffix for cleaner display
+        display_name = name.replace('mnist', '')
+        ax.text(angle_positive, label_position, display_name, 
+                horizontalalignment='center', verticalalignment='center',
+                size=12, fontweight='bold', transform=ax.transData,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                         edgecolor='gray', alpha=0.8))
+    
     metric_label = metric.upper().replace('_', ' ')
     ax.set_ylabel(metric_label, size=13, fontweight='bold', labelpad=35)
     
     # Enhanced grid
-    ax.grid(True, linewidth=0.7, alpha=0.3, linestyle='--')
+    ax.grid(True, linewidth=0.7, alpha=0.5, linestyle='--')
     ax.set_axisbelow(True)  # Grid behind data
     
-    # Title in bottom right corner (as text annotation)
-    model_display_name = model_name.replace('_', ' ').upper()
-    metric_display = metric.upper().replace('_', ' ')
-    fig.text(0.78, 0.08, f'UQ Methods Performance\n{model_display_name}\n(Mean {metric_display})',
-             ha='center', va='center', size=14, fontweight='bold',
-             bbox=dict(boxstyle='round,pad=0.8', facecolor='lightgray', 
-                      edgecolor='black', alpha=0.9, linewidth=2))
+    # Get legend handles and labels to return
+    handles, labels = ax.get_legend_handles_labels()
     
-    # Legend - positioned on right side with improved styling
-    ax.legend(loc='center left', bbox_to_anchor=(1.15, 0.5), fontsize=11,
-             frameon=True, fancybox=True, shadow=True, ncol=1)
-    
-    # Save
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"  ✓ Saved to {output_path}")
-    plt.close()
+    return handles, labels
 
 
 def generate_summary_table(results, output_path):
@@ -513,18 +561,26 @@ def generate_summary_table(results, output_path):
     print(f"\n✓ Summary table saved to {output_path}")
 
 
-def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric='auroc_f'):
+def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric='auroc_f', aggregation='mean'):
     """
-    Compute specified metric for mean aggregation of z-scored UQ methods.
+    Compute specified metric for aggregation of z-scored UQ methods.
+    
+    Computes per-fold aggregation:
+    - For each fold: z-score normalize methods -> aggregate (mean/min/max/vote) -> compute metric
+    - Average metric across all folds
+    
+    Methods used: MSR, MSR_calibrated, MLS, GPS, KNN_Raw, MC_Dropout (when available)
+    Excludes: TTA and Ensembling
     
     Args:
         results_dir: Path to results directory
         dataset_key: Dataset key (e.g., 'breastmnist_standard')
         model_name: Model name (e.g., 'resnet18', 'vit_b_16')
         metric: Metric to compute - 'auroc_f' or 'augrc'
+        aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote'
     
     Returns:
-        float: Metric value for mean aggregation, or NaN if not found
+        float: Average metric value across folds, or NaN if not found
     """
     results_dir = Path(results_dir)
     
@@ -539,7 +595,6 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
     
     # Construct npz filename pattern
     if setup == 'standard':
-        # For standard, exclude DA/DO/DADO in filename
         pattern = f"all_metrics_{dataset_name}_{model_name}_*.npz"
     else:
         pattern = f"all_metrics_{dataset_name}_{model_name}_{setup}_*.npz"
@@ -557,6 +612,7 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
         )]
     else:
         npz_files = all_npz_files
+    
     if not npz_files:
         return np.nan
     
@@ -566,32 +622,20 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
     try:
         data = np.load(npz_file, allow_pickle=True)
         
-        # Get all method keys (exclude _per_fold, _ensemble, and TTA)
-        method_keys = [k for k in data.keys() if not k.endswith('_per_fold') and not k.endswith('_ensemble') and k != 'TTA']
+        # Methods to aggregate (exclude TTA and Ensembling)
+        methods_to_use = ['MSR', 'MSR_calibrated', 'MLS', 'GPS', 'KNN_Raw', 'MC_Dropout']
+        per_fold_keys = [f'{m}_per_fold' for m in methods_to_use]
         
-        if not method_keys:
+        # Check which per_fold keys exist (MC_Dropout may not be available)
+        available_keys = [k for k in per_fold_keys if k in data.keys()]
+        if not available_keys:
             return np.nan
         
-        # Z-score normalize each method and compute mean
-        normalized_arrays = []
-        for method_name in method_keys:
-            uncertainties = data[method_name]
-            mean_val = np.mean(uncertainties)
-            std_val = np.std(uncertainties)
-            
-            if std_val > 0:
-                z_score = (uncertainties - mean_val) / std_val
-                normalized_arrays.append(z_score)
+        # Get number of folds
+        first_key = available_keys[0]
+        num_folds = len(data[first_key])
         
-        if not normalized_arrays:
-            return np.nan
-        
-        # Mean aggregation
-        stacked = np.stack(normalized_arrays, axis=0)
-        aggregated = np.mean(stacked, axis=0)
-        
-        # Get labels from cached test results (not from JSON)
-        # Look for the corresponding cache file
+        # Get labels from cached test results
         cache_dir = results_dir / 'cache'
         if setup == 'standard':
             cache_pattern = f"{dataset_name}_{model_name}_test_results.npz"
@@ -599,51 +643,91 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
             cache_pattern = f"{dataset_name}_{model_name}_{setup}_test_results.npz"
         
         cache_file_path = cache_dir / cache_pattern
-        
         if not cache_file_path.exists():
             return np.nan
         
         cache_data = np.load(cache_file_path, allow_pickle=True)
         
-        # Build failure labels from correct/incorrect indices
-        correct_idx = cache_data['correct_idx']
-        incorrect_idx = cache_data['incorrect_idx']
-        n_samples = len(correct_idx) + len(incorrect_idx)
+        # Get per-fold data
+        per_fold_correct = cache_data['per_fold_correct_idx']
+        per_fold_incorrect = cache_data['per_fold_incorrect_idx']
         
-        failure_labels = np.zeros(n_samples)
-        failure_labels[incorrect_idx] = 1  # Mark failures as 1
+        # For AUGRC, we also need predictions and labels
+        if metric == 'augrc':
+            per_fold_predictions = cache_data['per_fold_predictions']
+            y_true = cache_data['y_true']
         
-        if len(failure_labels) != len(aggregated):
+        # Compute metric for each fold
+        fold_metrics = []
+        
+        for fold_idx in range(num_folds):
+            # Z-score normalize each method for this fold
+            normalized_arrays = []
+            
+            for key in available_keys:
+                uncertainties = data[key][fold_idx]
+                mean_val = np.mean(uncertainties)
+                std_val = np.std(uncertainties)
+                
+                if std_val > 0:
+                    z_score = (uncertainties - mean_val) / std_val
+                    normalized_arrays.append(z_score)
+            
+            if not normalized_arrays:
+                continue
+            
+            # Apply aggregation strategy
+            stacked = np.stack(normalized_arrays, axis=0)
+            if aggregation == 'mean':
+                aggregated = np.mean(stacked, axis=0)
+            elif aggregation == 'min':
+                aggregated = np.min(stacked, axis=0)
+            elif aggregation == 'max':
+                aggregated = np.max(stacked, axis=0)
+            elif aggregation == 'vote':
+                # Majority vote: count how many methods have z-score > 0
+                aggregated = np.sum(stacked > 0, axis=0) / len(normalized_arrays)
+            else:
+                continue
+            
+            # Get indices for this fold
+            correct_idx = per_fold_correct[fold_idx]
+            incorrect_idx = per_fold_incorrect[fold_idx]
+            
+            # Build failure labels
+            n_samples = len(correct_idx) + len(incorrect_idx)
+            failure_labels = np.zeros(n_samples)
+            failure_labels[incorrect_idx] = 1
+            
+            if len(failure_labels) != len(aggregated):
+                continue
+            
+            # Compute metric for this fold
+            if metric == 'auroc_f':
+                from sklearn.metrics import roc_auc_score
+                fold_metric = roc_auc_score(failure_labels, aggregated)
+            elif metric == 'augrc':
+                # Import compute_augrc from evaluation.py
+                import sys
+                sys.path.insert(0, str(results_dir.parent))
+                from FailCatcher.evaluation.evaluation import compute_augrc
+                
+                # Get predictions and labels for this fold
+                predictions = per_fold_predictions[fold_idx]
+                labels = y_true  # Full dataset labels
+                
+                # compute_augrc returns (augrc_value, metrics_dict)
+                fold_metric, _ = compute_augrc(aggregated, predictions, labels)
+            else:
+                continue
+            
+            fold_metrics.append(fold_metric)
+        
+        if not fold_metrics:
             return np.nan
         
-        # Compute specified metric
-        if metric == 'auroc_f':
-            from sklearn.metrics import roc_auc_score
-            result = roc_auc_score(failure_labels, aggregated)
-        elif metric == 'augrc':
-            # Compute AUGRC: Area Under Gain-Risk Curve
-            # Sort by uncertainty (descending)
-            sorted_indices = np.argsort(-aggregated)
-            sorted_labels = failure_labels[sorted_indices]
-            
-            # Compute cumulative failure rate vs coverage
-            n_total = len(sorted_labels)
-            cumulative_failures = np.cumsum(sorted_labels)
-            coverage = np.arange(1, n_total + 1) / n_total
-            failure_rate = cumulative_failures / np.arange(1, n_total + 1)
-            
-            # Baseline is random: expected failure rate at each coverage
-            baseline_rate = np.mean(failure_labels)
-            
-            # Gain = baseline - actual failure rate (positive when we catch more failures)
-            gain = baseline_rate - failure_rate
-            
-            # AUGRC: area under the gain curve (use trapezoidal rule)
-            result = np.trapz(gain, coverage)
-        else:
-            return np.nan
-        
-        return result
+        # Average across folds
+        return np.mean(fold_metrics)
         
     except Exception as e:
         import traceback
@@ -756,11 +840,20 @@ def aggregate_uq_methods(npz_path, aggregation='mean', methods=None, output_path
     return result
 
 
-def main():
-    """Main function to generate radar plots from benchmark results."""
+def main(aggregation='mean'):
+    """Main function to generate combined 2x2 radar plots from benchmark results.
+    
+    Creates one figure with 4 subplots:
+    - Top row: AUROC_f (ResNet18 left, ViT right)
+    - Bottom row: AUGRC (ResNet18 left, ViT right)
+    
+    Args:
+        aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote'
+    """
     
     print("=" * 80)
     print("UQ Benchmark Radar Plot Generator")
+    print(f"Aggregation: {aggregation.upper()}")
     print("=" * 80)
     
     # Get the workspace root (3 levels up from script: utils -> medMNIST -> benchmarks -> UQ_Toolbox)
@@ -778,29 +871,94 @@ def main():
     output_dir = script_dir / 'radar_plots'
     output_dir.mkdir(exist_ok=True)
     
-    # Generate plots for both AUROC_f and AUGRC
-    for metric in ['auroc_f', 'augrc']:
-        metric_display = metric.upper().replace('_', ' ')
-        print(f"\n{'='*80}")
-        print(f"Generating {metric_display} plots...")
-        print(f"{'='*80}")
-        
-        # Parse results for this metric
-        results = parse_results_directory(id_results_dir, metric=metric)
-        
-        if not results:
-            print(f"\n⚠️  No {metric_display} results found!")
-            continue
-        
-        # Generate radar plot for each model
-        for model_name, model_results in results.items():
-            output_path = output_dir / f'radar_plot_{model_name}_{metric}.png'
-            create_radar_plot(model_results, model_name, output_path, 
-                            results_dir=results_dir, runs_dir=runs_dir, metric=metric)
+    # Parse results for both metrics
+    results_auroc = parse_results_directory(id_results_dir, metric='auroc_f')
+    results_augrc = parse_results_directory(id_results_dir, metric='augrc')
+    
+    if not results_auroc and not results_augrc:
+        print(f"\n⚠️  No results found!")
+        return
+    
+    # Create combined 2x2 figure
+    fig = plt.figure(figsize=(24, 24))
+    
+    # Define subplot positions: [left, bottom, width, height]
+    # Top row (AUROC_f): ResNet18 left, ViT right
+    # Bottom row (AUGRC): ResNet18 left, ViT right
+    axes = [
+        fig.add_subplot(2, 2, 1, projection='polar'),  # Top-left: ResNet18 AUROC_f
+        fig.add_subplot(2, 2, 2, projection='polar'),  # Top-right: ViT AUROC_f
+        fig.add_subplot(2, 2, 3, projection='polar'),  # Bottom-left: ResNet18 AUGRC
+        fig.add_subplot(2, 2, 4, projection='polar'),  # Bottom-right: ViT AUGRC
+    ]
+    
+    model_names = ['resnet18', 'vit_b_16']
+    metrics = ['auroc_f', 'augrc']
+    results_map = {'auroc_f': results_auroc, 'augrc': results_augrc}
+    
+    all_handles = []
+    all_labels = []
+    
+    # Generate each subplot
+    for idx, (row, metric) in enumerate([(0, 'auroc_f'), (1, 'augrc')]):
+        for col, model_name in enumerate(model_names):
+            ax_idx = row * 2 + col
+            ax = axes[ax_idx]
+            
+            results = results_map[metric]
+            if not results or model_name not in results:
+                continue
+            
+            model_results = results[model_name]
+            
+            print(f"\n{'='*80}")
+            print(f"Generating {metric.upper()} plot for {model_name}...")
+            print(f"{'='*80}")
+            
+            # Generate plot on this axis (modified create_radar_plot to return handles/labels)
+            handles, labels = create_radar_plot_on_axis(
+                ax, model_results, model_name, 
+                results_dir=results_dir, runs_dir=runs_dir, 
+                metric=metric, aggregation=aggregation
+            )
+            
+            # Collect legend info from first subplot only
+            if ax_idx == 0:
+                all_handles = handles
+                all_labels = labels
+            
+            # Add subplot title
+            model_display = model_name.replace('_', ' ').upper()
+            metric_display = 'AUROC F' if metric == 'auroc_f' else 'AUGRC'
+            ax.set_title(f'{model_display}\nPer-fold {aggregation.capitalize()} {metric_display}',
+                        fontsize=16, fontweight='bold', pad=40, x=-0.1, ha='left')
+    
+    # Move "Mean_Aggregation" to bottom of legend
+    if 'Mean_Aggregation' in all_labels:
+        idx = all_labels.index('Mean_Aggregation')
+        all_labels.append(all_labels.pop(idx))
+        all_handles.append(all_handles.pop(idx))
+    
+    # Add shared legend at the bottom center
+    fig.legend(all_handles, all_labels, loc='lower center', ncol=5, 
+              fontsize=14, frameon=True, bbox_to_anchor=(0.5, -0.02))
+    
+    # Add main title
+    fig.suptitle('CSF Performances - In Distribution', fontsize=24, fontweight='bold', y=0.98)
+    
+    # Adjust spacing
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+    
+    # Save combined figure
+    output_path = output_dir / f'radar_plots_combined_{aggregation}.png'
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n✓ Combined plot saved to {output_path}")
+    
+    plt.close(fig)
     
     # Generate summary table
     summary_path = output_dir / 'results_summary.csv'
-    generate_summary_table(results, summary_path)
+    generate_summary_table(results_auroc if results_auroc else results_augrc, summary_path)
     
     print("\n" + "=" * 80)
     print("✓ All plots generated successfully!")
@@ -810,27 +968,13 @@ def main():
 if __name__ == '__main__':
     import sys
     
-    # If first argument is 'aggregate', run aggregation demo
-    if len(sys.argv) > 1 and sys.argv[1] == 'aggregate':
-        if len(sys.argv) < 3:
-            print("Usage: python generate_radar_plots.py aggregate <npz_file> [mean|max|min|vote]")
-            print("\nExample:")
-            print("  python generate_radar_plots.py aggregate ../../uq_benchmark_results/all_metrics_breastmnist_20251128_192502.npz mean")
-            sys.exit(1)
-        
-        npz_file = sys.argv[2]
-        aggregation = sys.argv[3] if len(sys.argv) > 3 else 'mean'
-        
-        output_path = Path(npz_file).parent / f"aggregated_{aggregation}_{Path(npz_file).stem}.npz"
-        
-        result = aggregate_uq_methods(npz_file, aggregation=aggregation, output_path=output_path)
-        
-        print(f"\n{'='*80}")
-        print(f"Aggregation complete!")
-        print(f"  Methods used: {', '.join(result['methods_used'])}")
-        print(f"  Strategy: {aggregation}")
-        print(f"  Output saved to: {output_path}")
-        print(f"{'='*80}")
-    else:
-        # Normal radar plot generation
-        main()
+    # Usage: python generate_radar_plots.py [mean|min|max|vote]
+    aggregation = sys.argv[1] if len(sys.argv) > 1 else 'mean'
+    
+    if aggregation not in ['mean', 'min', 'max', 'vote']:
+        print(f"Unknown aggregation: {aggregation}")
+        print("Usage: python generate_radar_plots.py [mean|min|max|vote]")
+        sys.exit(1)
+    
+    # Generate radar plots with specified aggregation
+    main(aggregation=aggregation)
