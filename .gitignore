@@ -1,7 +1,7 @@
 **/uq_benchmark_results/
 **/ISIC_2018/
 **/AMOS_2022/amos22
-**/AMOS_2022/**.npz
+**/AMOS_2022/amos_external_test_224.npz
 **/runs/**/**.pt
 **/runs/**/figs
 **/models/
