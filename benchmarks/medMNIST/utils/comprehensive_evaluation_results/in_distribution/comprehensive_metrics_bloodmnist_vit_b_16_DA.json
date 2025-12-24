@@ -1,0 +1,52 @@
+{
+  "dataset": "bloodmnist",
+  "model": "vit_b_16",
+  "setup": "DA",
+  "num_classes": 8,
+  "task": "multi-class",
+  "per_fold_metrics": [
+    {
+      "accuracy": 0.9897690733703596,
+      "balanced_accuracy": 0.9905058861169593,
+      "auc": 0.9994426120854186,
+      "oracle_aurc": 5.233592985054279e-05,
+      "oracle_augrc": 5.233592985054279e-05
+    },
+    {
+      "accuracy": 0.9880152002338497,
+      "balanced_accuracy": 0.9900318283650447,
+      "auc": 0.9993493014120582,
+      "oracle_aurc": 7.181771271735815e-05,
+      "oracle_augrc": 7.181771271735815e-05
+    },
+    {
+      "accuracy": 0.9853843905290851,
+      "balanced_accuracy": 0.985696312541687,
+      "auc": 0.9994856047179258,
+      "oracle_aurc": 0.00010680802010314854,
+      "oracle_augrc": 0.00010680802010314854
+    },
+    {
+      "accuracy": 0.9868459514761766,
+      "balanced_accuracy": 0.9883301623366008,
+      "auc": 0.9994674763584696,
+      "oracle_aurc": 8.651449628355033e-05,
+      "oracle_augrc": 8.651449628355033e-05
+    },
+    {
+      "accuracy": 0.9862613270973399,
+      "balanced_accuracy": 0.9867454011712193,
+      "auc": 0.9993466546568939,
+      "oracle_aurc": 9.437556656314298e-05,
+      "oracle_augrc": 9.437556656314298e-05
+    }
+  ],
+  "ensemble_metrics": {
+    "accuracy": 0.9903536977491961,
+    "balanced_accuracy": 0.9906288083349519,
+    "auc": 0.9995350787792066,
+    "oracle_aurc": 4.6525573556931935e-05,
+    "oracle_augrc": 4.6525573556931935e-05
+  },
+  "timestamp": "2025-12-23T23:18:56.210181"
+}

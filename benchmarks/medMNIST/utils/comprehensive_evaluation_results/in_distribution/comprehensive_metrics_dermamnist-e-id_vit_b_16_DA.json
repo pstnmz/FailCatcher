@@ -1,0 +1,52 @@
+{
+  "dataset": "dermamnist-e-id",
+  "model": "vit_b_16",
+  "setup": "DA",
+  "num_classes": 7,
+  "task": "multi-class",
+  "per_fold_metrics": [
+    {
+      "accuracy": 0.7673640167364016,
+      "balanced_accuracy": 0.6838169671400179,
+      "auc": 0.9531010779252644,
+      "oracle_aurc": 0.02705975035451061,
+      "oracle_augrc": 0.02705975035451061
+    },
+    {
+      "accuracy": 0.7472803347280335,
+      "balanced_accuracy": 0.6674001449564078,
+      "auc": 0.9457512079508001,
+      "oracle_aurc": 0.0319336146075874,
+      "oracle_augrc": 0.0319336146075874
+    },
+    {
+      "accuracy": 0.7087866108786611,
+      "balanced_accuracy": 0.6630551449332478,
+      "auc": 0.9466522660602383,
+      "oracle_aurc": 0.042402619001768165,
+      "oracle_augrc": 0.042402619001768165
+    },
+    {
+      "accuracy": 0.7556485355648536,
+      "balanced_accuracy": 0.7286143086500347,
+      "auc": 0.9526637793714076,
+      "oracle_aurc": 0.02985381908580032,
+      "oracle_augrc": 0.02985381908580032
+    },
+    {
+      "accuracy": 0.6878661087866109,
+      "balanced_accuracy": 0.7255314155450944,
+      "auc": 0.9429011285053249,
+      "oracle_aurc": 0.04871378302200591,
+      "oracle_augrc": 0.04871378302200591
+    }
+  ],
+  "ensemble_metrics": {
+    "accuracy": 0.7539748953974895,
+    "balanced_accuracy": 0.7129459299441576,
+    "auc": 0.9569171469424719,
+    "oracle_aurc": 0.030264176047338113,
+    "oracle_augrc": 0.030264176047338113
+  },
+  "timestamp": "2025-12-23T22:10:54.109931"
+}

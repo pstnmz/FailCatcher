@@ -1,0 +1,52 @@
+{
+  "dataset": "amos22",
+  "model": "vit_b_16",
+  "setup": "DO",
+  "num_classes": 11,
+  "task": "multi-class",
+  "per_fold_metrics": [
+    {
+      "accuracy": 0.6852990497484628,
+      "balanced_accuracy": 0.6861383084055976,
+      "auc": NaN,
+      "oracle_aurc": 0.04951834404461025,
+      "oracle_augrc": 0.04951834404461025
+    },
+    {
+      "accuracy": 0.6987143655673561,
+      "balanced_accuracy": 0.6996633520115116,
+      "auc": NaN,
+      "oracle_aurc": 0.045386516757740365,
+      "oracle_augrc": 0.045386516757740365
+    },
+    {
+      "accuracy": 0.6769144773616546,
+      "balanced_accuracy": 0.6776542832945768,
+      "auc": NaN,
+      "oracle_aurc": 0.05219212746924641,
+      "oracle_augrc": 0.05219212746924641
+    },
+    {
+      "accuracy": 0.6741196198993852,
+      "balanced_accuracy": 0.6750265211095176,
+      "auc": NaN,
+      "oracle_aurc": 0.053099011067260594,
+      "oracle_augrc": 0.053099011067260594
+    },
+    {
+      "accuracy": 0.6852990497484628,
+      "balanced_accuracy": 0.6860541800014058,
+      "auc": NaN,
+      "oracle_aurc": 0.04951834404461025,
+      "oracle_augrc": 0.04951834404461025
+    }
+  ],
+  "ensemble_metrics": {
+    "accuracy": 0.6998323085522639,
+    "balanced_accuracy": 0.7006439884356847,
+    "auc": NaN,
+    "oracle_aurc": 0.04505032149453166,
+    "oracle_augrc": 0.04505032149453166
+  },
+  "timestamp": "2025-12-24T16:51:43.636937"
+}

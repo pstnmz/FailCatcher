@@ -1,0 +1,52 @@
+{
+  "dataset": "breastmnist",
+  "model": "resnet18",
+  "setup": "DADO",
+  "num_classes": 2,
+  "task": "binary-class",
+  "per_fold_metrics": [
+    {
+      "accuracy": 0.8525641025641025,
+      "balanced_accuracy": 0.8239348370927317,
+      "auc": 0.9081035923141186,
+      "oracle_aurc": 0.010868671926364239,
+      "oracle_augrc": 0.010868671926364239
+    },
+    {
+      "accuracy": 0.8205128205128205,
+      "balanced_accuracy": 0.7794486215538847,
+      "auc": 0.8642439431913117,
+      "oracle_aurc": 0.016107823800131496,
+      "oracle_augrc": 0.016107823800131496
+    },
+    {
+      "accuracy": 0.75,
+      "balanced_accuracy": 0.7462406015037595,
+      "auc": 0.8412698412698414,
+      "oracle_aurc": 0.03125,
+      "oracle_augrc": 0.03125
+    },
+    {
+      "accuracy": 0.8589743589743589,
+      "balanced_accuracy": 0.8433583959899749,
+      "auc": 0.9335839598997493,
+      "oracle_aurc": 0.00994411571334649,
+      "oracle_augrc": 0.00994411571334649
+    },
+    {
+      "accuracy": 0.8397435897435898,
+      "balanced_accuracy": 0.7700501253132832,
+      "auc": 0.9149958228905598,
+      "oracle_aurc": 0.012841058514135435,
+      "oracle_augrc": 0.012841058514135435
+    }
+  ],
+  "ensemble_metrics": {
+    "accuracy": 0.8910256410256411,
+    "balanced_accuracy": 0.850250626566416,
+    "auc": 0.9235588972431079,
+    "oracle_aurc": 0.00593770545693622,
+    "oracle_augrc": 0.00593770545693622
+  },
+  "timestamp": "2025-12-23T23:02:58.837520"
+}

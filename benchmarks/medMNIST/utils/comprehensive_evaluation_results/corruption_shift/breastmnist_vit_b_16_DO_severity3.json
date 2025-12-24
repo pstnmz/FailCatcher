@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.8141025641025641,
+    "balanced_accuracy": 0.8276942355889725,
+    "auc": 0.9053884711779449,
+    "oracle_aurc": 0.017278928336620647,
+    "oracle_augrc": 0.017278928336620647,
+    "n_correct": 127,
+    "n_incorrect": 29,
+    "n_total": 156
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.8012820512820513,
+      "balanced_accuracy": 0.818922305764411,
+      "auc": 0.8930659983291562,
+      "oracle_aurc": 0.01974441157133464,
+      "oracle_augrc": 0.01974441157133464,
+      "n_correct": 125,
+      "n_incorrect": 31,
+      "n_total": 156
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.7243589743589743,
+      "balanced_accuracy": 0.7738095238095237,
+      "auc": 0.8703007518796992,
+      "oracle_aurc": 0.03798898750821828,
+      "oracle_augrc": 0.03798898750821828,
+      "n_correct": 113,
+      "n_incorrect": 43,
+      "n_total": 156
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.7564102564102564,
+      "balanced_accuracy": 0.7957393483709273,
+      "auc": 0.889515455304929,
+      "oracle_aurc": 0.02966798159105852,
+      "oracle_augrc": 0.02966798159105852,
+      "n_correct": 118,
+      "n_incorrect": 38,
+      "n_total": 156
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.8589743589743589,
+      "balanced_accuracy": 0.8283208020050126,
+      "auc": 0.9074770258980785,
+      "oracle_aurc": 0.00994411571334649,
+      "oracle_augrc": 0.00994411571334649,
+      "n_correct": 134,
+      "n_incorrect": 22,
+      "n_total": 156
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.7884615384615384,
+      "balanced_accuracy": 0.7575187969924813,
+      "auc": 0.8819966583124478,
+      "oracle_aurc": 0.022374260355029593,
+      "oracle_augrc": 0.022374260355029593,
+      "n_correct": 123,
+      "n_incorrect": 33,
+      "n_total": 156
+    }
+  ],
+  "metadata": {
+    "dataset": "breastmnist",
+    "model": "vit_b_16",
+    "setup": "DO",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 2,
+    "task": "binary-class",
+    "timestamp": "2025-12-24 11:08:50"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "dataset": "octmnist",
+  "model": "resnet18",
+  "setup": "DO",
+  "num_classes": 4,
+  "task": "multi-class",
+  "per_fold_metrics": [
+    {
+      "accuracy": 0.899,
+      "balanced_accuracy": 0.899,
+      "auc": 0.9904886666666666,
+      "oracle_aurc": 0.005100499999999998,
+      "oracle_augrc": 0.005100499999999998
+    },
+    {
+      "accuracy": 0.943,
+      "balanced_accuracy": 0.943,
+      "auc": 0.9893099999999999,
+      "oracle_aurc": 0.001624500000000003,
+      "oracle_augrc": 0.001624500000000003
+    },
+    {
+      "accuracy": 0.929,
+      "balanced_accuracy": 0.9289999999999999,
+      "auc": 0.987436,
+      "oracle_aurc": 0.0025204999999999967,
+      "oracle_augrc": 0.0025204999999999967
+    },
+    {
+      "accuracy": 0.902,
+      "balanced_accuracy": 0.9019999999999999,
+      "auc": 0.9828386666666665,
+      "oracle_aurc": 0.004801999999999997,
+      "oracle_augrc": 0.004801999999999997
+    },
+    {
+      "accuracy": 0.912,
+      "balanced_accuracy": 0.9119999999999999,
+      "auc": 0.9925533333333334,
+      "oracle_aurc": 0.003871999999999997,
+      "oracle_augrc": 0.003871999999999997
+    }
+  ],
+  "ensemble_metrics": {
+    "accuracy": 0.931,
+    "balanced_accuracy": 0.931,
+    "auc": 0.9929866666666667,
+    "oracle_aurc": 0.0023804999999999968,
+    "oracle_augrc": 0.0023804999999999968
+  },
+  "timestamp": "2025-12-24T01:05:08.963319"
+}

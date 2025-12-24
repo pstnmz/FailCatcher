@@ -1,0 +1,70 @@
+{
+  "ensemble": {
+    "accuracy": 0.6929185969556585,
+    "balanced_accuracy": 0.5712072062655842,
+    "auc": 0.9123778953566005,
+    "oracle_aurc": 0.047149494047840655,
+    "oracle_augrc": 0.047149494047840655,
+    "n_correct": 1047,
+    "n_incorrect": 464,
+    "n_total": 1511
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.6829913964262078,
+      "balanced_accuracy": 0.54621384098329,
+      "auc": 0.9022075692501398,
+      "oracle_aurc": 0.05024722736990288,
+      "oracle_augrc": 0.05024722736990288,
+      "n_total": 1511
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.6518861681005956,
+      "balanced_accuracy": 0.5149292707332055,
+      "auc": 0.8924757696518901,
+      "oracle_aurc": 0.06059161997984338,
+      "oracle_augrc": 0.06059161997984338,
+      "n_total": 1511
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.6472534745201853,
+      "balanced_accuracy": 0.5320807577699204,
+      "auc": 0.9016469738958817,
+      "oracle_aurc": 0.06221505561904077,
+      "oracle_augrc": 0.06221505561904077,
+      "n_total": 1511
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.6657842488418266,
+      "balanced_accuracy": 0.5448296951801732,
+      "auc": 0.9023844344184784,
+      "oracle_aurc": 0.05585008416111103,
+      "oracle_augrc": 0.05585008416111103,
+      "n_total": 1511
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.6406353408338848,
+      "balanced_accuracy": 0.5802894690607696,
+      "auc": 0.8918354151815657,
+      "oracle_aurc": 0.06457147912878905,
+      "oracle_augrc": 0.06457147912878905,
+      "n_total": 1511
+    }
+  ],
+  "metadata": {
+    "dataset": "dermamnist-e",
+    "model": "vit_b_16",
+    "setup": "DA",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 7,
+    "task": "multi-class",
+    "timestamp": "2025-12-24 15:52:49"
+  }
+}

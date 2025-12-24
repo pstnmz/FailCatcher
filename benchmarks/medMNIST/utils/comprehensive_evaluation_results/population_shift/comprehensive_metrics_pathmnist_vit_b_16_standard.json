@@ -1,0 +1,52 @@
+{
+  "dataset": "pathmnist",
+  "model": "vit_b_16",
+  "setup": "standard",
+  "num_classes": 9,
+  "task": "multi-class",
+  "per_fold_metrics": [
+    {
+      "accuracy": 0.9632311977715877,
+      "balanced_accuracy": 0.9484598713232644,
+      "auc": 0.9967878412036496,
+      "oracle_aurc": 0.0006759724086560479,
+      "oracle_augrc": 0.0006759724086560479
+    },
+    {
+      "accuracy": 0.96991643454039,
+      "balanced_accuracy": 0.9623894003411279,
+      "auc": 0.9981534891461157,
+      "oracle_aurc": 0.00045251045538131977,
+      "oracle_augrc": 0.00045251045538131977
+    },
+    {
+      "accuracy": 0.9651810584958217,
+      "balanced_accuracy": 0.9549942186107818,
+      "auc": 0.9982284649309757,
+      "oracle_aurc": 0.0006061793437356952,
+      "oracle_augrc": 0.0006061793437356952
+    },
+    {
+      "accuracy": 0.9642061281337048,
+      "balanced_accuracy": 0.9537364035984821,
+      "auc": 0.9964484367194165,
+      "oracle_aurc": 0.0006406006315903808,
+      "oracle_augrc": 0.0006406006315903808
+    },
+    {
+      "accuracy": 0.9655988857938719,
+      "balanced_accuracy": 0.952755772683606,
+      "auc": 0.998496344744259,
+      "oracle_aurc": 0.0005917183293115352,
+      "oracle_augrc": 0.0005917183293115352
+    }
+  ],
+  "ensemble_metrics": {
+    "accuracy": 0.9766016713091922,
+    "balanced_accuracy": 0.9668548352455999,
+    "auc": 0.9984202654989469,
+    "oracle_aurc": 0.0002737408927615403,
+    "oracle_augrc": 0.0002737408927615403
+  },
+  "timestamp": "2025-12-24T01:40:56.425898"
+}

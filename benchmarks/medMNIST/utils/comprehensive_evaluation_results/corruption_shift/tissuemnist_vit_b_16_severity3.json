@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.6031937394247039,
+    "balanced_accuracy": 0.5946302765060043,
+    "auc": 0.9120278755174627,
+    "oracle_aurc": 0.0787276042158749,
+    "oracle_augrc": 0.0787276042158749,
+    "n_correct": 28519,
+    "n_incorrect": 18761,
+    "n_total": 47280
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.5855329949238579,
+      "balanced_accuracy": 0.5658640870779639,
+      "auc": 0.903473022728202,
+      "oracle_aurc": 0.0858914491483934,
+      "oracle_augrc": 0.0858914491483934,
+      "n_correct": 27684,
+      "n_incorrect": 19596,
+      "n_total": 47280
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.590334179357022,
+      "balanced_accuracy": 0.5668595118861748,
+      "auc": 0.902383546994693,
+      "oracle_aurc": 0.0839130423015423,
+      "oracle_augrc": 0.0839130423015423,
+      "n_correct": 27911,
+      "n_incorrect": 19369,
+      "n_total": 47280
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.5927453468697124,
+      "balanced_accuracy": 0.573998253386971,
+      "auc": 0.9042808419300379,
+      "oracle_aurc": 0.08292817624813545,
+      "oracle_augrc": 0.08292817624813545,
+      "n_correct": 28025,
+      "n_incorrect": 19255,
+      "n_total": 47280
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.5503595600676819,
+      "balanced_accuracy": 0.5649038348779547,
+      "auc": 0.894021898131228,
+      "oracle_aurc": 0.10108826261126426,
+      "oracle_augrc": 0.10108826261126426,
+      "n_correct": 26021,
+      "n_incorrect": 21259,
+      "n_total": 47280
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.563917089678511,
+      "balanced_accuracy": 0.5603519389797234,
+      "auc": 0.8989783031070301,
+      "oracle_aurc": 0.09508415233722993,
+      "oracle_augrc": 0.09508415233722993,
+      "n_correct": 26662,
+      "n_incorrect": 20618,
+      "n_total": 47280
+    }
+  ],
+  "metadata": {
+    "dataset": "tissuemnist",
+    "model": "vit_b_16",
+    "setup": "standard",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 8,
+    "task": "multi-class",
+    "timestamp": "2025-12-24 12:15:47"
+  }
+}

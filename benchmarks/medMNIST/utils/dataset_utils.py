@@ -453,8 +453,10 @@ class CorruptedDataset(Dataset):
         # Set random seed for reproducibility if provided
         if seed is not None:
             self.rng = random.Random(seed)
+            self.seed = seed
         else:
             self.rng = random.Random()
+            self.seed = None
         
     def __len__(self):
         return len(self.base_dataset)
@@ -467,7 +469,11 @@ class CorruptedDataset(Dataset):
         if self.random_corruption:
             # Use index combined with global seed for deterministic per-sample selection
             # This ensures same index always gets same corruption across runs
-            sample_rng = random.Random(idx)
+            # CRITICAL: Combine seed with index for deterministic but varied per-sample selection
+            if self.seed is not None:
+                sample_rng = random.Random(self.seed + idx)
+            else:
+                sample_rng = random.Random(idx)
             return sample_rng.choice(self.corruption_funcs)
         else:
             # Cycle through corruptions
@@ -484,6 +490,15 @@ class CorruptedDataset(Dataset):
         # Select corruption for this sample
         corruption_func = self._select_corruption(idx)
         
+        # Store original normalization info BEFORE converting to numpy
+        is_normalized = False
+        original_min = None
+        original_max = None
+        if isinstance(img, torch.Tensor):
+            original_min = img.min().item()
+            original_max = img.max().item()
+            is_normalized = (original_min < 0) or (original_max <= 1.0)
+        
         # Convert tensor to PIL Image for corruption
         # Handle both normalized and unnormalized inputs
         if isinstance(img, torch.Tensor):
@@ -495,9 +510,9 @@ class CorruptedDataset(Dataset):
                 img_np = np.transpose(img_np, (1, 2, 0))
             
             # Denormalize to [0, 255]
-            if img_np.min() < 0:  # Normalized to [-1, 1]
+            if original_min < 0:  # Normalized to [-1, 1]
                 img_np = ((img_np + 1) / 2 * 255).astype(np.uint8)
-            elif img_np.max() <= 1.0:  # Normalized to [0, 1]
+            elif original_max <= 1.0:  # Normalized to [0, 1]
                 img_np = (img_np * 255).astype(np.uint8)
             else:  # Already in [0, 255]
                 img_np = img_np.astype(np.uint8)
@@ -515,7 +530,15 @@ class CorruptedDataset(Dataset):
         else:
             pil_img = img
         
-        # Apply corruption
+        # Apply corruption with deterministic seed
+        # Set all random seeds to ensure reproducibility
+        # Combine base seed with sample index for per-sample determinism
+        if self.seed is not None:
+            corruption_seed = self.seed + idx
+            np.random.seed(corruption_seed)
+            random.seed(corruption_seed)
+            torch.manual_seed(corruption_seed)
+        
         corrupted_pil = corruption_func.apply(pil_img, severity=self.severity)
         
         # Convert back to tensor with same format as original
@@ -528,11 +551,13 @@ class CorruptedDataset(Dataset):
         if corrupted_tensor.ndim == 3:
             corrupted_tensor = corrupted_tensor.permute(2, 0, 1)  # HWC -> CHW
         
-        # Renormalize to match original preprocessing
-        if isinstance(img, torch.Tensor) and img.min() < 0:
-            corrupted_tensor = (corrupted_tensor / 255.0) * 2 - 1  # [0, 255] -> [-1, 1]
-        elif isinstance(img, torch.Tensor) and img.max() <= 1.0:
-            corrupted_tensor = corrupted_tensor / 255.0  # [0, 255] -> [0, 1]
+        # Renormalize to match original preprocessing (using stored values)
+        if isinstance(img, torch.Tensor):
+            if original_min < 0:  # Was in [-1, 1]
+                corrupted_tensor = (corrupted_tensor / 255.0) * 2 - 1  # [0, 255] -> [-1, 1]
+            elif original_max <= 1.0:  # Was in [0, 1]
+                corrupted_tensor = corrupted_tensor / 255.0  # [0, 255] -> [0, 1]
+            # else: keep in [0, 255]
         
         result = (corrupted_tensor, label)
         
@@ -602,6 +627,13 @@ def apply_random_corruptions(dataset, flag, severity, cache=True, seed=42):
     
     corruption_funcs = list(corruptions.values())
     corruption_names = list(corruptions.keys())
+    
+    # Fix medmnistc bug: Some corruption objects (ImpulseNoise, ShotNoise) don't have 'rng' attribute
+    # Add it if missing to avoid AttributeError
+    import numpy as np
+    for corruption_func in corruption_funcs:
+        if not hasattr(corruption_func, 'rng'):
+            corruption_func.rng = np.random.default_rng(seed if seed is not None else 42)
     
     print(f"  ✓ Applying random corruptions (severity={severity}) to {flag} dataset")
     print(f"    Available corruptions ({len(corruption_names)}): {', '.join(corruption_names)}")

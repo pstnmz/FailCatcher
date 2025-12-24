@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.664,
+    "balanced_accuracy": 0.664,
+    "auc": 0.9153946666666667,
+    "oracle_aurc": 0.05644799999999999,
+    "oracle_augrc": 0.05644799999999999,
+    "n_correct": 664,
+    "n_incorrect": 336,
+    "n_total": 1000
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.596,
+      "balanced_accuracy": 0.5960000000000001,
+      "auc": 0.8602120000000001,
+      "oracle_aurc": 0.08160800000000001,
+      "oracle_augrc": 0.08160800000000001,
+      "n_correct": 596,
+      "n_incorrect": 404,
+      "n_total": 1000
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.64,
+      "balanced_accuracy": 0.64,
+      "auc": 0.8949533333333333,
+      "oracle_aurc": 0.0648,
+      "oracle_augrc": 0.0648,
+      "n_correct": 640,
+      "n_incorrect": 360,
+      "n_total": 1000
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.662,
+      "balanced_accuracy": 0.6619999999999999,
+      "auc": 0.8853493333333333,
+      "oracle_aurc": 0.05712199999999999,
+      "oracle_augrc": 0.05712199999999999,
+      "n_correct": 662,
+      "n_incorrect": 338,
+      "n_total": 1000
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.632,
+      "balanced_accuracy": 0.6320000000000001,
+      "auc": 0.8663893333333333,
+      "oracle_aurc": 0.067712,
+      "oracle_augrc": 0.067712,
+      "n_correct": 632,
+      "n_incorrect": 368,
+      "n_total": 1000
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.566,
+      "balanced_accuracy": 0.566,
+      "auc": 0.829984,
+      "oracle_aurc": 0.09417800000000003,
+      "oracle_augrc": 0.09417800000000003,
+      "n_correct": 566,
+      "n_incorrect": 434,
+      "n_total": 1000
+    }
+  ],
+  "metadata": {
+    "dataset": "octmnist",
+    "model": "resnet18",
+    "setup": "standard",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 4,
+    "task": "multi-class",
+    "timestamp": "2025-12-24 12:51:47"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "dataset": "organamnist",
+  "model": "resnet18",
+  "setup": "DA",
+  "num_classes": 11,
+  "task": "multi-class",
+  "per_fold_metrics": [
+    {
+      "accuracy": 0.9687816402294971,
+      "balanced_accuracy": 0.9646982557431218,
+      "auc": 0.9987584155495621,
+      "oracle_aurc": 0.00048729299338027735,
+      "oracle_augrc": 0.00048729299338027735
+    },
+    {
+      "accuracy": 0.9589380132748341,
+      "balanced_accuracy": 0.9503619457916787,
+      "auc": 0.998425262929234,
+      "oracle_aurc": 0.0008430433769088512,
+      "oracle_augrc": 0.0008430433769088512
+    },
+    {
+      "accuracy": 0.964844189447632,
+      "balanced_accuracy": 0.9625779542758303,
+      "auc": 0.9988379752723012,
+      "oracle_aurc": 0.0006179655077969963,
+      "oracle_augrc": 0.0006179655077969963
+    },
+    {
+      "accuracy": 0.9569692878839015,
+      "balanced_accuracy": 0.9530992515320615,
+      "auc": 0.9985713374298374,
+      "oracle_aurc": 0.0009258210926092751,
+      "oracle_augrc": 0.0009258210926092751
+    },
+    {
+      "accuracy": 0.9652379345258184,
+      "balanced_accuracy": 0.962908460406834,
+      "auc": 0.9990841018685169,
+      "oracle_aurc": 0.0006042005980156439,
+      "oracle_augrc": 0.0006042005980156439
+    }
+  ],
+  "ensemble_metrics": {
+    "accuracy": 0.9759253009337383,
+    "balanced_accuracy": 0.9736027794659258,
+    "auc": 0.9991940605394596,
+    "oracle_aurc": 0.0002897955675655309,
+    "oracle_augrc": 0.0002897955675655309
+  },
+  "timestamp": "2025-12-23T22:25:34.294852"
+}

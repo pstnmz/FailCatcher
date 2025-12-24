@@ -1307,51 +1307,59 @@ class FailureDetector:
                 correct_idx_calib = np.where(y_pred_calib == y_true_calib)[0]
                 incorrect_idx_calib = np.where(y_pred_calib != y_true_calib)[0]
                 
-                # Step 3: Grid search over k values (fast, only KNN fitting)
-                best_auroc = -1
-                best_k = k_grid[0]
-                
-                for k_candidate in k_grid:
-                    # Fit KNN with k_candidate on ALREADY PCA-transformed training features
-                    knn_models = []
-                    for fold_idx in range(len(self.models)):
-                        from sklearn.neighbors import NearestNeighbors
-                        train_features = train_features_transformed[fold_idx]
-                        knn_model = NearestNeighbors(n_neighbors=k_candidate, metric='euclidean')
-                        knn_model.fit(train_features)
-                        knn_models.append(knn_model)
+                # Check if we have failures on calibration set
+                if len(incorrect_idx_calib) == 0:
+                    print(f"  ⚠️  WARNING: Perfect accuracy on calibration set - cannot tune hyperparameters!")
+                    print(f"              Using default k=5 (no failures to optimize against)")
+                    k_selected = 5  # Use k=5 as default for perfect models
+                    best_auroc = None  # No AUROC computed
+                else:
+                    # Step 3: Grid search over k values (fast, only KNN fitting)
+                    best_auroc = -1
+                    best_k = k_grid[0]
                     
-                    # Compute uncertainties on calibration set
-                    # Use transformed calibration features
-                    uncertainties_calib_per_fold = []
-                    for fold_idx, knn_model in enumerate(knn_models):
-                        calib_feats = calib_features_transformed[fold_idx]
-                        distances, _ = knn_model.kneighbors(calib_feats)
-                        # Uncertainty = mean distance to k nearest neighbors
-                        uncertainty_fold = np.mean(distances, axis=1)  # [N_calib]
-                        uncertainties_calib_per_fold.append(uncertainty_fold)
+                    for k_candidate in k_grid:
+                        # Fit KNN with k_candidate on ALREADY PCA-transformed training features
+                        knn_models = []
+                        for fold_idx in range(len(self.models)):
+                            from sklearn.neighbors import NearestNeighbors
+                            train_features = train_features_transformed[fold_idx]
+                            knn_model = NearestNeighbors(n_neighbors=k_candidate, metric='euclidean')
+                            knn_model.fit(train_features)
+                            knn_models.append(knn_model)
+                        
+                        # Compute uncertainties on calibration set
+                        # Use transformed calibration features
+                        uncertainties_calib_per_fold = []
+                        for fold_idx, knn_model in enumerate(knn_models):
+                            calib_feats = calib_features_transformed[fold_idx]
+                            distances, _ = knn_model.kneighbors(calib_feats)
+                            # Uncertainty = mean distance to k nearest neighbors
+                            uncertainty_fold = np.mean(distances, axis=1)  # [N_calib]
+                            uncertainties_calib_per_fold.append(uncertainty_fold)
+                        
+                        # Average across folds for ensemble evaluation
+                        uncertainties_calib = np.mean(uncertainties_calib_per_fold, axis=0)  # [N_calib]
+                        
+                        # Evaluate AUROC on calibration set
+                        from sklearn.metrics import roc_auc_score
+                        is_correct_calib = np.zeros(len(y_true_calib))
+                        is_correct_calib[correct_idx_calib] = 1
+                        
+                        # Higher uncertainty = more likely to fail → invert for AUROC
+                        auroc_calib = roc_auc_score(1 - is_correct_calib, uncertainties_calib)
+                        
+                        print(f"    k={k_candidate}: AUROC={auroc_calib:.4f}")
+                        
+                        if auroc_calib > best_auroc:
+                            best_auroc = auroc_calib
+                            best_k = k_candidate
                     
-                    # Average across folds for ensemble evaluation
-                    uncertainties_calib = np.mean(uncertainties_calib_per_fold, axis=0)  # [N_calib]
-                    
-                    # Evaluate AUROC on calibration set
-                    from sklearn.metrics import roc_auc_score
-                    is_correct_calib = np.zeros(len(y_true_calib))
-                    is_correct_calib[correct_idx_calib] = 1
-                    
-                    # Higher uncertainty = more likely to fail → invert for AUROC
-                    auroc_calib = roc_auc_score(1 - is_correct_calib, uncertainties_calib)
-                    
-                    print(f"    k={k_candidate}: AUROC={auroc_calib:.4f}")
-                    
-                    if auroc_calib > best_auroc:
-                        best_auroc = auroc_calib
-                        best_k = k_candidate
-                
-                k_selected = best_k
+                    k_selected = best_k
             
             # Print selection result after timer exits
-            print(f"  ✓ Selected k={k_selected} (AUROC={best_auroc:.4f}) in {timer_tuning.elapsed:.2f}s")
+            if best_auroc is not None:
+                print(f"  ✓ Selected k={k_selected} (AUROC={best_auroc:.4f}) in {timer_tuning.elapsed:.2f}s")
         
         # Fit final model with selected k
         with timer:
