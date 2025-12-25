@@ -55,11 +55,12 @@ def compute_differences(results):
     # All possible methods (CSFs)
     all_methods = set()
     
-    # First pass: collect all methods
+    # First pass: collect all methods (exclude Ensembling)
     for key, data in results.items():
         if 'methods' in data:
             for method in data['methods'].keys():
-                all_methods.add(method)
+                if method != 'Ensembling':  # Skip Ensembling (no per-fold version)
+                    all_methods.add(method)
     
     # Initialize dictionaries
     for method in all_methods:
@@ -99,11 +100,31 @@ def compute_differences(results):
     
     return auroc_f_diff, augrc_diff
 
-def create_heatmap(data_dict, title, output_path):
-    """Create a heatmap from the difference dictionary."""
-    # Convert to DataFrame format
+def prepare_heatmap_data(data_dict):
+    """Prepare data for heatmap plotting."""
     methods = sorted(data_dict.keys())
-    columns = sorted(set(col for method_data in data_dict.values() for col in method_data.keys()))
+    # Remove timestamps from column names (keep only dataset_model_setup)
+    columns_with_keys = sorted(set(col for method_data in data_dict.values() for col in method_data.keys()))
+    # Create mapping: original_key -> display_name (without timestamp)
+    key_to_display = {}
+    for col in columns_with_keys:
+        # Split by underscores and remove last part if it looks like a timestamp
+        parts = col.rsplit('_', 1)
+        if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 8:
+            key_to_display[col] = parts[0]  # Remove timestamp
+        else:
+            key_to_display[col] = col
+    
+    # Get unique display names (some may map to same display name)
+    display_names = []
+    columns = []
+    seen_display = set()
+    for col in columns_with_keys:
+        display = key_to_display[col]
+        if display not in seen_display:
+            display_names.append(display)
+            columns.append(col)
+            seen_display.add(display)
     
     # Create matrix
     matrix = np.full((len(methods), len(columns)), np.nan)
@@ -113,43 +134,176 @@ def create_heatmap(data_dict, title, output_path):
             if col in data_dict[method]:
                 matrix[i, j] = data_dict[method][col]
     
-    # Create figure
-    fig, ax = plt.subplots(figsize=(max(12, len(columns) * 0.5), max(8, len(methods) * 0.4)))
+    return matrix, methods, display_names
+
+def create_combined_heatmap(auroc_f_diff, augrc_diff, output_path):
+    """Create a combined figure with both heatmaps stacked vertically."""
+    # Prepare data for both heatmaps
+    auroc_matrix, methods, display_names = prepare_heatmap_data(auroc_f_diff)
+    augrc_matrix, _, _ = prepare_heatmap_data(augrc_diff)
     
-    # Find vmax for symmetric colormap
-    abs_max = np.nanmax(np.abs(matrix))
+    # Add aggregated row (mean across MSR, MSR_calibrated, MLS, MCDropout, KNN_Raw, GPS)
+    aggregation_methods = ['MSR', 'MSR_calibrated', 'MLS', 'MCDropout', 'KNN_Raw', 'GPS']
+    
+    # Find indices of aggregation methods
+    agg_indices = [i for i, m in enumerate(methods) if m in aggregation_methods]
+    
+    # Compute aggregated row (mean across selected methods)
+    auroc_agg_row = np.nanmean(auroc_matrix[agg_indices, :], axis=0).reshape(1, -1)
+    augrc_agg_row = np.nanmean(augrc_matrix[agg_indices, :], axis=0).reshape(1, -1)
+    
+    # Append aggregated row
+    auroc_matrix_with_agg = np.vstack([auroc_matrix, auroc_agg_row])
+    augrc_matrix_with_agg = np.vstack([augrc_matrix, augrc_agg_row])
+    methods_with_agg = methods + ['⚡ Mean Aggregation']
+
+    # Create figure with two subplots stacked vertically
+    # Increased height and width to prevent overlap
+    row_height = 0.4
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(22, len(display_names) * 0.35), 
+                                                    len(methods_with_agg) * row_height * 2.5))
+    
+    # Find common vmax for symmetric colormap across both plots
+    abs_max = max(np.nanmax(np.abs(auroc_matrix_with_agg)), np.nanmax(np.abs(augrc_matrix_with_agg)))
     vmin, vmax = -abs_max, abs_max
     
-    # Create heatmap
-    sns.heatmap(matrix, 
-                xticklabels=columns, 
-                yticklabels=methods,
-                cmap='RdBu_r',  # Red for negative (ensemble worse), Blue for positive (ensemble better)
+    # AUROC_f heatmap (top) — draw without a colorbar (we will add a single shared colorbar)
+    sns.heatmap(auroc_matrix_with_agg, 
+                xticklabels=[],  # No x labels on top plot
+                yticklabels=methods_with_agg,
+                cmap='RdBu_r',
                 center=0,
                 vmin=vmin,
                 vmax=vmax,
-                annot=False,  # Set to True to show values
+                annot=False,
                 fmt='.3f',
-                cbar_kws={'label': f'{title} Difference\n(Ensemble - Mean Per-Fold)'},
-                ax=ax)
+                cbar=False,
+                ax=ax1)
     
-    # Rotate x labels
-    plt.xticks(rotation=45, ha='right')
-    plt.yticks(rotation=0)
+    ax1.set_title('AUROC_f: Ensemble vs Mean Per-Fold', fontsize=14, fontweight='bold', pad=10)
+    ax1.set_xlabel('')
+    ax1.set_ylabel('', fontsize=11, fontweight='bold')
+    plt.setp(ax1.get_yticklabels(), rotation=0)
     
-    # Title
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-    ax.set_xlabel('Dataset_Model_Setup', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Uncertainty Method (CSF)', fontsize=11, fontweight='bold')
+    # AUGRC heatmap (bottom) — no colorbar
+    sns.heatmap(augrc_matrix_with_agg, 
+                xticklabels=display_names, 
+                yticklabels=methods_with_agg,
+                cmap='RdBu_r',
+                center=0,
+                vmin=vmin,
+                vmax=vmax,
+                annot=False,
+                fmt='.3f',
+                cbar=False,
+                ax=ax2)
     
-    # Adjust layout
-    plt.tight_layout()
+    ax2.set_title('AUGRC: Ensemble vs Mean Per-Fold', fontsize=14, fontweight='bold', pad=10)
+    ax2.set_xlabel('', fontsize=11, fontweight='bold')
+    ax2.set_ylabel('', fontsize=11, fontweight='bold')
+
+    # Parse display names to get setup, model, dataset for multi-line x labels
+    setups = []
+    models = []
+    datasets = []
+    setup_names = ['DA', 'DO', 'DADO']
+    model_names = ['resnet18', 'vit_b_16']
+    
+    for name in display_names:
+        # Try to identify setup, model, dataset properly
+        setup = 'standard'
+        model = None
+        dataset = None
+        
+        # Check if ends with setup name
+        col_without_setup = name
+        for setup_name in setup_names:
+            if name.endswith('_' + setup_name):
+                setup = setup_name
+                col_without_setup = name[:-len(setup_name)-1]
+                break
+        
+        # Now find model in col_without_setup
+        for model_name in model_names:
+            if col_without_setup.endswith('_' + model_name):
+                model = model_name
+                dataset = col_without_setup[:-len(model_name)-1]
+                break
+        
+        # Fallback if model not found
+        if model is None:
+            parts = col_without_setup.split('_')
+            model = parts[-1] if len(parts) > 0 else ''
+            dataset = '_'.join(parts[:-1]) if len(parts) > 1 else ''
+        
+        setups.append(setup)
+        models.append(model)
+        datasets.append(dataset)
+
+    # Set xticklabels on bottom axis to just setup names
+    ax2.set_xticklabels(setups, rotation=45, ha='right', fontsize=8)
+    plt.setp(ax2.get_yticklabels(), rotation=0)
+
+    # Get tick positions
+    ticks = ax2.get_xticks()
+    if len(ticks) == 0:
+        ticks = np.arange(len(display_names))
+    
+    # Group by dataset and model to add model and dataset labels
+    # Build groups: (start_idx, end_idx, dataset, model)
+    groups_detailed = []
+    i = 0
+    while i < len(display_names):
+        curr_dataset = datasets[i]
+        curr_model = models[i]
+        start = i
+        # Find end of this dataset+model group
+        while i < len(display_names) and datasets[i] == curr_dataset and models[i] == curr_model:
+            i += 1
+        groups_detailed.append((start, i-1, curr_dataset, curr_model))
+    
+    # Add model names below ticks (spanning 4 setups typically)
+    for (s, e, dname, mname) in groups_detailed:
+        if not mname:
+            continue
+        center = (ticks[s] + ticks[e]) / 2.0
+        ax2.text(center, -0.20, mname, transform=ax2.get_xaxis_transform(), 
+                 ha='center', va='top', fontsize=9, fontweight='normal')
+    
+    # Add dataset names below model names (centered across all models for that dataset)
+    # Group by dataset only
+    dataset_groups = []
+    i = 0
+    while i < len(datasets):
+        curr_dataset = datasets[i]
+        start = i
+        while i < len(datasets) and datasets[i] == curr_dataset:
+            i += 1
+        dataset_groups.append((start, i-1, curr_dataset))
+    
+    for (s, e, dname) in dataset_groups:
+        if not dname:
+            continue
+        center = (ticks[s] + ticks[e]) / 2.0
+        ax2.text(center, -0.38, dname, transform=ax2.get_xaxis_transform(), 
+                 ha='center', va='top', fontsize=9, fontweight='bold')
+
+    # Adjust layout to make room for labels and colorbar
+    # Don't use tight_layout as it interferes with colorbar positioning
+    plt.subplots_adjust(bottom=0.18, right=0.82, top=0.95, left=0.08)
+    
+    # Add a single shared colorbar on the right for both heatmaps
+    # Create a new axes for the colorbar manually
+    cbar_ax = fig.add_axes([0.85, 0.18, 0.015, 0.77])  # [left, bottom, width, height] - thinner colorbar
+    mappable = ax2.collections[0]
+    cbar = fig.colorbar(mappable, cax=cbar_ax, orientation='vertical')
+    cbar.set_label('Difference (Ensemble - Mean Per-Fold)')
     
     # Save
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Saved heatmap to {output_path}")
+    plt.savefig(output_path, dpi=300)
+    print(f"Saved combined heatmap to {output_path}")
     
-    return fig, ax
+    return fig
 
 def main():
     # Paths
@@ -181,20 +335,12 @@ def main():
             print(f"  {method:25s}: mean={np.mean(values):+.4f}, std={np.std(values):.4f}, "
                   f"min={np.min(values):+.4f}, max={np.max(values):+.4f}")
     
-    # Create heatmaps
-    print("\nGenerating heatmaps...")
+    # Create combined heatmap
+    print("\nGenerating combined heatmap...")
     
-    # AUROC_f heatmap
-    auroc_output = output_dir / 'ensemble_vs_mean_auroc_f_heatmap.png'
-    create_heatmap(auroc_f_diff, 
-                   'AUROC_f: Ensemble vs Mean Per-Fold',
-                   auroc_output)
-    
-    # AUGRC heatmap
-    augrc_output = output_dir / 'ensemble_vs_mean_augrc_heatmap.png'
-    create_heatmap(augrc_diff,
-                   'AUGRC: Ensemble vs Mean Per-Fold', 
-                   augrc_output)
+    # Combined heatmap output
+    combined_output = output_dir / 'ensemble_vs_mean_combined_heatmap.png'
+    create_combined_heatmap(auroc_f_diff, augrc_diff, combined_output)
     
     print("\nDone!")
 

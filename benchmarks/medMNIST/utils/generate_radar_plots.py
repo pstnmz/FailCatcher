@@ -403,7 +403,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
         if method_name == 'Mean_Aggregation':
             # Plot lightning bolt markers without connecting lines
             ax.scatter(angles[:-1], values[:-1], s=300, marker='$\u26A1$', 
-                       color=colors[method_idx], label=method_name + ' (MSR - MSR_calibrated - MLS - GPS - KNN_Raw - MC_Dropout)', 
+                       color=colors[method_idx], label=method_name,# + ' (MSR - MSR_calibrated - MLS - GPS - KNN_Raw - MC_Dropout)', 
                        zorder=99, alpha=0.9, edgecolors='black', linewidths=0.5)
         else:
             # Plot lines with enhanced styling for better visibility
@@ -467,11 +467,11 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     # Add dataset family names (larger, further out, with background)
     # Position based on metric scale for visibility (AFTER y_max is defined)
     if metric == 'auroc_f':
-        label_position = 1.08
+        label_position = 1.12
     else:  # augrc - position beyond edge in transformed space
         # Edge is at 0 which transforms to large value (y_max)
         # We want to be beyond that, so add extra offset to y_max
-        label_position = y_max + 0.55  # Beyond the edge
+        label_position = y_max + 1.85  # Beyond the edge
     
     for angle, name in zip(family_angles, family_names):
         # Add subtle background box for family names
