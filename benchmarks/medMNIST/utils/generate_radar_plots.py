@@ -89,21 +89,21 @@ def parse_results_directory(results_dir='./', metric='auroc_f'):
 def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
     """
     Get the test accuracy for a dataset from its JSON file.
-    Look in benchmarks/medMNIST/runs folder for accuracy data.
+    Look in comprehensive_evaluation_results/in_distribution for accuracy data.
     
     Args:
-        results_dir: Path to results directory (will navigate to runs folder)
+        results_dir: Path to results directory
         dataset_key: Dataset key (e.g., 'breastmnist_standard', 'breastmnist_DA')
         model_name: Model name to filter by
     
     Returns:
         float: Test accuracy, or 0 if not found
     """
-    # Navigate to runs folder from results_dir
+    # Navigate to comprehensive evaluation folder
     workspace_root = Path(results_dir).parent
-    runs_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'runs'
+    comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
     
-    if not runs_dir.exists():
+    if not comp_eval_dir.exists():
         return 0.0
     
     # Parse dataset_key to extract base name and setup
@@ -124,23 +124,14 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
     # Build pattern based on setup
     if setup == 'standard':
         # For standard setup, filename doesn't have setup suffix
-        # Need to filter out files with setup suffixes (DA, DO, DADO)
-        pattern = f"uq_benchmark_{base_name}_{model_name}_*.json"
-        all_matches = list(runs_dir.glob(pattern))
-        # Filter out files with setup suffixes
-        json_files = [f for f in all_matches if not any(
-            f.stem.endswith(f'_{s}_{ts}') or f.stem.endswith(f'_{s}')
-            for s in ['DA', 'DO', 'DADO']
-            for ts in [f.stem.split('_')[-1]]  # Last part is timestamp
-        )]
-        # Simpler filter: exclude if filename contains _DA_, _DO_, or _DADO_ before timestamp
-        json_files = [f for f in all_matches if not any(
-            f'_{s}_' in f.name for s in ['DA', 'DO', 'DADO']
-        )]
+        pattern = f"comprehensive_metrics_{base_name}_{model_name}_standard.json"
+        json_file = comp_eval_dir / pattern
+        json_files = [json_file] if json_file.exists() else []
     else:
         # For DA/DO/DADO, filename includes setup
-        pattern = f"uq_benchmark_{base_name}_{model_name}_{setup}_*.json"
-        json_files = list(runs_dir.glob(pattern))
+        pattern = f"comprehensive_metrics_{base_name}_{model_name}_{setup}.json"
+        json_file = comp_eval_dir / pattern
+        json_files = [json_file] if json_file.exists() else []
     
     if not json_files:
         return 0.0
@@ -151,24 +142,25 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
-        return data.get('ensemble_balanced_accuracy', 0.0)
+        ensemble_metrics = data.get('ensemble_metrics', {})
+        return ensemble_metrics.get('balanced_accuracy', 0.0)
     except:
         return 0.0
 
 
-def get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name='resnet18'):
+def get_ensemble_accuracy_from_runs(comp_eval_dir, dataset_key, model_name='resnet18'):
     """
-    Get ensemble balanced accuracy from runs/[dataset]/[model]_*/metrics_ensemble.json
+    Get ensemble balanced accuracy from comprehensive_evaluation_results/in_distribution
     
     Args:
-        runs_dir: Path to runs directory (benchmarks/medMNIST/runs)
+        comp_eval_dir: Path to comprehensive evaluation directory
         dataset_key: Dataset key (e.g., 'tissuemnist_standard', 'tissuemnist_DA')
         model_name: Model name (e.g., 'resnet18', 'vit_b_16')
     
     Returns:
         float: Ensemble balanced accuracy, or 0 if not found
     """
-    runs_dir = Path(runs_dir)
+    comp_eval_dir = Path(comp_eval_dir)
     
     # Parse dataset_key to get base name and setup
     if '_' in dataset_key:
@@ -182,60 +174,28 @@ def get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name='resnet18'
         base_name = dataset_key
         setup = 'standard'
     
-    # Handle dermamnist-e-id -> dermamnist-e mapping
-    if 'dermamnist-e-id' in base_name:
-        base_name = 'dermamnist-e'
-    
-    # Path: runs/[dataset]/[model]_*/metrics_ensemble.json
-    dataset_dir = runs_dir / base_name
-    if not dataset_dir.exists():
-        return 0.0
-    
-    # Map setup to training pattern
-    # standard: randaug0 (no dropout)
-    # DA: randaug1 (no dropout) 
-    # DO: randaug0 + dropout
-    # DADO: randaug1 + dropout
+    # Build pattern based on setup
     if setup == 'standard':
-        pattern = f"{model_name}_*_randaug0_*"
-        exclude_pattern = "dropout"
-    elif setup == 'DA':
-        pattern = f"{model_name}_*_randaug1_*"
-        exclude_pattern = "dropout"
-    elif setup == 'DO':
-        pattern = f"{model_name}_*_randaug0_*dropout*"
-        exclude_pattern = None
-    elif setup == 'DADO':
-        pattern = f"{model_name}_*_randaug1_*dropout*"
-        exclude_pattern = None
+        pattern = f"comprehensive_metrics_{base_name}_{model_name}_standard.json"
+        json_file = comp_eval_dir / pattern
+        json_files = [json_file] if json_file.exists() else []
     else:
+        # For DA/DO/DADO, filename includes setup
+        pattern = f"comprehensive_metrics_{base_name}_{model_name}_{setup}.json"
+        json_file = comp_eval_dir / pattern
+        json_files = [json_file] if json_file.exists() else []
+    
+    if not json_files:
         return 0.0
     
-    # Find matching directories
-    matching_dirs = []
-    for dir_path in dataset_dir.glob(pattern):
-        if dir_path.is_dir():
-            if exclude_pattern and exclude_pattern in dir_path.name:
-                continue
-            matching_dirs.append(dir_path)
-    
-    if not matching_dirs:
-        return 0.0
-    
-    # Use most recent directory
-    most_recent = max(matching_dirs, key=lambda p: p.stat().st_mtime)
-    
-    # Load metrics_ensemble.json
-    metrics_file = most_recent / 'metrics_ensemble.json'
-    if not metrics_file.exists():
-        return 0.0
+    # Use the most recent file
+    json_file = max(json_files, key=lambda p: p.stat().st_mtime)
     
     try:
-        with open(metrics_file, 'r') as f:
+        with open(json_file, 'r') as f:
             data = json.load(f)
-        # balanced_accuracy is nested under 'metrics'
-        metrics = data.get('metrics', {})
-        return metrics.get('balanced_accuracy', 0.0)
+        ensemble_metrics = data.get('ensemble_metrics', {})
+        return ensemble_metrics.get('balanced_accuracy', 0.0)
     except:
         return 0.0
 
@@ -455,6 +415,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     if runs_dir:
         accuracy_values = []
         accuracy_angles = []
+        # runs_dir parameter is already comp_eval_dir passed from main
         for idx, dataset_key in enumerate(dataset_keys):
             accuracy = get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name)
             # Only include if valid (non-zero) accuracy
@@ -861,11 +822,11 @@ def main(aggregation='mean'):
     workspace_root = script_dir.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
     id_results_dir = results_dir / 'id_results'
-    runs_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'runs'
+    comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
     
     print(f"Workspace root: {workspace_root}")
     print(f"Looking for JSON files in: {id_results_dir}")
-    print(f"Looking for accuracy in: {runs_dir}")
+    print(f"Looking for accuracy in: {comp_eval_dir}")
     
     # Create output directory for plots in the script's directory
     output_dir = script_dir / 'radar_plots'
@@ -918,7 +879,7 @@ def main(aggregation='mean'):
             # Generate plot on this axis (modified create_radar_plot to return handles/labels)
             handles, labels = create_radar_plot_on_axis(
                 ax, model_results, model_name, 
-                results_dir=results_dir, runs_dir=runs_dir, 
+                results_dir=results_dir, runs_dir=comp_eval_dir, 
                 metric=metric, aggregation=aggregation
             )
             

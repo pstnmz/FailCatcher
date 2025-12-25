@@ -569,6 +569,10 @@ class FailureDetector:
                 
             elif per_fold_evaluation and method != 'temperature' and indiv_scores_test is not None and indiv_scores_calib is not None:
                 # Per-fold calibration with Platt/Isotonic
+                # CRITICAL: Use original predictions, don't recalculate from calibrated scores
+                # batch_size is not needed here since predictions are already cached
+                original_predictions_per_fold = self._get_per_fold_predictions(batch_size=1024)
+                
                 uncertainties_per_fold = []
                 predictions_per_fold = []
                 num_folds = indiv_scores_test.shape[0]
@@ -583,20 +587,18 @@ class FailureDetector:
                         auto_tune_platt=auto_tune_platt, verbose=verbose_tuning
                     )
                     
-                    # Apply calibration
+                    # Apply calibration to scores (for uncertainty computation)
                     calibrated_scores = apply_calibration(
                         fold_scores_test, calibration_model, method
                     )
                     
-                    # Compute uncertainty and predictions
+                    # Compute uncertainty from calibrated scores
                     fold_uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
-                    # Handle both binary (1D) and multiclass (2D) calibrated scores
-                    if calibrated_scores.ndim == 1:
-                        # Binary: calibrated_scores is [N] (prob of positive class)
-                        fold_predictions = (calibrated_scores > 0.5).astype(int)
-                    else:
-                        # Multiclass: calibrated_scores is [N, C]
-                        fold_predictions = np.argmax(calibrated_scores, axis=1)
+                    
+                    # Use ORIGINAL predictions, NOT from calibrated scores
+                    # Calibration should only affect confidence scores, not predictions
+                    fold_predictions = original_predictions_per_fold[fold_idx]
+                    
                     uncertainties_per_fold.append(fold_uncertainties)
                     predictions_per_fold.append(fold_predictions)
                 
@@ -625,22 +627,16 @@ class FailureDetector:
                 uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
                 predictions_per_fold = None
         
-        # Handle both 1D (binary) and 2D (multiclass) calibrated scores for y_pred for y_pred
-        # Use ensemble predictions for computing correct/incorrect indices
+        # CRITICAL: Use ORIGINAL predictions, not calibrated scores
+        # Calibration should only adjust confidence scores, not change predictions
         if self._test_predictions_cache is not None:
             correct_idx = self._test_predictions_cache['correct_idx']
             incorrect_idx = self._test_predictions_cache['incorrect_idx']
             y_pred_calibrated = self._test_predictions_cache['y_pred']
         else:
-            if y_scores_test.ndim == 1:
-                # Binary classification: y_scores_test is [N] (prob of positive class)
-                y_pred_calibrated = (y_scores_test > 0.5).astype(int)
-            else:
-                # Multiclass: y_scores_test is [N, C]
-                y_pred_calibrated = np.argmax(y_scores_test, axis=1)
-            
-            correct_idx = np.where(y_pred_calibrated == y_true_test)[0]
-            incorrect_idx = np.where(y_pred_calibrated != y_true_test)[0]
+            # Use original predictions from ensemble/model, NOT from calibrated scores
+            # This ensures accuracy stays consistent across all CSF methods
+            raise RuntimeError("MSR_calibrated requires cached predictions. Run run_msr() first.")
         
         metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
                                        y_pred_calibrated, y_true_test,

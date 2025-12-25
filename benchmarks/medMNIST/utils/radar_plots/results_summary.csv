@@ -38,7 +38,7 @@ resnet18,breastmnist_DA,GPS,0.7110
 resnet18,breastmnist_DA,KNN_Raw,0.5583
 resnet18,breastmnist_DA,MLS,0.7239
 resnet18,breastmnist_DA,MSR,0.7240
-resnet18,breastmnist_DA,MSR_calibrated,0.7576
+resnet18,breastmnist_DA,MSR_calibrated,0.7672
 resnet18,breastmnist_DA,Mean_Aggregation,0.7552
 resnet18,breastmnist_DA,TTA,0.6850
 resnet18,breastmnist_DADO,Ensembling,0.6835
@@ -47,7 +47,7 @@ resnet18,breastmnist_DADO,KNN_Raw,0.5464
 resnet18,breastmnist_DADO,MCDropout,0.7377
 resnet18,breastmnist_DADO,MLS,0.7788
 resnet18,breastmnist_DADO,MSR,0.7787
-resnet18,breastmnist_DADO,MSR_calibrated,0.7846
+resnet18,breastmnist_DADO,MSR_calibrated,0.7961
 resnet18,breastmnist_DADO,Mean_Aggregation,0.7890
 resnet18,breastmnist_DADO,TTA,0.7175
 resnet18,breastmnist_DO,Ensembling,0.6119
@@ -56,7 +56,7 @@ resnet18,breastmnist_DO,KNN_Raw,0.6029
 resnet18,breastmnist_DO,MCDropout,0.6827
 resnet18,breastmnist_DO,MLS,0.6991
 resnet18,breastmnist_DO,MSR,0.6998
-resnet18,breastmnist_DO,MSR_calibrated,0.7344
+resnet18,breastmnist_DO,MSR_calibrated,0.7428
 resnet18,breastmnist_DO,Mean_Aggregation,0.7436
 resnet18,breastmnist_DO,TTA,0.7070
 resnet18,breastmnist_standard,Ensembling,0.7897
@@ -64,7 +64,7 @@ resnet18,breastmnist_standard,GPS,0.7958
 resnet18,breastmnist_standard,KNN_Raw,0.7291
 resnet18,breastmnist_standard,MLS,0.7493
 resnet18,breastmnist_standard,MSR,0.7493
-resnet18,breastmnist_standard,MSR_calibrated,0.7805
+resnet18,breastmnist_standard,MSR_calibrated,0.7957
 resnet18,breastmnist_standard,Mean_Aggregation,0.8055
 resnet18,breastmnist_standard,TTA,0.7150
 resnet18,dermamnist-e-id_DA,Ensembling,0.7108
@@ -174,7 +174,7 @@ resnet18,pneumoniamnist_DA,GPS,0.8190
 resnet18,pneumoniamnist_DA,KNN_Raw,0.7969
 resnet18,pneumoniamnist_DA,MLS,0.8922
 resnet18,pneumoniamnist_DA,MSR,0.8922
-resnet18,pneumoniamnist_DA,MSR_calibrated,0.8298
+resnet18,pneumoniamnist_DA,MSR_calibrated,0.8284
 resnet18,pneumoniamnist_DA,Mean_Aggregation,0.8610
 resnet18,pneumoniamnist_DA,TTA,0.8496
 resnet18,pneumoniamnist_DADO,Ensembling,0.8896
@@ -183,7 +183,7 @@ resnet18,pneumoniamnist_DADO,KNN_Raw,0.7761
 resnet18,pneumoniamnist_DADO,MCDropout,0.8482
 resnet18,pneumoniamnist_DADO,MLS,0.8639
 resnet18,pneumoniamnist_DADO,MSR,0.8639
-resnet18,pneumoniamnist_DADO,MSR_calibrated,0.8143
+resnet18,pneumoniamnist_DADO,MSR_calibrated,0.8081
 resnet18,pneumoniamnist_DADO,Mean_Aggregation,0.8393
 resnet18,pneumoniamnist_DADO,TTA,0.8283
 resnet18,pneumoniamnist_DO,Ensembling,0.8423
@@ -192,7 +192,7 @@ resnet18,pneumoniamnist_DO,KNN_Raw,0.7186
 resnet18,pneumoniamnist_DO,MCDropout,0.7993
 resnet18,pneumoniamnist_DO,MLS,0.8523
 resnet18,pneumoniamnist_DO,MSR,0.8523
-resnet18,pneumoniamnist_DO,MSR_calibrated,0.8386
+resnet18,pneumoniamnist_DO,MSR_calibrated,0.8412
 resnet18,pneumoniamnist_DO,Mean_Aggregation,0.8284
 resnet18,pneumoniamnist_DO,TTA,0.7531
 resnet18,pneumoniamnist_standard,Ensembling,0.8813
@@ -200,7 +200,7 @@ resnet18,pneumoniamnist_standard,GPS,0.8349
 resnet18,pneumoniamnist_standard,KNN_Raw,0.7545
 resnet18,pneumoniamnist_standard,MLS,0.8752
 resnet18,pneumoniamnist_standard,MSR,0.8752
-resnet18,pneumoniamnist_standard,MSR_calibrated,0.9006
+resnet18,pneumoniamnist_standard,MSR_calibrated,0.9033
 resnet18,pneumoniamnist_standard,Mean_Aggregation,0.8655
 resnet18,pneumoniamnist_standard,TTA,0.7487
 resnet18,tissuemnist_DA,Ensembling,0.7053
@@ -276,7 +276,7 @@ vit_b_16,breastmnist_DA,GPS,0.7824
 vit_b_16,breastmnist_DA,KNN_Raw,0.7608
 vit_b_16,breastmnist_DA,MLS,0.7218
 vit_b_16,breastmnist_DA,MSR,0.7218
-vit_b_16,breastmnist_DA,MSR_calibrated,0.7493
+vit_b_16,breastmnist_DA,MSR_calibrated,0.7761
 vit_b_16,breastmnist_DA,Mean_Aggregation,0.7937
 vit_b_16,breastmnist_DA,TTA,0.7281
 vit_b_16,breastmnist_DADO,Ensembling,0.8296
@@ -285,7 +285,7 @@ vit_b_16,breastmnist_DADO,KNN_Raw,0.7399
 vit_b_16,breastmnist_DADO,MCDropout,0.7923
 vit_b_16,breastmnist_DADO,MLS,0.8092
 vit_b_16,breastmnist_DADO,MSR,0.8092
-vit_b_16,breastmnist_DADO,MSR_calibrated,0.7782
+vit_b_16,breastmnist_DADO,MSR_calibrated,0.8187
 vit_b_16,breastmnist_DADO,Mean_Aggregation,0.8532
 vit_b_16,breastmnist_DADO,TTA,0.7731
 vit_b_16,breastmnist_DO,Ensembling,0.8025
@@ -294,7 +294,7 @@ vit_b_16,breastmnist_DO,KNN_Raw,0.7462
 vit_b_16,breastmnist_DO,MCDropout,0.7570
 vit_b_16,breastmnist_DO,MLS,0.7602
 vit_b_16,breastmnist_DO,MSR,0.7602
-vit_b_16,breastmnist_DO,MSR_calibrated,0.7200
+vit_b_16,breastmnist_DO,MSR_calibrated,0.7627
 vit_b_16,breastmnist_DO,Mean_Aggregation,0.8006
 vit_b_16,breastmnist_DO,TTA,0.7376
 vit_b_16,breastmnist_standard,Ensembling,0.7383
@@ -302,7 +302,7 @@ vit_b_16,breastmnist_standard,GPS,0.6687
 vit_b_16,breastmnist_standard,KNN_Raw,0.5765
 vit_b_16,breastmnist_standard,MLS,0.6898
 vit_b_16,breastmnist_standard,MSR,0.6898
-vit_b_16,breastmnist_standard,MSR_calibrated,0.7269
+vit_b_16,breastmnist_standard,MSR_calibrated,0.7107
 vit_b_16,breastmnist_standard,Mean_Aggregation,0.6873
 vit_b_16,breastmnist_standard,TTA,0.6853
 vit_b_16,dermamnist-e-id_DA,Ensembling,0.8109
@@ -411,7 +411,7 @@ vit_b_16,pneumoniamnist_DA,GPS,0.8369
 vit_b_16,pneumoniamnist_DA,KNN_Raw,0.8563
 vit_b_16,pneumoniamnist_DA,MLS,0.8879
 vit_b_16,pneumoniamnist_DA,MSR,0.8879
-vit_b_16,pneumoniamnist_DA,MSR_calibrated,0.7956
+vit_b_16,pneumoniamnist_DA,MSR_calibrated,0.7894
 vit_b_16,pneumoniamnist_DA,Mean_Aggregation,0.8706
 vit_b_16,pneumoniamnist_DA,TTA,0.8637
 vit_b_16,pneumoniamnist_DADO,Ensembling,0.8725
@@ -420,7 +420,7 @@ vit_b_16,pneumoniamnist_DADO,KNN_Raw,0.8694
 vit_b_16,pneumoniamnist_DADO,MCDropout,0.8125
 vit_b_16,pneumoniamnist_DADO,MLS,0.8832
 vit_b_16,pneumoniamnist_DADO,MSR,0.8832
-vit_b_16,pneumoniamnist_DADO,MSR_calibrated,0.7788
+vit_b_16,pneumoniamnist_DADO,MSR_calibrated,0.7722
 vit_b_16,pneumoniamnist_DADO,Mean_Aggregation,0.8670
 vit_b_16,pneumoniamnist_DADO,TTA,0.8684
 vit_b_16,pneumoniamnist_DO,Ensembling,0.8617
@@ -429,7 +429,7 @@ vit_b_16,pneumoniamnist_DO,KNN_Raw,0.8775
 vit_b_16,pneumoniamnist_DO,MCDropout,0.8059
 vit_b_16,pneumoniamnist_DO,MLS,0.8849
 vit_b_16,pneumoniamnist_DO,MSR,0.8849
-vit_b_16,pneumoniamnist_DO,MSR_calibrated,0.8362
+vit_b_16,pneumoniamnist_DO,MSR_calibrated,0.8355
 vit_b_16,pneumoniamnist_DO,Mean_Aggregation,0.8779
 vit_b_16,pneumoniamnist_DO,TTA,0.7871
 vit_b_16,pneumoniamnist_standard,Ensembling,0.8468
@@ -437,7 +437,7 @@ vit_b_16,pneumoniamnist_standard,GPS,0.8622
 vit_b_16,pneumoniamnist_standard,KNN_Raw,0.8407
 vit_b_16,pneumoniamnist_standard,MLS,0.8531
 vit_b_16,pneumoniamnist_standard,MSR,0.8531
-vit_b_16,pneumoniamnist_standard,MSR_calibrated,0.8463
+vit_b_16,pneumoniamnist_standard,MSR_calibrated,0.8489
 vit_b_16,pneumoniamnist_standard,Mean_Aggregation,0.8627
 vit_b_16,pneumoniamnist_standard,TTA,0.7450
 vit_b_16,tissuemnist_DA,Ensembling,0.7379

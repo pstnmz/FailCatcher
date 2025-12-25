@@ -40,8 +40,7 @@ DATASETS_ID = [
     'organamnist', 
     'pneumoniamnist', 
     'dermamnist-e-id', 
-    'octmnist', 
-    'pathmnist', 
+    'octmnist',  
     'bloodmnist', 
     'tissuemnist', 
     'breastmnist'
@@ -49,7 +48,8 @@ DATASETS_ID = [
 
 DATASETS_EXTERNAL = [
     'amos2022',  # OrganaMNIST → AMOS-2022 external test
-    'dermamnist-e-external'  # DermaMNIST-E external centers
+    'dermamnist-e-external'  # DermaMNIST-E external centers,
+    'pathmnist',  # PathMNIST external test set
 ]
 
 # Model backbones
