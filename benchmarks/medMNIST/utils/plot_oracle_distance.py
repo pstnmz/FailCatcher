@@ -155,35 +155,27 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
         methods_dict = data.get('methods', {})
         
         for method_name, method_data in methods_dict.items():
-            # Per-fold Ngto - CRITICAL: use each fold's accuracy for oracle/random, not ensemble accuracy
-            # Each fold has its own test set with potentially different accuracy
+            # Per-fold Ngto - CRITICAL: use each fold's AUROC_f
+            # Ngto = 2(1 - AUROC_f) by mathematical simplification
+            # (accuracy terms cancel out in the full formula)
             per_fold_metrics = method_data.get('per_fold_metrics', [])
             if per_fold_metrics:
                 per_fold_ngto = []
                 for i, fold in enumerate(per_fold_metrics):
-                    augrc = fold.get('augrc', np.nan)  # A (actual)
-                    fold_accuracy = fold.get('accuracy', np.nan)  # This fold's accuracy on its test set
-                    
-                    if not np.isnan(augrc) and not np.isnan(fold_accuracy):
-                        # Use this fold's accuracy for oracle and random (not ensemble accuracy!)
-                        oracle_augrc = compute_oracle_augrc(fold_accuracy)  # A* = 0.5(1-acc)^2
-                        A_rand = compute_random_augrc(fold_accuracy)  # A^rand = 0.5(1-acc)
-                        # Ngto = (A - A*) / (A^rand - A*)
-                        ngto = (augrc - oracle_augrc) / (A_rand - oracle_augrc) if (A_rand - oracle_augrc) != 0 else np.nan
+                    auroc_f = fold.get('auroc_f', np.nan)
+                    if not np.isnan(auroc_f):
+                        ngto = 2.0 * (1.0 - auroc_f)
                         per_fold_ngto.append(ngto)
                     else:
                         per_fold_ngto.append(np.nan)
                 
                 ngto_data['per_fold'][method_name] = np.array(per_fold_ngto)
             
-            # Ensemble Ngto - use test_accuracy for oracle/random
-            augrc_ens = method_data.get('augrc', np.nan)  # A (actual)
-            if not np.isnan(augrc_ens) and not np.isnan(test_accuracy):
-                # Use consistent test_accuracy for oracle and random
-                oracle_augrc = compute_oracle_augrc(test_accuracy)  # A* = 0.5(1-acc)^2
-                A_rand = compute_random_augrc(test_accuracy)  # A^rand = 0.5(1-acc)
-                # Ngto = (A - A*) / (A^rand - A*)
-                ngto = (augrc_ens - oracle_augrc) / (A_rand - oracle_augrc) if (A_rand - oracle_augrc) != 0 else np.nan
+            # Ensemble Ngto - use ensemble AUROC_f
+            # Ngto = 2(1 - AUROC_f)
+            auroc_f_ens = method_data.get('auroc_f', np.nan)
+            if not np.isnan(auroc_f_ens):
+                ngto = 2.0 * (1.0 - auroc_f_ens)
                 ngto_data['ensemble'][method_name] = ngto
         
         # Compute Mean_Aggregation (z-scored average of specific methods)
@@ -238,9 +230,8 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
                         per_fold_predictions = cache_data['per_fold_predictions']
                         y_true = cache_data['y_true']
                         
-                        # Compute AUGRC for each fold's aggregated uncertainties
-                        agg_per_fold_augrc = []
-                        agg_per_fold_accuracy = []
+                        # Compute AUROC_f for each fold's aggregated uncertainties
+                        agg_per_fold_auroc_f = []
                         
                         for fold_idx in range(num_folds):
                             # Z-score normalize each method for this fold
@@ -260,29 +251,38 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
                                 stacked = np.stack(normalized_arrays, axis=0)
                                 aggregated = np.mean(stacked, axis=0)
                                 
-                                # Get predictions and compute accuracy for this fold
+                                # Get predictions for this fold
                                 predictions = per_fold_predictions[fold_idx]
                                 labels = y_true
-                                fold_accuracy = np.mean(predictions == labels)
-                                agg_per_fold_accuracy.append(fold_accuracy)
                                 
-                                # Compute AUGRC for this fold
-                                compute_augrc = get_compute_augrc()
-                                augrc_value, _ = compute_augrc(aggregated, predictions, labels)
-                                agg_per_fold_augrc.append(augrc_value)
+                                # Compute AUROC_f for this fold (failure prediction)
+                                compute_augrc_func = get_compute_augrc()
+                                from FailCatcher.evaluation.evaluation import compute_auroc
+                                
+                                # Compute correct/incorrect indices for this fold
+                                fold_correct = np.where(predictions == labels)[0]
+                                fold_incorrect = np.where(predictions != labels)[0]
+                                
+                                if len(fold_correct) > 0 and len(fold_incorrect) > 0:
+                                    auroc_f = compute_auroc(aggregated, fold_correct, fold_incorrect)
+                                    agg_per_fold_auroc_f.append(auroc_f)
+                                else:
+                                    agg_per_fold_auroc_f.append(np.nan)
                         
-                        # Compute per-fold Ngto for Mean_Aggregation
-                        if agg_per_fold_augrc:
+                        # Compute per-fold Ngto for Mean_Aggregation using AUROC_f
+                        # Ngto = 2(1 - AUROC_f)
+                        if agg_per_fold_auroc_f:
                             mean_agg_per_fold_ngto = []
-                            for augrc, acc in zip(agg_per_fold_augrc, agg_per_fold_accuracy):
-                                oracle_augrc = compute_oracle_augrc(acc)
-                                A_rand = compute_random_augrc(acc)
-                                ngto = (augrc - oracle_augrc) / (A_rand - oracle_augrc) if (A_rand - oracle_augrc) != 0 else np.nan
-                                mean_agg_per_fold_ngto.append(ngto)
+                            for auroc_f in agg_per_fold_auroc_f:
+                                if not np.isnan(auroc_f):
+                                    ngto = 2.0 * (1.0 - auroc_f)
+                                    mean_agg_per_fold_ngto.append(ngto)
+                                else:
+                                    mean_agg_per_fold_ngto.append(np.nan)
                             
                             ngto_data['per_fold']['Mean_Aggregation'] = np.array(mean_agg_per_fold_ngto)
                         
-                        # Ensemble Mean_Aggregation - z-score and average ensemble uncertainties
+                        # Ensemble Mean_Aggregation - compute AUROC_f from ensemble uncertainties
                         ensemble_keys = [f'{m}_ensemble' for m in methods_to_use]
                         available_ensemble_keys = [k for k in ensemble_keys if k in npz_data.keys()]
                         
@@ -308,15 +308,16 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
                                 ensemble_predictions = cache_data['y_pred']  # Ensemble predictions
                                 y_true = cache_data['y_true']
                                 
-                                # Compute AUGRC for ensemble
-                                compute_augrc_func = get_compute_augrc()
-                                ensemble_augrc, _ = compute_augrc_func(aggregated_ensemble, ensemble_predictions, y_true)
+                                # Compute AUROC_f for ensemble
+                                from FailCatcher.evaluation.evaluation import compute_auroc
+                                ensemble_correct = np.where(ensemble_predictions == y_true)[0]
+                                ensemble_incorrect = np.where(ensemble_predictions != y_true)[0]
                                 
-                                # Convert to Ngto using test_accuracy (ensemble accuracy)
-                                oracle_augrc = compute_oracle_augrc(test_accuracy)
-                                A_rand = compute_random_augrc(test_accuracy)
-                                ensemble_ngto = (ensemble_augrc - oracle_augrc) / (A_rand - oracle_augrc) if (A_rand - oracle_augrc) != 0 else np.nan
-                                ngto_data['ensemble']['Mean_Aggregation'] = ensemble_ngto
+                                if len(ensemble_correct) > 0 and len(ensemble_incorrect) > 0:
+                                    auroc_f_ens = compute_auroc(aggregated_ensemble, ensemble_correct, ensemble_incorrect)
+                                    # Ngto = 2(1 - AUROC_f)
+                                    ensemble_ngto = 2.0 * (1.0 - auroc_f_ens)
+                                    ngto_data['ensemble']['Mean_Aggregation'] = ensemble_ngto
                             
             except Exception as e:
                 print(f"      Warning: Could not compute Mean_Aggregation for {dataset_name} {setup}: {e}")
@@ -370,18 +371,10 @@ def plot_ngto_for_dataset(dataset_name, model_names, results_dir, ax):
             # Select methods based on setup
             current_methods = methods_with_dropout if setup in ['DO', 'DADO'] else methods
             
-            # Debug: print methods being used
-            if model_idx == 0 and setup_idx == 0:
-                print(f"  Setup {setup}: Iterating over {len(current_methods)} methods: {current_methods}")
-            
             for method_idx, method in enumerate(current_methods):
                 # Get per-fold Ngto
                 per_fold_ngto = ngto_data['per_fold'].get(method, None)
                 ensemble_ngto = ngto_data['ensemble'].get(method, None)
-                
-                # Debug
-                if method_idx == 0 and setup_idx == 0 and model_idx == 0:
-                    print(f"      Method {method}: per_fold={per_fold_ngto}, ensemble={ensemble_ngto}")
                 
                 # Special handling for Ensembling: only ensemble point (no per-fold bars)
                 if method == 'Ensembling':
@@ -424,18 +417,6 @@ def plot_ngto_for_dataset(dataset_name, model_names, results_dir, ax):
         # Add larger spacing between models
         x_offset += 0.25
     
-    print(f"    Collected {len(all_data)} data points for plotting")
-    
-    # Debug: Check if Mean_Aggregation is in all_data
-    mean_agg_entries = [d for d in all_data if d['method'] == 'Mean_Aggregation']
-    ensembling_entries = [d for d in all_data if d['method'] == 'Ensembling']
-    print(f"    Mean_Aggregation entries: {len(mean_agg_entries)}")
-    print(f"    Ensembling entries: {len(ensembling_entries)}")
-    if mean_agg_entries:
-        first_ma = mean_agg_entries[0]
-        print(f"    First Mean_Aggregation: model={first_ma['model']}, setup={first_ma['setup']}, "
-              f"per_fold_len={len(first_ma['per_fold_ngto'])}, ensemble={first_ma['ensemble_ngto']:.4f}")
-    
     # Plot bars: per-fold Ngto as boxplots/histograms
     for data in all_data:
         x_pos = data['x_pos']
@@ -443,13 +424,6 @@ def plot_ngto_for_dataset(dataset_name, model_names, results_dir, ax):
         ensemble_ngto = data['ensemble_ngto']
         color = data['color']
         method = data['method']
-        
-        # Debug first few
-        if len(all_data) <= 5 or all_data.index(data) < 2:
-            if len(per_fold_ngto) > 0:
-                print(f"      Plotting {method} at x={x_pos:.2f}, Ngto range=[{np.min(per_fold_ngto):.3f}, {np.max(per_fold_ngto):.3f}]")
-            else:
-                print(f"      Plotting {method} at x={x_pos:.2f}, Ngto range=[N/A]")
         
         # Create violin-like representation: show min, max, median
         # Skip bars for Ensembling (only show diamond)

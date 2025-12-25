@@ -253,7 +253,7 @@ def compute_all_metrics(uncertainties, predictions, labels, correct_idx=None, in
     }
 
 
-def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, predictions_per_fold=None):
+def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, predictions_per_fold=None, ensemble_uncertainties=None):
     """
     Compute metrics independently for each fold, then aggregate with mean±std.
     
@@ -267,13 +267,14 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, pr
         predictions: Array of predicted labels [N] (ensemble predictions, used if predictions_per_fold=None)
         labels: Array of true labels [N]
         predictions_per_fold: Optional [num_folds, N] array of per-fold predictions (CORRECT approach)
+        ensemble_uncertainties: Optional [N] array of TRUE ensemble uncertainties (for correct auroc_f)
     
     Returns:
         dict: Aggregated metrics with mean and std:
-            - auroc_f_mean, auroc_f_std
-            - aurc_mean, aurc_std
-            - augrc_mean, augrc_std
-            - accuracy (same for all folds, uses ensemble)
+            - auroc_f: TRUE ensemble AUROC_f (from ensemble_uncertainties)
+            - auroc_f_mean: mean of per-fold AUROC_f values
+            - aurc, augrc: from ensemble
+            - accuracy (from ensemble predictions)
             - per_fold_metrics: List of dicts with metrics for each fold
     """
     num_folds = uncertainties_per_fold.shape[0]
@@ -318,17 +319,25 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, pr
     aurc_valid = aurc_array[~np.isnan(aurc_array)]
     augrc_valid = augrc_array[~np.isnan(augrc_array)]
     
-    # ALSO compute ensemble metrics (averaged uncertainties vs ensemble predictions)
-    # This matches what's shown in the "Average" curve plots
-    averaged_uncertainties = np.mean(uncertainties_per_fold, axis=0)  # [N]
-    ensemble_metrics = compute_all_metrics(
-        averaged_uncertainties, predictions, labels,
-        correct_idx_ensemble, incorrect_idx_ensemble
-    )
+    # Compute TRUE ensemble metrics (from ensemble_uncertainties if provided)
+    # Otherwise fall back to averaged per-fold (legacy behavior)
+    if ensemble_uncertainties is not None:
+        # CORRECT: Use TRUE ensemble uncertainties
+        ensemble_metrics = compute_all_metrics(
+            ensemble_uncertainties, predictions, labels,
+            correct_idx_ensemble, incorrect_idx_ensemble
+        )
+    else:
+        # LEGACY: Fall back to averaged per-fold
+        averaged_uncertainties = np.mean(uncertainties_per_fold, axis=0)  # [N]
+        ensemble_metrics = compute_all_metrics(
+            averaged_uncertainties, predictions, labels,
+            correct_idx_ensemble, incorrect_idx_ensemble
+        )
     
     return {
-        # PRIMARY: Ensemble metrics (averaged uncertainties vs ensemble predictions)
-        # These match the "Average" curve shown in plots
+        # PRIMARY: TRUE ensemble metrics (from ensemble_uncertainties)
+        # auroc_f uses TRUE ensemble, auroc_f_mean uses per-fold average
         'auroc_f': ensemble_metrics['auroc_f'],
         'aurc': ensemble_metrics['aurc'],
         'augrc': ensemble_metrics['augrc'],
@@ -618,18 +627,23 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
         mean_auroc = np.mean(fold_aurocs)
         std_auroc = np.std(fold_aurocs)
         
-        # Plot ensemble curve if available
-        ensemble_auroc = None
+        # Plot TRUE ensemble curve (this matches JSON's auroc_f)
+        # Use ensemble_uncertainties if provided, otherwise fall back to uncertainties
         if ensemble_uncertainties is not None:
-            fpr_ens, tpr_ens, _, ensemble_auroc = compute_roc_curve(
+            # TRUE ensemble (matches JSON auroc_f)
+            fpr_ens, tpr_ens, _, auroc_ens = compute_roc_curve(
                 ensemble_uncertainties, correct_idx, incorrect_idx
             )
-            ax.plot(fpr_ens, tpr_ens, 'g-', linewidth=2.5, label='Ensemble', alpha=0.8)
+        else:
+            # Fall back to averaged per-fold (legacy)
+            fpr_ens, tpr_ens, _, auroc_ens = compute_roc_curve(
+                uncertainties, correct_idx, incorrect_idx
+            )
+        ax.plot(fpr_ens, tpr_ens, 'g-', linewidth=2.5, label='Ensemble', alpha=0.8)
         
         # Add text annotation with mean±std and ensemble
         text_lines = [f'Per-fold mean: {mean_auroc:.4f}±{std_auroc:.4f}']
-        if ensemble_auroc is not None:
-            text_lines.append(f'Ensemble: {ensemble_auroc:.4f}')
+        text_lines.append(f'Ensemble: {auroc_ens:.4f}')
         text_lines.append(f'({num_folds} folds)')
         
         ax.text(0.98, 0.12, '\n'.join(text_lines),
