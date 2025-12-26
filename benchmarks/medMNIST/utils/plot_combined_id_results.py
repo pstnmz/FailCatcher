@@ -83,7 +83,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     fig = plt.figure(figsize=(22, 25))
     
     # Define grid: 3 rows (radar top half, heatmap1, heatmap2)
-    gs = fig.add_gridspec(4, 2, height_ratios=[0.85, 0.95, 0.25, 0.25], 
+    gs = fig.add_gridspec(4, 2, height_ratios=[0.85, 0.90, 0.25, 0.25], 
                          hspace=0.05, wspace=0.45,
                          left=0.15, right=0.85, top=0.96, bottom=0.08)
     
@@ -136,9 +136,12 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
             # Add subplot title
             model_display = 'RESNET18' if model_name == 'resnet18' else 'VIT_B_16'
             metric_display = 'AUROC F' if metric == 'auroc_f' else 'AUGRC'
-            ax.set_title(f'{model_display}\nPer-fold {aggregation.capitalize()} {metric_display}',
-                        fontsize=14, fontweight='bold', pad=30, x=-0.1, ha='left')
-    
+            if model_name == 'resnet18':
+               ax.set_title(f'{model_display}\nPer-fold {aggregation.capitalize()} {metric_display}',
+                            fontsize=14, fontweight='bold', pad=30, x=-0.1, ha='left')
+            else:
+                ax.set_title(f'{model_display}\nPer-fold {aggregation.capitalize()} {metric_display}',
+                             fontsize=14, fontweight='bold', pad=30, x=1.1, ha='right')
     # Move "Mean_Aggregation" to bottom of legend
     if 'Mean_Aggregation' in all_labels:
         idx = all_labels.index('Mean_Aggregation')

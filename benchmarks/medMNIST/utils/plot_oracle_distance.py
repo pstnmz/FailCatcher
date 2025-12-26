@@ -1,14 +1,14 @@
 """
-Plot Normalized Gap to Oracle (Ngto) for each CSF and setup.
+Plot AUGRC values for each CSF and setup, showing oracle and random boundaries.
 
-Ngto measures the fraction of avoidable silent-failure risk that remains relative 
-to an oracle (perfect) scoring function. It ranges from 0 (oracle CSF) to 1 (random CSF).
+Shows actual AUGRC values with reference to:
+- Oracle AUGRC (A*): AUROC-f = 1 → A* = 0.5(1 - acc)² (best, lowest)
+- Random AUGRC (A^rand): AUROC-f = 0.5 → A^rand = 0.5(1 - acc) (worst, highest)
 
-Formula:
-    AUGRC = (1 - AUROC-f) × acc × (1 - acc) + 0.5(1 - acc)²
-    Oracle AUGRC (A*): AUROC-f = 1 → A* = 0.5(1 - acc)²
-    Random AUGRC (A^rand): AUROC-f = 0.5 → A^rand = 0.5(1 - acc)
-    Ngto = (A - A*) / (A^rand - A*)
+For each method, displays:
+- Box spanning from oracle to random AUGRC (theoretical bounds)
+- Horizontal line at mean per-fold AUGRC
+- Diamond/lightning marker at ensemble AUGRC
 """
 
 import json
@@ -85,38 +85,32 @@ def compute_random_augrc(accuracy):
     return 0.5 * (1.0 - accuracy)
 
 
-def compute_ngto(auroc_f, accuracy):
+def compute_augrc_from_auroc(auroc_f, accuracy):
     """
-    Compute Normalized Gap to Oracle (Ngto).
+    Compute AUGRC given AUROC-f and accuracy (wrapper for clarity).
     
     Args:
         auroc_f: AUROC for failure detection
         accuracy: Model accuracy
     
     Returns:
-        float: Ngto = (A - A*) / (A^rand - A*), ranges from 0 (oracle) to 1 (random)
+        float: AUGRC value
     """
-    A = compute_augrc(auroc_f, accuracy)
-    A_star = compute_oracle_augrc(accuracy)
-    A_rand = compute_random_augrc(accuracy)
-    
-    denominator = A_rand - A_star
-    if denominator == 0 or denominator < 1e-10:
-        return 0.0
-    
-    ngto = (A - A_star) / denominator
-    # Clamp to [0, 1] range
-    return np.clip(ngto, 0.0, 1.0)
+    return compute_augrc(auroc_f, accuracy)
 
 
-def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='standard'):
+def load_augrc_data(results_dir, dataset_name, model_name='resnet18', setup='standard'):
     """
-    Load per-fold and ensemble Ngto values for all CSFs from JSON files.
+    Load per-fold and ensemble AUGRC values for all CSFs from JSON files.
+    Also computes oracle and random AUGRC boundaries based on test accuracy.
     
     Returns:
         dict: {
-            'per_fold': {method_name: [ngto_fold0, ngto_fold1, ...]},
-            'ensemble': {method_name: ngto_ensemble}
+            'per_fold': {method_name: [augrc_fold0, augrc_fold1, ...]},
+            'ensemble': {method_name: augrc_ensemble},
+            'oracle_augrc': float (A* = 0.5(1-acc)²),
+            'random_augrc': float (A^rand = 0.5(1-acc)),
+            'test_accuracy': float
         }
     """
     results_dir = Path(results_dir)
@@ -147,36 +141,62 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
         with open(json_file, 'r') as f:
             data = json.load(f)
         
-        # Use the top-level test_accuracy (consistent across all methods)
-        # This is the ACCURACY (not balanced_accuracy) used for oracle_augrc computation
-        test_accuracy = data.get('test_accuracy', np.nan)
-        
-        ngto_data = {'per_fold': {}, 'ensemble': {}}
+        # Compute mean per-fold accuracy from methods' per-fold metrics
+        # (uq_benchmark files don't have top-level per_fold_metrics)
         methods_dict = data.get('methods', {})
+        per_fold_accuracies = []
+        
+        # Get per-fold accuracies from the first method that has them
+        for method_name, method_data in methods_dict.items():
+            per_fold_metrics = method_data.get('per_fold_metrics', [])
+            if per_fold_metrics and len(per_fold_metrics) > 0:
+                # Extract accuracy from each fold
+                for fold in per_fold_metrics:
+                    acc = fold.get('accuracy', np.nan)
+                    if not np.isnan(acc):
+                        per_fold_accuracies.append(acc)
+                break  # Use first method with data
+        
+        # Compute mean accuracy
+        if per_fold_accuracies:
+            # Assuming all methods have same number of folds, compute mean across folds
+            num_folds = len(per_fold_accuracies)
+            mean_per_fold_accuracy = np.mean(per_fold_accuracies)
+        else:
+            # Fallback to ensemble accuracy if no per-fold data
+            mean_per_fold_accuracy = data.get('test_accuracy', np.nan)
+        
+        # Compute oracle and random AUGRC bounds using mean per-fold accuracy
+        oracle_augrc = compute_oracle_augrc(mean_per_fold_accuracy)
+        random_augrc = compute_random_augrc(mean_per_fold_accuracy)
+        
+        augrc_data = {
+            'per_fold': {}, 
+            'ensemble': {},
+            'oracle_augrc': oracle_augrc,
+            'random_augrc': random_augrc,
+            'test_accuracy': mean_per_fold_accuracy
+        }
+
         
         for method_name, method_data in methods_dict.items():
-            # Per-fold Ngto - CRITICAL: use each fold's AUROC_f
-            # Ngto = 2(1 - AUROC_f) by mathematical simplification
-            # (accuracy terms cancel out in the full formula)
+            # Per-fold AUGRC - use each fold's AUGRC directly from JSON
             per_fold_metrics = method_data.get('per_fold_metrics', [])
             if per_fold_metrics:
-                per_fold_ngto = []
+                per_fold_augrc = []
                 for i, fold in enumerate(per_fold_metrics):
-                    auroc_f = fold.get('auroc_f', np.nan)
-                    if not np.isnan(auroc_f):
-                        ngto = 2.0 * (1.0 - auroc_f)
-                        per_fold_ngto.append(ngto)
+                    augrc = fold.get('augrc', np.nan)
+                    if not np.isnan(augrc):
+                        per_fold_augrc.append(augrc)
                     else:
-                        per_fold_ngto.append(np.nan)
+                        per_fold_augrc.append(np.nan)
                 
-                ngto_data['per_fold'][method_name] = np.array(per_fold_ngto)
+                augrc_data['per_fold'][method_name] = np.array(per_fold_augrc)
             
-            # Ensemble Ngto - use ensemble AUROC_f
-            # Ngto = 2(1 - AUROC_f)
-            auroc_f_ens = method_data.get('auroc_f', np.nan)
-            if not np.isnan(auroc_f_ens):
-                ngto = 2.0 * (1.0 - auroc_f_ens)
-                ngto_data['ensemble'][method_name] = ngto
+            # Ensemble AUGRC - use ensemble AUGRC from JSON
+            augrc_ens = method_data.get('augrc', np.nan)
+            if not np.isnan(augrc_ens):
+                augrc_data['ensemble'][method_name] = augrc_ens
         
         # Compute Mean_Aggregation (z-scored average of specific methods)
         # Load NPZ file to get raw uncertainties for z-score computation
@@ -230,8 +250,8 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
                         per_fold_predictions = cache_data['per_fold_predictions']
                         y_true = cache_data['y_true']
                         
-                        # Compute AUROC_f for each fold's aggregated uncertainties
-                        agg_per_fold_auroc_f = []
+                        # Compute AUGRC for each fold's aggregated uncertainties
+                        agg_per_fold_augrc = []
                         
                         for fold_idx in range(num_folds):
                             # Z-score normalize each method for this fold
@@ -255,7 +275,7 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
                                 predictions = per_fold_predictions[fold_idx]
                                 labels = y_true
                                 
-                                # Compute AUROC_f for this fold (failure prediction)
+                                # Compute AUGRC for this fold
                                 compute_augrc_func = get_compute_augrc()
                                 from FailCatcher.evaluation.evaluation import compute_auroc
                                 
@@ -265,22 +285,17 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
                                 
                                 if len(fold_correct) > 0 and len(fold_incorrect) > 0:
                                     auroc_f = compute_auroc(aggregated, fold_correct, fold_incorrect)
-                                    agg_per_fold_auroc_f.append(auroc_f)
+                                    # Compute fold accuracy
+                                    fold_acc = len(fold_correct) / len(predictions)
+                                    # Compute AUGRC
+                                    fold_augrc = compute_augrc_from_auroc(auroc_f, fold_acc)
+                                    agg_per_fold_augrc.append(fold_augrc)
                                 else:
-                                    agg_per_fold_auroc_f.append(np.nan)
+                                    agg_per_fold_augrc.append(np.nan)
                         
-                        # Compute per-fold Ngto for Mean_Aggregation using AUROC_f
-                        # Ngto = 2(1 - AUROC_f)
-                        if agg_per_fold_auroc_f:
-                            mean_agg_per_fold_ngto = []
-                            for auroc_f in agg_per_fold_auroc_f:
-                                if not np.isnan(auroc_f):
-                                    ngto = 2.0 * (1.0 - auroc_f)
-                                    mean_agg_per_fold_ngto.append(ngto)
-                                else:
-                                    mean_agg_per_fold_ngto.append(np.nan)
-                            
-                            ngto_data['per_fold']['Mean_Aggregation'] = np.array(mean_agg_per_fold_ngto)
+                        # Store per-fold AUGRC for Mean_Aggregation
+                        if agg_per_fold_augrc:
+                            augrc_data['per_fold']['Mean_Aggregation'] = np.array(agg_per_fold_augrc)
                         
                         # Ensemble Mean_Aggregation - compute AUROC_f from ensemble uncertainties
                         ensemble_keys = [f'{m}_ensemble' for m in methods_to_use]
@@ -315,24 +330,27 @@ def load_ngto_data(results_dir, dataset_name, model_name='resnet18', setup='stan
                                 
                                 if len(ensemble_correct) > 0 and len(ensemble_incorrect) > 0:
                                     auroc_f_ens = compute_auroc(aggregated_ensemble, ensemble_correct, ensemble_incorrect)
-                                    # Ngto = 2(1 - AUROC_f)
-                                    ensemble_ngto = 2.0 * (1.0 - auroc_f_ens)
-                                    ngto_data['ensemble']['Mean_Aggregation'] = ensemble_ngto
+                                    # Compute ensemble accuracy
+                                    ens_acc = len(ensemble_correct) / len(ensemble_predictions)
+                                    # Compute ensemble AUGRC
+                                    ensemble_augrc = compute_augrc_from_auroc(auroc_f_ens, ens_acc)
+                                    augrc_data['ensemble']['Mean_Aggregation'] = ensemble_augrc
                             
             except Exception as e:
                 print(f"      Warning: Could not compute Mean_Aggregation for {dataset_name} {setup}: {e}")
         
-        return ngto_data
+        return augrc_data
     except Exception as e:
         print(f"Error loading {json_file}: {e}")
-        return {'per_fold': {}, 'ensemble': {}}
+        return {'per_fold': {}, 'ensemble': {}, 'oracle_augrc': np.nan, 'random_augrc': np.nan, 'test_accuracy': np.nan}
 
 
-def plot_ngto_for_dataset(dataset_name, model_names, results_dir, ax):
+def plot_augrc_for_dataset(dataset_name, model_names, results_dir, ax):
     """
-    Create Ngto histogram for one dataset with both ResNet18 and ViT models.
+    Create AUGRC plot for one dataset with both ResNet18 and ViT models.
     
-    Shows per-fold Ngto distribution as histograms and ensemble Ngto as diamond markers.
+    Shows boxes spanning oracle to random AUGRC, with mean per-fold AUGRC as line
+    and ensemble AUGRC as diamond/lightning markers.
     
     Args:
         dataset_name: Base dataset name (e.g., 'breastmnist')
@@ -365,50 +383,56 @@ def plot_ngto_for_dataset(dataset_name, model_names, results_dir, ax):
     x_offset = 0
     for model_idx, model_name in enumerate(model_names):
         for setup_idx, setup in enumerate(setups):
-            # Load Ngto data
-            ngto_data = load_ngto_data(results_dir, dataset_name, model_name, setup)
+            # Load AUGRC data
+            augrc_data = load_augrc_data(results_dir, dataset_name, model_name, setup)
+            oracle_augrc = augrc_data['oracle_augrc']
+            random_augrc = augrc_data['random_augrc']
             
             # Select methods based on setup
             current_methods = methods_with_dropout if setup in ['DO', 'DADO'] else methods
             
             for method_idx, method in enumerate(current_methods):
-                # Get per-fold Ngto
-                per_fold_ngto = ngto_data['per_fold'].get(method, None)
-                ensemble_ngto = ngto_data['ensemble'].get(method, None)
+                # Get per-fold AUGRC
+                per_fold_augrc = augrc_data['per_fold'].get(method, None)
+                ensemble_augrc = augrc_data['ensemble'].get(method, None)
                 
                 # Special handling for Ensembling: only ensemble point (no per-fold bars)
                 if method == 'Ensembling':
-                    if ensemble_ngto is not None and not np.isnan(ensemble_ngto):
+                    if ensemble_augrc is not None and not np.isnan(ensemble_augrc):
                         x_pos = x_offset + method_idx * bar_width
                         all_data.append({
                             'x_pos': x_pos,
-                            'per_fold_ngto': np.array([]),  # Empty for Ensembling
-                            'ensemble_ngto': ensemble_ngto,
+                            'per_fold_augrc': np.array([]),  # Empty for Ensembling
+                            'ensemble_augrc': ensemble_augrc,
                             'method': method,
                             'model': model_name,
                             'setup': setup,
-                            'color': method_colors[method]
+                            'color': method_colors[method],
+                            'oracle_augrc': oracle_augrc,
+                            'random_augrc': random_augrc
                         })
                     continue
                 
-                if per_fold_ngto is None or len(per_fold_ngto) == 0:
+                if per_fold_augrc is None or len(per_fold_augrc) == 0:
                     continue
                 
                 # Filter out NaN values
-                valid_ngto = per_fold_ngto[~np.isnan(per_fold_ngto)]
-                if len(valid_ngto) == 0:
+                valid_augrc = per_fold_augrc[~np.isnan(per_fold_augrc)]
+                if len(valid_augrc) == 0:
                     continue
                 
                 x_pos = x_offset + method_idx * bar_width
                 
                 all_data.append({
                     'x_pos': x_pos,
-                    'per_fold_ngto': valid_ngto,
-                    'ensemble_ngto': ensemble_ngto,
+                    'per_fold_augrc': valid_augrc,
+                    'ensemble_augrc': ensemble_augrc,
                     'method': method,
                     'model': model_name,
                     'setup': setup,
-                    'color': method_colors[method]
+                    'color': method_colors[method],
+                    'oracle_augrc': oracle_augrc,
+                    'random_augrc': random_augrc
                 })
             
             # Add spacing between setups
@@ -417,63 +441,69 @@ def plot_ngto_for_dataset(dataset_name, model_names, results_dir, ax):
         # Add larger spacing between models
         x_offset += 0.25
     
-    # Plot bars: per-fold Ngto as boxplots/histograms
+    # Plot boxes and markers
     for data in all_data:
         x_pos = data['x_pos']
-        per_fold_ngto = data['per_fold_ngto']
-        ensemble_ngto = data['ensemble_ngto']
+        per_fold_augrc = data['per_fold_augrc']
+        ensemble_augrc = data['ensemble_augrc']
         color = data['color']
         method = data['method']
+        oracle_augrc = data['oracle_augrc']
+        random_augrc = data['random_augrc']
         
-        # Create violin-like representation: show min, max, median
-        # Skip bars for Ensembling (only show diamond)
-        if len(per_fold_ngto) > 0 and method != 'Ensembling':
-            min_val = np.min(per_fold_ngto)
-            max_val = np.max(per_fold_ngto)
-            median_val = np.median(per_fold_ngto)
-            
-            # Bar from min to max (fold variability)
-            height = max_val - min_val
-            ax.bar(x_pos, height, width=bar_width * 0.8, bottom=min_val,
-                   color=color, edgecolor='gray', linewidth=1.0, alpha=0.3, zorder=2)
-            
-            # Median line
-            ax.hlines(median_val, x_pos - bar_width * 0.4, x_pos + bar_width * 0.4,
-                     colors='black', linewidth=2.0, zorder=3)
+        # Draw box from oracle (bottom, best) to random (top, worst) AUGRC
+        if not np.isnan(oracle_augrc) and not np.isnan(random_augrc):
+            box_height = random_augrc - oracle_augrc
+            ax.bar(x_pos, box_height, width=bar_width * 0.8, bottom=oracle_augrc,
+                   color=color, edgecolor='gray', linewidth=1.0, alpha=0.15, zorder=1)
+        
+        # Plot mean per-fold AUGRC as horizontal line
+        if len(per_fold_augrc) > 0 and method != 'Ensembling':
+            mean_augrc = np.mean(per_fold_augrc)
+            ax.hlines(mean_augrc, x_pos - bar_width * 0.4, x_pos + bar_width * 0.4,
+                     colors='black', linewidth=2.5, zorder=3)
         
         # Plot ensemble marker for ALL methods (including Ensembling)
-        if ensemble_ngto is not None and not np.isnan(ensemble_ngto):
+        if ensemble_augrc is not None and not np.isnan(ensemble_augrc):
             if method == 'Mean_Aggregation':
-                # Lightning bolt marker for Mean_Aggregation (same as radar plots)
-                ax.scatter(x_pos, ensemble_ngto, s=300, marker='$\u26A1$',
+                # Lightning bolt marker for Mean_Aggregation
+                ax.scatter(x_pos, ensemble_augrc, s=300, marker='$\u26A1$',
                           color=color, edgecolors='black', linewidths=1.5, zorder=4)
             else:
                 # Diamond for other methods (including Ensembling)
-                ax.plot(x_pos, ensemble_ngto, marker='D', markersize=8,
+                ax.plot(x_pos, ensemble_augrc, marker='D', markersize=8,
                        color=color, markeredgecolor='black', markeredgewidth=1.5, zorder=4)
     
     # Formatting
-    # Determine y-axis range based on actual data
+    # Determine y-axis range based on actual data (bars span oracle to random)
     all_values = []
+    oracle_values = []
+    random_values = []
     for data in all_data:
-        all_values.extend(data['per_fold_ngto'])
-        if data['ensemble_ngto'] is not None and not np.isnan(data['ensemble_ngto']):
-            all_values.append(data['ensemble_ngto'])
+        all_values.extend(data['per_fold_augrc'])
+        if data['ensemble_augrc'] is not None and not np.isnan(data['ensemble_augrc']):
+            all_values.append(data['ensemble_augrc'])
+        if not np.isnan(data['oracle_augrc']):
+            oracle_values.append(data['oracle_augrc'])
+        if not np.isnan(data['random_augrc']):
+            random_values.append(data['random_augrc'])
     
-    if all_values:
-        max_ngto = max(all_values)
-        y_max = max(1.1, max_ngto + 0.05)  # At least 1.1, or higher if needed
+    # Set y-axis limits based on min/max of oracle and random bounds
+    if oracle_values and random_values:
+        min_oracle = min(oracle_values)
+        max_random = max(random_values)
+        # Add 5% padding above and below
+        y_range = max_random - min_oracle
+        y_min = max(0, min_oracle - 0.05 * y_range)
+        y_max = max_random + 0.05 * y_range
     else:
-        y_max = 1.1
+        y_min = 0
+        y_max = 0.15
     
-    ax.set_ylim(-0.05, y_max)
-    ax.set_ylabel('Ngto (0=Oracle, 1=Random)', fontsize=16, fontweight='bold', labelpad=10)
+    ax.set_ylim(y_min, y_max)
+    ax.set_ylabel('AUGRC (lower is better)', fontsize=16, fontweight='bold', labelpad=10)
     ax.set_xlim(-0.2, x_offset - 0.25)
     ax.set_xticks([])
-    
-    # Add horizontal reference lines
-    ax.axhline(y=0, color='green', linestyle='--', linewidth=2, alpha=0.7, label='Oracle (Ngto=0)')
-    ax.axhline(y=1, color='red', linestyle='--', linewidth=2, alpha=0.7, label='Random (Ngto=1)')
     
     ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=1.2, color='#BCC1C7', zorder=0)
     ax.spines['top'].set_visible(False)
@@ -484,10 +514,10 @@ def plot_ngto_for_dataset(dataset_name, model_names, results_dir, ax):
 
 
 def main():
-    """Generate Ngto plots for all ID datasets."""
+    """Generate AUGRC plots for all ID datasets."""
     
     print("="*80)
-    print("Ngto (Normalized Gap to Oracle) Plot Generator")
+    print("AUGRC Plot Generator (Oracle vs Random Boundaries)")
     print("="*80)
     
     # Setup paths - use uq_benchmark_results/id_results where the AUROC data is
@@ -505,7 +535,7 @@ def main():
     
     print()
     print("="*80)
-    print(f"Creating Ngto plot with all {len(datasets)} datasets")
+    print(f"Creating AUGRC plot with all {len(datasets)} datasets")
     print("="*80)
     
     # Create single figure with all datasets
@@ -514,13 +544,13 @@ def main():
     if n_datasets == 1:
         axes = [axes]
     
-    fig.suptitle('Normalized Gap to Oracle (Ngto) - All ID Datasets', 
+    fig.suptitle('AUGRC with Oracle and Random Boundaries - All ID Datasets', 
                  fontsize=28, fontweight='bold', y=0.995)
     
     # Plot each dataset
     for idx, dataset in enumerate(datasets):
         print(f"  Plotting {dataset}...")
-        plot_ngto_for_dataset(dataset, models, uq_results_dir, axes[idx])
+        plot_augrc_for_dataset(dataset, models, uq_results_dir, axes[idx])
     
     # Add model and setup labels at the top
     ax_top = axes[0]
@@ -574,14 +604,19 @@ def main():
                      edgecolor='black', linewidth=1.0, alpha=1.0)  # Fully opaque, darker
         for method in methods_with_dropout
     ]
+    legend_elements.append(plt.Rectangle((0, 0), 1, 1, fc='lightgray', 
+                     edgecolor='gray', linewidth=1.0, alpha=0.15,
+                     label='Oracle→Random bounds'))
+    legend_elements.append(plt.Line2D([0], [0], color='black', linewidth=2.5, 
+                                     label='Mean per-fold AUGRC'))
     legend_elements.append(plt.Line2D([0], [0], marker='D', color='w', markerfacecolor='gray',
                                      markeredgecolor='black', markersize=8, 
-                                     label='Ensemble Ngto'))
+                                     label='Ensemble AUGRC'))
     
     # Place legend below first graph (tissuemnist)
-    axes[0].legend(legend_elements, methods_with_dropout + ['Ensemble'], 
+    axes[0].legend(legend_elements, methods_with_dropout + ['Oracle→Random', 'Mean per-fold', 'Ensemble'], 
                    loc='upper center', bbox_to_anchor=(0.5, -0.05), 
-                   fontsize=12, ncol=len(methods_with_dropout)+1,  # One line
+                   fontsize=12, ncol=len(methods_with_dropout)+3,  # One line
                    framealpha=0.95, edgecolor='gray', fancybox=True, shadow=True)
     
     # Adjust layout
@@ -589,7 +624,7 @@ def main():
     plt.subplots_adjust(hspace=0.35)
     
     # Save plot
-    output_path = output_dir / 'ngto_all_datasets.png'
+    output_path = output_dir / 'augrc_oracle_bounds_all_datasets.png'
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     print()
     print(f"✓ Saved {output_path}")
@@ -597,7 +632,7 @@ def main():
     
     print()
     print("="*80)
-    print("✓ Ngto plot generated successfully!")
+    print("✓ AUGRC plot generated successfully!")
     print("="*80)
 
 
