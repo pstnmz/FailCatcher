@@ -182,6 +182,15 @@ def generate_command(
         cmd_parts.append(f"--gps-calib-samples {gps_subsample}")
     cmd_parts.append("--min-failure-ratio 0.3")
     
+    # Corruption parameters (covariate shift)
+    corruption_severity = kwargs.get('corruption_severity', 0)
+    if corruption_severity > 0:
+        cmd_parts.append(f"--corruption-severity {corruption_severity}")
+        if kwargs.get('corrupt_test', False):
+            cmd_parts.append("--corrupt-test")
+        if kwargs.get('corrupt_calib', False):
+            cmd_parts.append("--corrupt-calib")
+    
     return ' '.join(cmd_parts)
 
 
@@ -194,7 +203,10 @@ def generate_all_commands(
     gpu: int,
     exclude_methods: List[str] = None,
     per_fold_eval: bool = True,
-    output_dir: str = './uq_benchmark_results'
+    output_dir: str = './uq_benchmark_results',
+    corruption_severity: int = 0,
+    corrupt_test: bool = False,
+    corrupt_calib: bool = False
 ) -> List[Dict]:
     """
     Generate all benchmark commands for specified configurations.
@@ -223,7 +235,10 @@ def generate_all_commands(
                     script_path=script_path,
                     gpu=gpu,
                     per_fold_eval=per_fold_eval,
-                    output_dir=output_dir
+                    output_dir=output_dir,
+                    corruption_severity=corruption_severity,
+                    corrupt_test=corrupt_test,
+                    corrupt_calib=corrupt_calib
                 )
                 
                 commands.append({
@@ -378,6 +393,20 @@ def main():
         help='Use ensemble evaluation instead of per-fold'
     )
     
+    # Covariate shift / corruption arguments
+    parser.add_argument(
+        '--corruption-severity', type=int, default=0, choices=[0, 1, 2, 3, 4, 5],
+        help='Apply random covariate shift corruptions. 0=disabled (clean), 1=mild to 5=severe (default: 0)'
+    )
+    parser.add_argument(
+        '--corrupt-test', action='store_true', default=False,
+        help='Apply corruption to test set (requires --corruption-severity > 0)'
+    )
+    parser.add_argument(
+        '--corrupt-calib', action='store_true', default=False,
+        help='Apply corruption to calibration set (requires --corruption-severity > 0)'
+    )
+    
     # Control flags
     parser.add_argument(
         '--dry-run', action='store_true',
@@ -419,7 +448,10 @@ def main():
         gpu=args.gpu,
         exclude_methods=args.exclude_methods,
         per_fold_eval=args.per_fold_eval,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        corruption_severity=args.corruption_severity,
+        corrupt_test=args.corrupt_test,
+        corrupt_calib=args.corrupt_calib
     )
     
     if not commands:

@@ -461,6 +461,17 @@ class CorruptedDataset(Dataset):
     def __len__(self):
         return len(self.base_dataset)
     
+    @property
+    def transform(self):
+        """Expose transform attribute from base dataset for compatibility."""
+        return getattr(self.base_dataset, 'transform', None)
+    
+    @transform.setter
+    def transform(self, value):
+        """Allow setting transform on base dataset."""
+        if hasattr(self.base_dataset, 'transform'):
+            self.base_dataset.transform = value
+    
     def _select_corruption(self, idx):
         """Select corruption function for this index."""
         if len(self.corruption_funcs) == 1:

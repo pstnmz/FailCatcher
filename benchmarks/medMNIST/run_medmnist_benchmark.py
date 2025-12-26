@@ -125,14 +125,21 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             tr.load_datasets(base_flag, color, image_size, transform_tta, batch_size, test_subset=test_subset)
         
         # Apply corruptions if requested
-        if corruption_severity > 0:
+        if corruption_severity > 0 and (corrupt_test or corrupt_calib):
             print(f"\n🔬 Applying covariate shift corruptions...")
+            # Map dataset name for corruption (dermamnist-e variants use 'dermamnist')
+            if 'dermamnist' in base_flag:
+                corruption_flag = 'dermamnist'
+            else:
+                corruption_flag = base_flag
+            
             if corrupt_test:
+                print(f"  → Corrupting test set (severity={corruption_severity}/5)")
                 test_dataset = dataset_utils.apply_random_corruptions(
-                    test_dataset, args.flag, args.corruption_severity, cache=True, seed=42
+                    test_dataset, corruption_flag, corruption_severity, cache=True, seed=42
                 )
                 test_dataset_tta = dataset_utils.apply_random_corruptions(
-                    test_dataset_tta, flag, corruption_severity, cache=True, seed=42
+                    test_dataset_tta, corruption_flag, corruption_severity, cache=True, seed=42
                 )
                 # Rebuild test loader with corrupted dataset
                 test_loader = DataLoader(
@@ -140,11 +147,12 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                     num_workers=4, pin_memory=True
                 )
             if corrupt_calib:
+                print(f"  → Corrupting calibration set (severity={corruption_severity}/5)")
                 calib_dataset = dataset_utils.apply_random_corruptions(
-                    calib_dataset, args.flag, args.corruption_severity, cache=True, seed=42
+                    calib_dataset, corruption_flag, corruption_severity, cache=True, seed=42
                 )
                 calib_dataset_tta = dataset_utils.apply_random_corruptions(
-                    calib_dataset_tta, flag, corruption_severity, cache=True, seed=42
+                    calib_dataset_tta, corruption_flag, corruption_severity, cache=True, seed=42
                 )
                 # Rebuild calib loader with corrupted dataset
                 calib_loader = DataLoader(
@@ -165,19 +173,19 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         )
         
         # Apply corruptions if requested
-        if corruption_severity > 0:
+        if corruption_severity > 0 and corrupt_test:
             print(f"\n🔬 Applying covariate shift corruptions...")
-            if corrupt_test:
-                test_dataset = dataset_utils.apply_random_corruptions(
-                    test_dataset, flag, corruption_severity, cache=True, seed=42
-                )
-                test_dataset_tta = dataset_utils.apply_random_corruptions(
-                    test_dataset_tta, flag, corruption_severity, cache=True, seed=42
-                )
-                # Rebuild test loader
-                test_loader = torch.utils.data.DataLoader(
-                    test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
-                )
+            print(f"  → Corrupting test set (severity={corruption_severity}/5)")
+            test_dataset = dataset_utils.apply_random_corruptions(
+                test_dataset, flag, corruption_severity, cache=True, seed=42
+            )
+            test_dataset_tta = dataset_utils.apply_random_corruptions(
+                test_dataset_tta, flag, corruption_severity, cache=True, seed=42
+            )
+            # Rebuild test loader
+            test_loader = torch.utils.data.DataLoader(
+                test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+            )
     
     print(f"  Models: {len(models)} folds")
     # For organamnist: study=train (medMNIST), calib=val (medMNIST)
