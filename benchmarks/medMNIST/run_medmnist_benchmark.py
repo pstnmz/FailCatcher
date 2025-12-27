@@ -452,6 +452,12 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     knn_batch_size = min(batch_size, 3000)  # Conservative default for all models
     knn_test_loader = test_loader
     
+    # TTA/GPS batch size - also needs reduction for ViT on large datasets
+    tta_gps_batch_size = batch_size
+    if model_backbone == 'vit_b_16' and batch_size > 3000:
+        tta_gps_batch_size = 3000
+        print(f"  ℹ️  Using reduced batch size {tta_gps_batch_size} for TTA/GPS with ViT (avoids OOM)")
+    
     # Further reduce for ViT models which consume significantly more memory
     if model_backbone == 'vit_b_16':
         knn_batch_size = min(batch_size, 4000)  # Reduce to 4000 for ViT to avoid OOM
@@ -565,7 +571,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         uncertainties, metrics = detector.run_tta(
             test_dataset_tta, y_true,
             image_size=image_size,
-            batch_size=batch_size,
+            batch_size=tta_gps_batch_size,
             nb_augmentations=5,
             per_fold_evaluation=per_fold_eval,
             seed=42
@@ -691,7 +697,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             correct_idx_calib=gps_correct_idx,
             incorrect_idx_calib=gps_incorrect_idx,
             image_size=image_size,
-            batch_size=batch_size,
+            batch_size=tta_gps_batch_size,
             cache_dir=os.path.join(output_dir, 'gps_augment_cache'),
             per_fold_evaluation=per_fold_eval
         )
