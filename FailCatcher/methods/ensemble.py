@@ -145,7 +145,7 @@ class MCDropoutMethod(UQMethod):
             
             all_model_uncertainties.append(model_uncertainty)
             
-            # Return model to eval mode
+            # Return model to eval mode (good practice, though MCDropout now runs last)
             model.eval()
         
         # Stack uncertainties: [M, N]

@@ -551,19 +551,6 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         results['Ensemble'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
-    if 'MCDropout' in methods:
-        print("\n🔍 Running MC Dropout...")
-        mode_str = "per-fold" if per_fold_eval else "ensemble"
-        print(f"  Mode: {mode_str} evaluation")
-        uncertainties, metrics = detector.run_mcdropout(
-            test_dataset, y_true,
-            batch_size=batch_size,
-            num_samples=5,
-            per_fold_evaluation=per_fold_eval
-        )
-        results['MCDropout'] = metrics
-        print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
-    
     if 'TTA' in methods:
         print("\n🔍 Running TTA...")
         mode_str = "per-fold" if per_fold_eval else "ensemble"
@@ -758,6 +745,25 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
     
     # ========================================================================
+    # MC DROPOUT - RUN LAST TO AVOID INTERFERING WITH OTHER METHODS
+    # ========================================================================
+    # MCDropout is executed last because it modifies dropout layer states
+    # which can cause CUDA RNG issues with subsequent DataLoader forking
+    # in methods like GPS/TTA that use multiprocessing workers
+    if 'MCDropout' in methods:
+        print("\n🔍 Running MC Dropout (running last to avoid interference)...")
+        mode_str = "per-fold" if per_fold_eval else "ensemble"
+        print(f"  Mode: {mode_str} evaluation")
+        uncertainties, metrics = detector.run_mcdropout(
+            test_dataset, y_true,
+            batch_size=batch_size,
+            num_samples=5,
+            per_fold_evaluation=per_fold_eval
+        )
+        results['MCDropout'] = metrics
+        print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+    
+    # ========================================================================
     # SAVE RESULTS AND FIGURES (via FailureDetector)
     # ========================================================================
     from datetime import datetime
@@ -842,7 +848,7 @@ if __name__ == '__main__':
         '--methods', nargs='+',
         default=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP', 'MCDropout'],
         choices=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP', 'MCDropout'],
-        help='UQ methods to run'
+        help='UQ methods to run (MCDropout runs last to avoid interference with other methods)'
     )
     parser.add_argument(
         '--output-dir', type=str, default='./uq_benchmark_results',
