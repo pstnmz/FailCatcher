@@ -138,8 +138,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                 test_dataset = dataset_utils.apply_random_corruptions(
                     test_dataset, corruption_flag, corruption_severity, cache=True, seed=42
                 )
+                # For TTA: use return_pil=True to get uint8 tensors for proper augmentation
                 test_dataset_tta = dataset_utils.apply_random_corruptions(
-                    test_dataset_tta, corruption_flag, corruption_severity, cache=True, seed=42
+                    test_dataset_tta, corruption_flag, corruption_severity, cache=True, seed=42, return_pil=True
                 )
                 # Rebuild test loader with corrupted dataset
                 test_loader = DataLoader(
@@ -151,8 +152,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                 calib_dataset = dataset_utils.apply_random_corruptions(
                     calib_dataset, corruption_flag, corruption_severity, cache=True, seed=42
                 )
+                # For TTA: use return_pil=True to get uint8 tensors for proper augmentation
                 calib_dataset_tta = dataset_utils.apply_random_corruptions(
-                    calib_dataset_tta, corruption_flag, corruption_severity, cache=True, seed=42
+                    calib_dataset_tta, corruption_flag, corruption_severity, cache=True, seed=42, return_pil=True
                 )
                 # Rebuild calib loader with corrupted dataset
                 calib_loader = DataLoader(
@@ -179,8 +181,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             test_dataset = dataset_utils.apply_random_corruptions(
                 test_dataset, flag, corruption_severity, cache=True, seed=42
             )
+            # For TTA: use return_pil=True to get uint8 tensors for proper augmentation
             test_dataset_tta = dataset_utils.apply_random_corruptions(
-                test_dataset_tta, flag, corruption_severity, cache=True, seed=42
+                test_dataset_tta, flag, corruption_severity, cache=True, seed=42, return_pil=True
             )
             # Rebuild test loader
             test_loader = torch.utils.data.DataLoader(

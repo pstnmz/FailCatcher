@@ -437,7 +437,7 @@ class CorruptedDataset(Dataset):
         seed: Random seed for reproducible corruption selection (default: None)
     """
     def __init__(self, base_dataset, corruption_funcs, severity, 
-                 random_corruption=True, cache_corruptions=True, seed=None):
+                 random_corruption=True, cache_corruptions=True, seed=None, return_pil=False):
         self.base_dataset = base_dataset
         
         # Convert single corruption to list
@@ -449,6 +449,10 @@ class CorruptedDataset(Dataset):
         self.random_corruption = random_corruption
         self.cache_corruptions = cache_corruptions
         self.cache = {} if cache_corruptions else None
+        
+        # Control output format: if return_pil=True, return PIL images (for TTA)
+        # Otherwise, return tensors matching the base dataset's format
+        self.return_pil = return_pil
         
         # Set random seed for reproducibility if provided
         if seed is not None:
@@ -491,8 +495,8 @@ class CorruptedDataset(Dataset):
             return self.corruption_funcs[idx % len(self.corruption_funcs)]
     
     def __getitem__(self, idx):
-        # Check cache first
-        if self.cache is not None and idx in self.cache:
+        # Check cache first (but skip cache if return_pil=True, as TTA needs fresh PIL for transforms)
+        if self.cache is not None and not self.return_pil and idx in self.cache:
             return self.cache[idx]
         
         # Get original image and label
@@ -510,8 +514,8 @@ class CorruptedDataset(Dataset):
             original_max = img.max().item()
             is_normalized = (original_min < 0) or (original_max <= 1.0)
         
-        # Convert tensor to PIL Image for corruption
-        # Handle both normalized and unnormalized inputs
+        # Convert to PIL Image for corruption
+        # Handle tensor, numpy array, or PIL inputs
         if isinstance(img, torch.Tensor):
             # Denormalize if needed (assume [-1, 1] or [0, 1] range)
             img_np = img.cpu().numpy()
@@ -538,42 +542,90 @@ class CorruptedDataset(Dataset):
                 pil_img = PILImage.fromarray(img_np, mode='L')
             else:  # RGB
                 pil_img = PILImage.fromarray(img_np, mode='RGB')
+        elif isinstance(img, np.ndarray):
+            # Handle numpy array (medMNIST without transform returns numpy)
+            from PIL import Image as PILImage
+            img_np = img
+            
+            # Ensure uint8 [0, 255] range
+            if img_np.dtype == np.float32 or img_np.dtype == np.float64:
+                if img_np.max() <= 1.0:
+                    img_np = (img_np * 255).astype(np.uint8)
+                else:
+                    img_np = img_np.astype(np.uint8)
+            
+            # Handle grayscale (single channel)
+            if img_np.ndim == 3 and img_np.shape[-1] == 1:
+                img_np = img_np.squeeze(-1)
+            
+            if img_np.ndim == 2:  # Grayscale
+                pil_img = PILImage.fromarray(img_np, mode='L')
+            else:  # RGB
+                pil_img = PILImage.fromarray(img_np, mode='RGB')
         else:
+            # Already PIL Image
             pil_img = img
         
         # Apply corruption with deterministic seed
-        # Set all random seeds to ensure reproducibility
+        # Set all random seeds to ensure reproducibility of corruption
         # Combine base seed with sample index for per-sample determinism
+        # CRITICAL: Don't restore random state - let TTA augmentations progress naturally
         if self.seed is not None:
             corruption_seed = self.seed + idx
+            # Save current random states (for corruption isolation)
+            np_state = np.random.get_state()
+            random_state = random.getstate()
+            torch_state = torch.get_rng_state()
+            
+            # Set seeds for corruption
             np.random.seed(corruption_seed)
             random.seed(corruption_seed)
             torch.manual_seed(corruption_seed)
+            
+            # Apply corruption
+            corrupted_pil = corruption_func.apply(pil_img, severity=self.severity)
+            
+            # Restore random states so corruption doesn't affect global random sequence
+            # This ensures corruption is isolated but TTA augmentations remain random
+            np.random.set_state(np_state)
+            random.setstate(random_state)
+            torch.set_rng_state(torch_state)
+        else:
+            corrupted_pil = corruption_func.apply(pil_img, severity=self.severity)
         
-        corrupted_pil = corruption_func.apply(pil_img, severity=self.severity)
+        # Return format controlled by return_pil parameter
+        if self.return_pil:
+            # TTA mode: return corrupted PIL image directly (or apply transform if set)
+            # This allows TTA's augmentation pipeline to work correctly
+            if hasattr(self.base_dataset, 'transform') and self.base_dataset.transform is not None:
+                # Apply the transform (TTA sets this to the augmentation pipeline)
+                result = (self.base_dataset.transform(corrupted_pil), label)
+            else:
+                # No transform, return PIL directly
+                result = (corrupted_pil, label)
+        else:
+            # Regular mode: convert back to tensor with same format as original
+            corrupted_np = np.array(corrupted_pil)
+            if corrupted_np.ndim == 2:  # Grayscale
+                corrupted_np = corrupted_np[:, :, np.newaxis]
+            
+            # Normalize back to original range
+            corrupted_tensor = torch.from_numpy(corrupted_np).float()
+            if corrupted_tensor.ndim == 3:
+                corrupted_tensor = corrupted_tensor.permute(2, 0, 1)  # HWC -> CHW
+            
+            # Renormalize to match original preprocessing (using stored values)
+            if isinstance(img, torch.Tensor):
+                if original_min < 0:  # Was in [-1, 1] (Normalized)
+                    corrupted_tensor = (corrupted_tensor / 255.0) * 2 - 1  # [0, 255] -> [-1, 1]
+                elif original_max <= 1.0:  # Was in [0, 1] (ToTensor only)
+                    corrupted_tensor = corrupted_tensor / 255.0  # [0, 255] -> [0, 1]
+                # else: keep in [0, 255]
+            
+            result = (corrupted_tensor, label)
         
-        # Convert back to tensor with same format as original
-        corrupted_np = np.array(corrupted_pil)
-        if corrupted_np.ndim == 2:  # Grayscale
-            corrupted_np = corrupted_np[:, :, np.newaxis]
-        
-        # Normalize back to original range
-        corrupted_tensor = torch.from_numpy(corrupted_np).float()
-        if corrupted_tensor.ndim == 3:
-            corrupted_tensor = corrupted_tensor.permute(2, 0, 1)  # HWC -> CHW
-        
-        # Renormalize to match original preprocessing (using stored values)
-        if isinstance(img, torch.Tensor):
-            if original_min < 0:  # Was in [-1, 1]
-                corrupted_tensor = (corrupted_tensor / 255.0) * 2 - 1  # [0, 255] -> [-1, 1]
-            elif original_max <= 1.0:  # Was in [0, 1]
-                corrupted_tensor = corrupted_tensor / 255.0  # [0, 255] -> [0, 1]
-            # else: keep in [0, 255]
-        
-        result = (corrupted_tensor, label)
-        
-        # Cache if enabled
-        if self.cache is not None:
+        # Cache if enabled (but not for return_pil=True, as TTA needs fresh PIL)
+        if self.cache is not None and not self.return_pil:
             self.cache[idx] = result
         
         return result
@@ -604,7 +656,7 @@ def get_available_corruptions(flag):
     return dict(CORRUPTIONS_DS[base_flag])
 
 
-def apply_random_corruptions(dataset, flag, severity, cache=True, seed=42):
+def apply_random_corruptions(dataset, flag, severity, cache=True, seed=42, return_pil=False):
     """
     Apply random corruptions from available medmnistc corruptions to a dataset.
     Each sample will be randomly corrupted using one of the available corruptions.
@@ -615,6 +667,7 @@ def apply_random_corruptions(dataset, flag, severity, cache=True, seed=42):
         severity: Corruption severity (1-5)
         cache: Whether to cache corrupted images
         seed: Random seed for reproducible corruption selection
+        return_pil: If True, return PIL images (for TTA). If False, return tensors.
     
     Returns:
         CorruptedDataset wrapper or original dataset if corruption not available
@@ -655,11 +708,12 @@ def apply_random_corruptions(dataset, flag, severity, cache=True, seed=42):
         severity, 
         random_corruption=True,
         cache_corruptions=cache,
-        seed=seed
+        seed=seed,
+        return_pil=return_pil
     )
 
 
-def apply_specific_corruption(dataset, flag, corruption_type, severity, cache=True):
+def apply_specific_corruption(dataset, flag, corruption_type, severity, cache=True, return_pil=False):
     """
     Apply a specific corruption to a dataset.
     
@@ -669,6 +723,7 @@ def apply_specific_corruption(dataset, flag, corruption_type, severity, cache=Tr
         corruption_type: Name of corruption (e.g., 'pixelate', 'gaussian_noise')
         severity: Corruption severity (1-5)
         cache: Whether to cache corrupted images
+        return_pil: If True, return PIL images (for TTA). If False, return tensors.
     
     Returns:
         CorruptedDataset wrapper or original dataset if corruption not available
@@ -702,7 +757,8 @@ def apply_specific_corruption(dataset, flag, corruption_type, severity, cache=Tr
         dataset, 
         corruption_func, 
         severity, 
-        cache_corruptions=cache
+        cache_corruptions=cache,
+        return_pil=return_pil
     )
 
 

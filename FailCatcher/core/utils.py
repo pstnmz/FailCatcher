@@ -15,10 +15,31 @@ class AddBatchDimension:
     
 # add helper to ensure PIL input
 class EnsurePIL:
+    """Convert tensor or numpy array to PIL Image, handling different value ranges."""
     def __call__(self, img):
+        # If already PIL, return as-is
+        if isinstance(img, Image.Image):
+            return img
         if isinstance(img, torch.Tensor):
-            return transforms.ToPILImage()(img.detach().cpu())
+            # Handle different tensor ranges
+            img_tensor = img.detach().cpu()
+            
+            # Check tensor type and range
+            if img_tensor.dtype == torch.uint8:
+                # Already uint8 [0, 255] - perfect for PIL
+                return transforms.ToPILImage()(img_tensor)
+            elif img_tensor.dtype == torch.float32 or img_tensor.dtype == torch.float64:
+                if img_tensor.max() <= 1.0:
+                    # Convert [0, 1] float to [0, 255] uint8 for PIL
+                    img_tensor = (img_tensor * 255).to(torch.uint8)
+                # else: assume already in [0, 255] range
+            
+            return transforms.ToPILImage()(img_tensor)
         if isinstance(img, np.ndarray):
+            # Handle numpy arrays - ensure uint8 [0, 255]
+            if img.dtype == np.float32 or img.dtype == np.float64:
+                if img.max() <= 1.0:
+                    img = (img * 255).astype(np.uint8)
             return Image.fromarray(img)
         return img
 
