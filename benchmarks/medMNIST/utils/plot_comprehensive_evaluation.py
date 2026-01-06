@@ -377,7 +377,7 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
         
         # Add dataset name inside plot (bottom right)
         ax.text(0.98, 0.04, display_name, transform=ax.transAxes, 
-               fontsize=18, fontweight='bold', ha='right', va='bottom',
+               fontsize=20, fontweight='bold', ha='right', va='bottom',
                bbox=dict(boxstyle='round,pad=0.5', facecolor='white', edgecolor='gray', alpha=0.9))
         
         # Only show x-ticks on bottom row with simplified labels
@@ -389,12 +389,12 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
                 if label:  # Non-empty label
                     # Extract setup from label (e.g., "R18_Std_C" -> "Std")
                     if '_Std' in label:
-                        simplified_labels.append('standard')
+                        simplified_labels.append('S')
                     elif '_DA' in label:
                         simplified_labels.append('DA')
                     elif '_DO' in label:
                         simplified_labels.append('DO')
-                    elif '_DA' in label:  # DADO contains DA
+                    elif '_DADO' in label:  # DADO contains DA
                         simplified_labels.append('DADO')
                     else:
                         # Fallback: try to extract setup from original logic
@@ -402,7 +402,7 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
                         if len(parts) >= 2:
                             setup_part = parts[1].replace('C', '').replace('P', '')
                             if setup_part == 'Std':
-                                simplified_labels.append('standard')
+                                simplified_labels.append('S')
                             else:
                                 simplified_labels.append(setup_part)
                         else:
@@ -411,7 +411,7 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
                     simplified_labels.append('')
             
             ax.set_xticks(all_positions)
-            ax.set_xticklabels(simplified_labels, rotation=90, ha='center', fontsize=13, fontweight='bold')
+            ax.set_xticklabels(simplified_labels, rotation=90, ha='center', fontsize=17, fontweight='bold')
         else:
             ax.set_xticks([])
         
@@ -450,45 +450,45 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
     # Each column has 6 divisions: ResNet18 (ID, Corruption, Population) + VIT (ID, Corruption, Population)
     # LEFT COLUMN (col=0): spans 0.05 to 0.50
     # Line 1: RESNET 18 (over 3 divisions) and VIT_B_16 (over 3 divisions)
-    fig.text(0.1500, 0.985, 'RESNET 18', ha='center', va='top', fontsize=20, fontweight='bold')
-    fig.text(0.3875, 0.985, 'VIT_B_16', ha='center', va='top', fontsize=20, fontweight='bold')
+    # fig.text(0.1500, 0.985, 'RESNET 18', ha='center', va='top', fontsize=20, fontweight='bold')
+    # fig.text(0.3875, 0.985, 'VIT_B_16', ha='center', va='top', fontsize=20, fontweight='bold')
     # Line 2: ID / CORRUPTION / POPULATION for each model
-    fig.text(0.0725, 0.95, 'ID', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.1500, 0.96, 'CORRUPTION', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.2300, 0.96, 'POPULATION', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.3050, 0.95, 'ID', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.3875, 0.96, 'CORRUPTION', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.4625, 0.96, 'POPULATION', ha='center', va='top', fontsize=16, fontweight='bold')
+    fig.text(0.0725, 0.945, 'R18-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.1500, 0.945, 'R18-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.2300, 0.945, 'R18-PS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.3050, 0.945, 'VIT-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.3875, 0.945, 'VIT-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.4625, 0.945, 'VIT-PS', ha='center', va='top', fontsize=22, fontweight='bold')
     # Line 3: (blank) / SHIFTS / SHIFTS
-    fig.text(0.1500, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.2300, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.3875, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.4625, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.1500, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.2300, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.3875, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.4625, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
     
     # RIGHT COLUMN (col=1): spans 0.50 to 0.95
-    fig.text(0.6375, 0.985, 'RESNET 18', ha='center', va='top', fontsize=20, fontweight='bold')
-    fig.text(0.8775, 0.985, 'VIT_B_16', ha='center', va='top', fontsize=20, fontweight='bold')
+    # fig.text(0.6375, 0.985, 'RESNET 18', ha='center', va='top', fontsize=20, fontweight='bold')
+    # fig.text(0.8775, 0.985, 'VIT_B_16', ha='center', va='top', fontsize=20, fontweight='bold')
     # Line 2: ID / CORRUPTION / POPULATION
-    fig.text(0.5625, 0.95, 'ID', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.6375, 0.96, 'CORRUPTION', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.7175, 0.96, 'POPULATION', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.7975, 0.95, 'ID', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.8775, 0.96, 'CORRUPTION', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.9550, 0.96, 'POPULATION', ha='center', va='top', fontsize=16, fontweight='bold')
+    fig.text(0.5625, 0.945, 'R18-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.6375, 0.945, 'R18-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.7175, 0.945, 'R18-PS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.7975, 0.945, 'VIT-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.8775, 0.945, 'VIT-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.9550, 0.945, 'VIT-PS', ha='center', va='top', fontsize=22, fontweight='bold')
     # Line 3: (blank) / SHIFTS / SHIFTS
-    fig.text(0.6375, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.7175, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.8775, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    fig.text(0.9550, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.6375, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.7175, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.8775, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    # fig.text(0.9550, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
     
     # Create legend and place it inside Pathmnist plot (first plot, row=0, col=0)
     legend_elements = [
         mpatches.Patch(facecolor='lightgray', edgecolor='black', alpha=0.4, 
                       label='ID fold variability'),
         mpatches.Patch(facecolor='lightcoral', edgecolor='black', alpha=0.4, 
-                      label='Corruption fold variability'),
+                      label='CS fold variability'),
         mpatches.Patch(facecolor='lightskyblue', edgecolor='black', alpha=0.4, 
-                      label='Population fold variability')
+                      label='PS fold variability')
     ]
     for setup, style in SETUP_STYLES.items():
         legend_elements.append(
@@ -499,7 +499,7 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
     
     # Place legend inside Pathmnist plot (row=0, col=0) at bottom left
     axes[0, 0].legend(handles=legend_elements, loc='lower left', ncol=1, 
-                     fontsize=12, frameon=True, framealpha=0.9)
+                     fontsize=17, frameon=True, framealpha=0.9)
     
     plt.tight_layout(rect=[0, 0, 1, 0.94])
     
@@ -934,38 +934,61 @@ def create_all_datasets_boxplots(results, output_dir):
 def create_ensemble_scatter_plot(results, output_dir):
     """
     Create scatter plot comparing ensemble vs per-fold mean balanced accuracy.
+    Includes all shift types: in-distribution, corruption, and population.
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    fig, ax = plt.subplots(figsize=(10, 10))
+    fig, ax = plt.subplots(figsize=(12, 12))
     
-    # Collect data - only in-distribution
+    # Define shift type styles
+    shift_styles = {
+        'in_distribution': {'facecolor': 'full', 'alpha': 0.7, 'label': 'In-Distribution'},
+        'corruption': {'facecolor': 'none', 'alpha': 1.0, 'label': 'Corruption Shift'},
+        'population': {'facecolor': 'left', 'alpha': 0.9, 'label': 'Population Shift'}
+    }
+    
+    # Collect data - all shift types
     for dataset in results:
         for model in results[dataset]:
             for setup in results[dataset][model]:
-                # Only plot in-distribution results
-                if 'in_distribution' not in results[dataset][model][setup]:
-                    continue
+                for shift_type in ['in_distribution', 'corruption', 'population']:
+                    if shift_type not in results[dataset][model][setup]:
+                        continue
                     
-                data = results[dataset][model][setup]['in_distribution']
-                fold_mean = np.mean(data['per_fold_bacc'])
-                ensemble_bacc = data['ensemble_bacc']
-                
-                style = SETUP_STYLES[setup]
-                
-                # Plot point
-                if model == 'resnet18':
-                    marker_size = 100
-                    edgewidth = 1.5
-                else:  # vit_b_16
-                    marker_size = 120
-                    edgewidth = 2.0
-                
-                ax.scatter(fold_mean, ensemble_bacc, 
-                          marker=style['marker'], s=marker_size,
-                          color=style['color'], alpha=0.7,
-                          edgecolors='black', linewidths=edgewidth,
-                          label=f"{model}_{setup}" if dataset == list(results.keys())[0] and model == 'resnet18' else '')
+                    data = results[dataset][model][setup][shift_type]
+                    fold_mean = np.mean(data['per_fold_bacc'])
+                    ensemble_bacc = data['ensemble_bacc']
+                    
+                    style = SETUP_STYLES[setup]
+                    shift_style = shift_styles[shift_type]
+                    
+                    # Plot point with different marker fills for shift types
+                    if model == 'resnet18':
+                        marker_size = 120
+                        edgewidth = 2.0
+                    else:  # vit_b_16
+                        marker_size = 150
+                        edgewidth = 2.5
+                    
+                    # Handle different fill styles for shift types
+                    if shift_style['facecolor'] == 'full':
+                        # In-distribution: filled
+                        ax.scatter(fold_mean, ensemble_bacc, 
+                                  marker=style['marker'], s=marker_size,
+                                  color=style['color'], alpha=shift_style['alpha'],
+                                  edgecolors='black', linewidths=edgewidth)
+                    elif shift_style['facecolor'] == 'none':
+                        # Corruption: hollow
+                        ax.scatter(fold_mean, ensemble_bacc, 
+                                  marker=style['marker'], s=marker_size,
+                                  facecolors='none', edgecolors=style['color'],
+                                  alpha=shift_style['alpha'], linewidths=edgewidth+0.5)
+                    else:  # 'left' - half-filled for population
+                        ax.scatter(fold_mean, ensemble_bacc, 
+                                  marker=style['marker'], s=marker_size,
+                                  color=style['color'], alpha=shift_style['alpha'],
+                                  edgecolors='black', linewidths=edgewidth,
+                                  fillstyle=shift_style['facecolor'])
     
     # Diagonal line (y=x)
     lims = [
@@ -977,32 +1000,68 @@ def create_ensemble_scatter_plot(results, output_dir):
     ax.set_ylim(lims)
     
     # Formatting
-    ax.set_xlabel('Per-Fold Mean Balanced Accuracy', fontsize=14, fontweight='bold')
-    ax.set_ylabel('Ensemble Balanced Accuracy', fontsize=14, fontweight='bold')
-    ax.set_title('Ensemble vs Per-Fold Mean Performance\n(All Datasets Combined)', 
-                fontsize=16, fontweight='bold')
+    ax.set_xlabel('Per-Fold Mean Balanced Accuracy', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Ensemble Balanced Accuracy', fontsize=16, fontweight='bold')
+    ax.set_title('Ensemble vs Per-Fold Mean Performance\n(All Datasets and Shift Types)', 
+                fontsize=18, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3)
     ax.set_aspect('equal')
     
-    # Create custom legend
+    # Create custom legend with two columns: Setup styles and Shift types
     legend_elements = []
+    
+    # Setup markers
+    legend_elements.append(plt.Line2D([0], [0], linestyle='', label='Training Setup:', 
+                                     marker='', markersize=0))
     for setup, style in SETUP_STYLES.items():
         legend_elements.append(
             plt.Line2D([0], [0], marker=style['marker'], color='w',
                       markerfacecolor=style['color'], markeredgecolor='black',
-                      markersize=10, markeredgewidth=1.5, label=style['label'])
+                      markersize=11, markeredgewidth=1.5, label=f"  {style['label']}")
         )
+    
+    # Separator
+    legend_elements.append(plt.Line2D([0], [0], linestyle='', label='', marker='', markersize=0))
+    
+    # Shift type markers
+    legend_elements.append(plt.Line2D([0], [0], linestyle='', label='Shift Type:', 
+                                     marker='', markersize=0))
+    legend_elements.append(
+        plt.Line2D([0], [0], marker='o', color='w',
+                  markerfacecolor='gray', markeredgecolor='black',
+                  markersize=11, markeredgewidth=1.5, label='  In-Distribution')
+    )
+    legend_elements.append(
+        plt.Line2D([0], [0], marker='o', color='w',
+                  markerfacecolor='none', markeredgecolor='gray',
+                  markersize=11, markeredgewidth=2.5, label='  Corruption Shift')
+    )
+    legend_elements.append(
+        plt.Line2D([0], [0], marker='o', color='w',
+                  markerfacecolor='gray', markeredgecolor='black',
+                  markersize=11, markeredgewidth=1.5, label='  Population Shift',
+                  fillstyle='left')
+    )
+    
+    # Separator
+    legend_elements.append(plt.Line2D([0], [0], linestyle='', label='', marker='', markersize=0))
+    
+    # Model size markers
+    legend_elements.append(plt.Line2D([0], [0], linestyle='', label='Model:', 
+                                     marker='', markersize=0))
+    legend_elements.append(plt.Line2D([0], [0], marker='o', color='w',
+                                     markerfacecolor='gray', markeredgecolor='black',
+                                     markersize=9, label='  ResNet18'))
+    legend_elements.append(plt.Line2D([0], [0], marker='o', color='w',
+                                     markerfacecolor='gray', markeredgecolor='black',
+                                     markersize=11, label='  ViT-B/16'))
+    
+    # Separator and diagonal
+    legend_elements.append(plt.Line2D([0], [0], linestyle='', label='', marker='', markersize=0))
     legend_elements.append(plt.Line2D([0], [0], color='k', linestyle='--', linewidth=2, label='y=x'))
     
-    # Add model size markers
-    legend_elements.append(plt.Line2D([0], [0], marker='o', color='w',
-                                     markerfacecolor='gray', markeredgecolor='black',
-                                     markersize=8, label='ResNet18'))
-    legend_elements.append(plt.Line2D([0], [0], marker='o', color='w',
-                                     markerfacecolor='gray', markeredgecolor='black',
-                                     markersize=10, label='ViT-B/16'))
-    
-    ax.legend(handles=legend_elements, loc='lower right', fontsize=10, frameon=True)
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=11, frameon=True,
+             framealpha=0.95, edgecolor='black')
     
     plt.tight_layout()
     

@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.755,
+    "balanced_accuracy": 0.7549999999999999,
+    "auc": 0.9577146666666666,
+    "oracle_aurc": 0.030012499999999998,
+    "oracle_augrc": 0.030012499999999998,
+    "n_correct": 755,
+    "n_incorrect": 245,
+    "n_total": 1000
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.674,
+      "balanced_accuracy": 0.6739999999999999,
+      "auc": 0.929316,
+      "oracle_aurc": 0.053137999999999984,
+      "oracle_augrc": 0.053137999999999984,
+      "n_correct": 674,
+      "n_incorrect": 326,
+      "n_total": 1000
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.783,
+      "balanced_accuracy": 0.7829999999999999,
+      "auc": 0.9602679999999999,
+      "oracle_aurc": 0.023544499999999993,
+      "oracle_augrc": 0.023544499999999993,
+      "n_correct": 783,
+      "n_incorrect": 217,
+      "n_total": 1000
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.735,
+      "balanced_accuracy": 0.735,
+      "auc": 0.9383466666666667,
+      "oracle_aurc": 0.035112500000000005,
+      "oracle_augrc": 0.035112500000000005,
+      "n_correct": 735,
+      "n_incorrect": 265,
+      "n_total": 1000
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.745,
+      "balanced_accuracy": 0.7449999999999999,
+      "auc": 0.9427346666666667,
+      "oracle_aurc": 0.0325125,
+      "oracle_augrc": 0.0325125,
+      "n_correct": 745,
+      "n_incorrect": 255,
+      "n_total": 1000
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.703,
+      "balanced_accuracy": 0.7030000000000001,
+      "auc": 0.9446240000000001,
+      "oracle_aurc": 0.04410450000000001,
+      "oracle_augrc": 0.04410450000000001,
+      "n_correct": 703,
+      "n_incorrect": 297,
+      "n_total": 1000
+    }
+  ],
+  "metadata": {
+    "dataset": "octmnist",
+    "model": "vit_b_16",
+    "setup": "DO",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 4,
+    "task": "multi-class",
+    "timestamp": "2025-12-24 13:01:58"
+  }
+}

@@ -99,6 +99,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         base_flag = 'dermamnist-e'
         test_subset = 'external'
     
+    # AMOS uses organamnist models and calibration → use organamnist GPS cache
+    gps_cache_flag = 'organamnist' if flag in ['amos2022', 'amos_external', 'amos22'] else base_flag
+    
     color = base_flag in ['dermamnist', 'dermamnist-e', 'pathmnist', 'bloodmnist']
     calib_method = 'platt' if base_flag in ['breastmnist', 'pneumoniamnist'] else 'temperature'
     
@@ -168,6 +171,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         [study_dataset, calib_dataset, _], \
         [_, calib_loader, _], info = \
             tr.load_datasets('organamnist', color, image_size, transform, batch_size)
+        
+        # Load calibration dataset with TTA transform (for GPS augmentation caching)
+        [_, calib_dataset_tta, _], \
+        [_, _, _], _ = \
+            tr.load_datasets('organamnist', color, image_size, transform_tta, batch_size)
         
         # Load AMOS external test dataset
         test_dataset, test_loader, test_dataset_tta, _, _ = dataset_utils.load_amos_dataset(
@@ -576,7 +584,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         setup_name = setup if setup else 'standard'
         # Include sample count in folder name if subsampling occurs
         folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
-        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{base_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{gps_cache_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
         
         # Subsample calibration dataset (failure-aware for GPS)
         # Prioritizes failures (incorrect predictions) to maximize information density
@@ -652,7 +660,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         setup_name = setup if setup else 'standard'
         # Include sample count in folder name if subsampling occurs
         folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
-        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{base_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
+        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{gps_cache_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
         
         # If TTA_calib was run, use the subsampled indices
         # Otherwise, compute them now (GPS can run independently of TTA_calib)

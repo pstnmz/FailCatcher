@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.846,
+    "balanced_accuracy": 0.846,
+    "auc": 0.9804866666666667,
+    "oracle_aurc": 0.011858000000000004,
+    "oracle_augrc": 0.011858000000000004,
+    "n_correct": 846,
+    "n_incorrect": 154,
+    "n_total": 1000
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.811,
+      "balanced_accuracy": 0.8109999999999999,
+      "auc": 0.9706346666666668,
+      "oracle_aurc": 0.01786049999999999,
+      "oracle_augrc": 0.01786049999999999,
+      "n_correct": 811,
+      "n_incorrect": 189,
+      "n_total": 1000
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.838,
+      "balanced_accuracy": 0.8380000000000001,
+      "auc": 0.9767213333333333,
+      "oracle_aurc": 0.013122000000000005,
+      "oracle_augrc": 0.013122000000000005,
+      "n_correct": 838,
+      "n_incorrect": 162,
+      "n_total": 1000
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.8,
+      "balanced_accuracy": 0.8,
+      "auc": 0.9717326666666666,
+      "oracle_aurc": 0.01999999999999999,
+      "oracle_augrc": 0.01999999999999999,
+      "n_correct": 800,
+      "n_incorrect": 200,
+      "n_total": 1000
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.806,
+      "balanced_accuracy": 0.806,
+      "auc": 0.971212,
+      "oracle_aurc": 0.01881799999999999,
+      "oracle_augrc": 0.01881799999999999,
+      "n_correct": 806,
+      "n_incorrect": 194,
+      "n_total": 1000
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.827,
+      "balanced_accuracy": 0.827,
+      "auc": 0.9720373333333333,
+      "oracle_aurc": 0.014964500000000007,
+      "oracle_augrc": 0.014964500000000007,
+      "n_correct": 827,
+      "n_incorrect": 173,
+      "n_total": 1000
+    }
+  ],
+  "metadata": {
+    "dataset": "octmnist",
+    "model": "vit_b_16",
+    "setup": "DADO",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 4,
+    "task": "multi-class",
+    "timestamp": "2025-12-24 13:03:55"
+  }
+}

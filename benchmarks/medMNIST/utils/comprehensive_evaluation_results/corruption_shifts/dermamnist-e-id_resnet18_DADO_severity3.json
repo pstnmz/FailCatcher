@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.6949040370615487,
+    "balanced_accuracy": 0.6568471590457668,
+    "auc": 0.9291697727188977,
+    "oracle_aurc": 0.04654177330067043,
+    "oracle_augrc": 0.04654177330067043,
+    "n_correct": 1050,
+    "n_incorrect": 461,
+    "n_total": 1511
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.5982792852415619,
+      "balanced_accuracy": 0.6105609969708281,
+      "auc": 0.9020841045102305,
+      "oracle_aurc": 0.08068976633301518,
+      "oracle_augrc": 0.08068976633301518,
+      "n_correct": 904,
+      "n_incorrect": 607,
+      "n_total": 1511
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.6247518199867638,
+      "balanced_accuracy": 0.6242492922942772,
+      "auc": 0.9133588437316391,
+      "oracle_aurc": 0.07040559830162307,
+      "oracle_augrc": 0.07040559830162307,
+      "n_correct": 944,
+      "n_incorrect": 567,
+      "n_total": 1511
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.6439444076770351,
+      "balanced_accuracy": 0.5461799756301842,
+      "auc": 0.8918426499097765,
+      "oracle_aurc": 0.0633877924122287,
+      "oracle_augrc": 0.0633877924122287,
+      "n_correct": 973,
+      "n_incorrect": 538,
+      "n_total": 1511
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.6664460622104567,
+      "balanced_accuracy": 0.5871006891906377,
+      "auc": 0.9003632620977369,
+      "oracle_aurc": 0.055629114707455275,
+      "oracle_augrc": 0.055629114707455275,
+      "n_correct": 1007,
+      "n_incorrect": 504,
+      "n_total": 1511
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.6366644606221046,
+      "balanced_accuracy": 0.5907500369827492,
+      "auc": 0.9055098624467097,
+      "oracle_aurc": 0.0660063570875131,
+      "oracle_augrc": 0.0660063570875131,
+      "n_correct": 962,
+      "n_incorrect": 549,
+      "n_total": 1511
+    }
+  ],
+  "metadata": {
+    "dataset": "dermamnist-e",
+    "model": "resnet18",
+    "setup": "DADO",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 7,
+    "task": "multi-class",
+    "timestamp": "2025-12-24 15:47:33"
+  }
+}

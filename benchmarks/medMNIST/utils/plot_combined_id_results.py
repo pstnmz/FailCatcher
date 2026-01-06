@@ -22,7 +22,7 @@ from generate_radar_plots import create_radar_plot_on_axis, parse_results_direct
 from plot_ensemble_vs_mean_heatmap import compute_differences, prepare_heatmap_data
 
 
-def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregation='mean'):
+def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregation='mean', shift='in_distribution'):
     """
     Create a combined figure with radar plots on top and heatmaps below.
     
@@ -31,6 +31,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
         id_results_dir: ID results directory with JSON files
         comp_eval_dir: Comprehensive evaluation directory
         aggregation: Aggregation strategy for radar plots
+        shift: Shift type - 'in_distribution' or 'corruption_shifts'
     
     Returns:
         fig: matplotlib figure
@@ -69,6 +70,43 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     auroc_matrix, methods, display_names = prepare_heatmap_data(auroc_diffs)
     augrc_matrix, _, _ = prepare_heatmap_data(augrc_diffs)
     
+    # Sort columns by dataset, model, then setup order (standard, DA, DO, DADO)
+    setup_order = {'standard': 0, 'DA': 1, 'DO': 2, 'DADO': 3}
+    
+    def get_sort_key(name):
+        # Remove suffixes
+        clean_name = name.replace('_corrupt_severity3_test', '').replace('_test', '')
+        
+        # Parse setup
+        setup = 'standard'
+        for setup_name in ['DADO', 'DO', 'DA']:  # Check longest first
+            if setup_name in clean_name:
+                setup = setup_name
+                clean_name = clean_name.replace('_' + setup_name, '')
+                break
+        
+        # Parse model
+        model = 'unknown'
+        if '_vit_b_16' in clean_name:
+            model = 'vit_b_16'
+            clean_name = clean_name.replace('_vit_b_16', '')
+        elif '_resnet18' in clean_name:
+            model = 'resnet18'
+            clean_name = clean_name.replace('_resnet18', '')
+        
+        # Remaining is dataset
+        dataset = clean_name
+        
+        return (dataset, model, setup_order.get(setup, 99))
+    
+    # Create sorted indices
+    sorted_indices = sorted(range(len(display_names)), key=lambda i: get_sort_key(display_names[i]))
+    
+    # Reorder display_names and matrix columns
+    display_names = [display_names[i] for i in sorted_indices]
+    auroc_matrix = auroc_matrix[:, sorted_indices]
+    augrc_matrix = augrc_matrix[:, sorted_indices]
+    
     # Create aggregated row for heatmaps
     agg_methods = ['MSR', 'MSR_calibrated', 'MLS', 'MCDropout', 'KNN_Raw', 'GPS']
     agg_methods_idx = [i for i, m in enumerate(methods) if m in agg_methods]
@@ -80,12 +118,12 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     methods_with_agg = methods + ['⚡ Mean Aggregation']
     
     # Create figure with GridSpec for complex layout
-    fig = plt.figure(figsize=(22, 25))
+    fig = plt.figure(figsize=(19, 23))
     
     # Define grid: 3 rows (radar top half, heatmap1, heatmap2)
     gs = fig.add_gridspec(4, 2, height_ratios=[0.85, 0.90, 0.25, 0.25], 
                          hspace=0.05, wspace=0.45,
-                         left=0.15, right=0.85, top=0.96, bottom=0.08)
+                         left=0.10, right=0.90, top=0.96, bottom=0.06)
     
     # Create radar plot axes (top 2 rows, 2 columns)
     radar_axes = [
@@ -125,7 +163,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
             handles, labels = create_radar_plot_on_axis(
                 ax, model_results, model_name,
                 results_dir=results_dir, runs_dir=comp_eval_dir,
-                metric=metric, aggregation=aggregation
+                metric=metric, aggregation=aggregation, shift=shift
             )
             
             # Collect legend info from first subplot
@@ -150,17 +188,15 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     
     # Add legend for radar plots - centered between the 4 radars
     fig.legend(all_handles, all_labels, loc='center', ncol=2,
-              fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.66))
+              fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.615))
     
     # ========================
     # Generate heatmaps
     # ========================
     print("\nGenerating heatmaps...")
     
-    # Find common vmax for symmetric colormap
-    abs_max = max(np.nanmax(np.abs(auroc_matrix_with_agg)), 
-                  np.nanmax(np.abs(augrc_matrix_with_agg)))
-    vmin, vmax = -abs_max, abs_max
+    # Fixed colormap range for consistency across ID and corruption shifts
+    vmin, vmax = -0.2, 0.2
     
     # AUROC_f heatmap
     sns.heatmap(auroc_matrix_with_agg,
@@ -175,7 +211,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
                 ax=heatmap_ax1)
     
     heatmap_ax1.set_title('AUROC_f: Ensemble vs Mean Per-Fold', 
-                         fontsize=12, fontweight='bold', pad=10)
+                         fontsize=12, fontweight='bold', pad=5)
     heatmap_ax1.set_ylabel('')
     plt.setp(heatmap_ax1.get_yticklabels(), rotation=0)
     
@@ -192,7 +228,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
                 ax=heatmap_ax2)
     
     heatmap_ax2.set_title('AUGRC: Ensemble vs Mean Per-Fold',
-                         fontsize=12, fontweight='bold', pad=10)
+                         fontsize=12, fontweight='bold', pad=5)
     heatmap_ax2.set_ylabel('')
 
     # Parse display names for multi-line x labels (exact copy from standalone script)
@@ -203,17 +239,20 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     model_names = ['resnet18', 'vit_b_16']
     
     for name in display_names:
+        # Remove common suffixes if present
+        clean_name = name.replace('_corrupt_severity3_test', '').replace('_test', '')
+        
         # Try to identify setup, model, dataset properly
         setup = 'standard'
         model = None
         dataset = None
         
         # Check if ends with setup name
-        col_without_setup = name
+        col_without_setup = clean_name
         for setup_name in setup_names:
-            if name.endswith('_' + setup_name):
+            if clean_name.endswith('_' + setup_name):
                 setup = setup_name
-                col_without_setup = name[:-len(setup_name)-1]
+                col_without_setup = clean_name[:-len(setup_name)-1]
                 break
         
         # Now find model in col_without_setup
@@ -237,10 +276,8 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     heatmap_ax2.set_xticklabels(setups, rotation=45, ha='right', fontsize=8)
     plt.setp(heatmap_ax2.get_yticklabels(), rotation=0)
 
-    # Get tick positions
-    ticks = heatmap_ax2.get_xticks()
-    if len(ticks) == 0:
-        ticks = np.arange(len(display_names))
+    # Get tick positions - use explicit array for robustness
+    ticks = np.arange(len(display_names)) + 0.5  # seaborn centers ticks at +0.5
     
     # Group by dataset and model to add model and dataset labels
     # Build groups: (start_idx, end_idx, dataset, model)
@@ -282,45 +319,56 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
                  ha='center', va='top', fontsize=9, fontweight='bold')
     
     # Add colorbar for heatmaps
-    cbar_ax = fig.add_axes([0.87, 0.08, 0.01, 0.18])  # Smaller and positioned to match heatmaps
+    cbar_ax = fig.add_axes([0.92, 0.07, 0.01, 0.18])  # Smaller and positioned to match heatmaps
     mappable = heatmap_ax2.collections[0]
     cbar = fig.colorbar(mappable, cax=cbar_ax, orientation='vertical')
     cbar.set_label('Difference (Ensemble - Mean Per-Fold)', fontsize=9)
     
     # Add main title
-    fig.suptitle('CSF Performances - In Distribution', 
+    title_shift = 'Corruption Shifts' if shift == 'corruption_shifts' else 'In Distribution'
+    fig.suptitle(f'CSF Performances - {title_shift}', 
                 fontsize=20, fontweight='bold', y=0.99)
     
     return fig
 
 
-def main(aggregation='mean'):
+def main(aggregation='mean', shift='in_distribution'):
     """Main function to generate combined figure."""
     
     print("=" * 80)
-    print("Combined ID Results Visualization")
+    print("Combined Results Visualization")
     print(f"Aggregation: {aggregation.upper()}")
+    print(f"Shift: {shift}")
     print("=" * 80)
     
     # Get paths
     script_dir = Path(__file__).parent
     workspace_root = script_dir.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
-    id_results_dir = results_dir / 'id_results'
-    comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
+    
+    # Route to correct directories based on shift type
+    if shift == 'corruption_shifts':
+        id_results_dir = results_dir / 'corruption_shifts'
+        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'corruption_shifts'
+        output_subdir = 'combined_corruption'
+    else:
+        id_results_dir = results_dir / 'id_results'
+        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
+        output_subdir = 'combined_id'
     
     print(f"Workspace root: {workspace_root}")
-    print(f"ID results: {id_results_dir}")
+    print(f"Results directory: {id_results_dir}")
+    print(f"Comprehensive eval: {comp_eval_dir}")
     
     # Create output directory
-    output_dir = results_dir / 'figures' / 'combined_id'
+    output_dir = results_dir / 'figures' / output_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Generate combined figure
-    fig = create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregation)
+    fig = create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregation, shift)
     
     # Save
-    output_path = output_dir / f'combined_id_results_{aggregation}.png'
+    output_path = output_dir / f'combined_results_{aggregation}_{shift}.png'
     fig.savefig(output_path, dpi=300)
     print(f"\n✓ Saved to {output_path}")
     
@@ -333,10 +381,16 @@ def main(aggregation='mean'):
 
 if __name__ == '__main__':
     aggregation = sys.argv[1] if len(sys.argv) > 1 else 'mean'
+    shift = sys.argv[2] if len(sys.argv) > 2 else 'in_distribution'
     
     if aggregation not in ['mean', 'min', 'max', 'vote']:
         print(f"Unknown aggregation: {aggregation}")
-        print("Usage: python plot_combined_id_results.py [mean|min|max|vote]")
+        print("Usage: python plot_combined_id_results.py [mean|min|max|vote] [in_distribution|corruption_shifts]")
         sys.exit(1)
     
-    main(aggregation=aggregation)
+    if shift not in ['in_distribution', 'corruption_shifts']:
+        print(f"Unknown shift type: {shift}")
+        print("Usage: python plot_combined_id_results.py [mean|min|max|vote] [in_distribution|corruption_shifts]")
+        sys.exit(1)
+    
+    main(aggregation=aggregation, shift=shift)

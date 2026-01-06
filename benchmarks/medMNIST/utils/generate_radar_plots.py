@@ -148,7 +148,7 @@ def get_dataset_accuracy(results_dir, dataset_key, model_name='resnet18'):
         return 0.0
 
 
-def get_ensemble_accuracy_from_runs(comp_eval_dir, dataset_key, model_name='resnet18'):
+def get_ensemble_accuracy_from_runs(comp_eval_dir, dataset_key, model_name='resnet18', shift='corruption_shifts'):
     """
     Get ensemble balanced accuracy from comprehensive_evaluation_results/in_distribution
     
@@ -175,13 +175,22 @@ def get_ensemble_accuracy_from_runs(comp_eval_dir, dataset_key, model_name='resn
         setup = 'standard'
     
     # Build pattern based on setup
+    if shift == 'in_distribution':
+        prefix = 'comprehensive_metrics_'
+        suffix = ''
+        standard = '_standard'
+    else:
+        prefix = ''
+        suffix = '_severity3'
+        standard = ''
+        
     if setup == 'standard':
-        pattern = f"comprehensive_metrics_{base_name}_{model_name}_standard.json"
+        pattern = f"{prefix}{base_name}_{model_name}{suffix}{standard}.json"
         json_file = comp_eval_dir / pattern
         json_files = [json_file] if json_file.exists() else []
     else:
         # For DA/DO/DADO, filename includes setup
-        pattern = f"comprehensive_metrics_{base_name}_{model_name}_{setup}.json"
+        pattern = f"{prefix}{base_name}_{model_name}_{setup}{suffix}.json"
         json_file = comp_eval_dir / pattern
         json_files = [json_file] if json_file.exists() else []
     
@@ -194,7 +203,10 @@ def get_ensemble_accuracy_from_runs(comp_eval_dir, dataset_key, model_name='resn
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
-        ensemble_metrics = data.get('ensemble_metrics', {})
+        if shift == 'corruption_shifts':
+            ensemble_metrics = data.get('ensemble', {})
+        else:
+            ensemble_metrics = data.get('ensemble_metrics', {})
         return ensemble_metrics.get('balanced_accuracy', 0.0)
     except:
         return 0.0
@@ -238,7 +250,7 @@ def augrc_log_transform(value, max_display=0.30, scale_factor=50.0):
     return scale_factor * (max_display - np.array(value)) ** 1.5
 
 
-def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, runs_dir=None, metric='auroc_f', aggregation='mean'):
+def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, runs_dir=None, metric='auroc_f', aggregation='mean', shift='corruption_shifts'):
     """
     Create a radar plot on a given axis for a single model showing all dataset-setup combinations.
     
@@ -250,6 +262,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
         runs_dir: Path to runs directory (for ensemble balanced accuracy)
         metric: Metric to plot - 'auroc_f' or 'augrc'
         aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote'
+        shift: Shift type - 'corruption_shifts' or 'in_distribution'
     """
     # Group datasets by family (base dataset name)
     dataset_families = defaultdict(list)
@@ -406,6 +419,10 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
                        color=colors[method_idx], label=method_name,# + ' (MSR - MSR_calibrated - MLS - GPS - KNN_Raw - MC_Dropout)', 
                        zorder=99, alpha=0.9, edgecolors='black', linewidths=0.5)
         else:
+            if method_name == "MSR_calibrated":
+                method_name = "MSR-S"
+            else:
+                method_name = method_name
             # Plot lines with enhanced styling for better visibility
             ax.plot(angles, values, 'o-', linewidth=3, label=method_name, 
                     color=colors[method_idx], markersize=8, markeredgewidth=2,
@@ -417,7 +434,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
         accuracy_angles = []
         # runs_dir parameter is already comp_eval_dir passed from main
         for idx, dataset_key in enumerate(dataset_keys):
-            accuracy = get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name)
+            accuracy = get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name, shift)
             # Only include if valid (non-zero) accuracy
             if accuracy > 0:
                 accuracy_values.append(accuracy)
@@ -801,7 +818,7 @@ def aggregate_uq_methods(npz_path, aggregation='mean', methods=None, output_path
     return result
 
 
-def main(aggregation='mean'):
+def main(aggregation='mean', shift='corruption_shifts'):
     """Main function to generate combined 2x2 radar plots from benchmark results.
     
     Creates one figure with 4 subplots:
@@ -821,8 +838,12 @@ def main(aggregation='mean'):
     script_dir = Path(__file__).parent
     workspace_root = script_dir.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
-    id_results_dir = results_dir / 'id_results'
-    comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
+    if shift == 'corruption_shifts':
+        id_results_dir = results_dir / 'corruption_shifts'
+        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'corruption_shifts'
+    else:
+        id_results_dir = results_dir / 'id_results'
+        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
     
     print(f"Workspace root: {workspace_root}")
     print(f"Looking for JSON files in: {id_results_dir}")
@@ -904,21 +925,25 @@ def main(aggregation='mean'):
     fig.legend(all_handles, all_labels, loc='lower center', ncol=5, 
               fontsize=14, frameon=True, bbox_to_anchor=(0.5, -0.02))
     
+    if shift == 'corruption_shifts':
+        title_shift = 'Corruption Shifts'
+    else:
+        title_shift = 'In Distribution'
     # Add main title
-    fig.suptitle('CSF Performances - In Distribution', fontsize=24, fontweight='bold', y=0.98)
+    fig.suptitle(f'CSF Performances - {title_shift}', fontsize=24, fontweight='bold', y=0.98)
     
     # Adjust spacing
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     
     # Save combined figure
-    output_path = output_dir / f'radar_plots_combined_{aggregation}.png'
+    output_path = output_dir / f'radar_plots_combined_{title_shift.replace(" ", "_").lower()}_{aggregation}.png'
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n✓ Combined plot saved to {output_path}")
     
     plt.close(fig)
     
     # Generate summary table
-    summary_path = output_dir / 'results_summary.csv'
+    summary_path = output_dir / f'results_summary_{title_shift.replace(" ", "_").lower()}.csv'
     generate_summary_table(results_auroc if results_auroc else results_augrc, summary_path)
     
     print("\n" + "=" * 80)
@@ -931,6 +956,7 @@ if __name__ == '__main__':
     
     # Usage: python generate_radar_plots.py [mean|min|max|vote]
     aggregation = sys.argv[1] if len(sys.argv) > 1 else 'mean'
+    shift = sys.argv[2] if len(sys.argv) > 2 else 'corruption_shifts'
     
     if aggregation not in ['mean', 'min', 'max', 'vote']:
         print(f"Unknown aggregation: {aggregation}")
@@ -938,4 +964,4 @@ if __name__ == '__main__':
         sys.exit(1)
     
     # Generate radar plots with specified aggregation
-    main(aggregation=aggregation)
+    main(aggregation=aggregation, shift=shift)
