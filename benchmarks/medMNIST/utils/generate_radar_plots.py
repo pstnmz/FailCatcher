@@ -236,7 +236,7 @@ def augrc_log_transform(value, max_display=0.30, scale_factor=50.0):
     
     Args:
         value: Original AUGRC value
-        max_display: Maximum display value (center), set to cover data range
+        max_display: Maximum display value (center), typically 0.30 for standard shifts, 0.45 for population/new_class
         scale_factor: Controls overall scale
     
     Returns:
@@ -387,6 +387,12 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     # Ensure all angles are positive and within [0, 2π]
     angles = [(a % (2 * np.pi)) for a in angles]
     
+    # Rotate dataset positions anticlockwise by 30° for population/new_class shifts
+    if shift in ['population_shift', 'new_class_shift']:
+        rotation_offset = -np.pi / 6  # 30 degrees in radians
+        angles = [(a + rotation_offset) % (2 * np.pi) for a in angles]
+        family_angles = [(a + rotation_offset) % (2 * np.pi) for a in family_angles]
+    
     # Store number of datasets before adding closing point
     num_angle_points = len(angles)
     angles = angles + [angles[0]]  # Complete the circle
@@ -407,7 +413,12 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
         
         # Transform values to square space for AUGRC (more space at edges)
         if metric == 'augrc':
-            values = augrc_log_transform(values, max_display=0.30, scale_factor=50.0).tolist()
+            # Use appropriate max_display based on shift type
+            if shift in ['population_shift', 'new_class_shift']:
+                augrc_max_display = 0.45
+            else:
+                augrc_max_display = 0.3
+            values = augrc_log_transform(values, max_display=augrc_max_display, scale_factor=50.0).tolist()
         
         # Complete the circle
         values += values[:1]
@@ -428,26 +439,26 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
                     color=colors[method_idx], markersize=8, markeredgewidth=2,
                     markeredgecolor='white', alpha=0.85)
     
-    # Add ensemble balanced accuracy scatter overlay
-    if runs_dir:
-        accuracy_values = []
-        accuracy_angles = []
-        # runs_dir parameter is already comp_eval_dir passed from main
-        for idx, dataset_key in enumerate(dataset_keys):
-            accuracy = get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name, shift)
-            # Only include if valid (non-zero) accuracy
-            if accuracy > 0:
-                accuracy_values.append(accuracy)
-                accuracy_angles.append(angles[idx])
+    # # Add ensemble balanced accuracy scatter overlay
+    # if runs_dir:
+    #     accuracy_values = []
+    #     accuracy_angles = []
+    #     # runs_dir parameter is already comp_eval_dir passed from main
+    #     for idx, dataset_key in enumerate(dataset_keys):
+    #         accuracy = get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name, shift)
+    #         # Only include if valid (non-zero) accuracy
+    #         if accuracy > 0:
+    #             accuracy_values.append(accuracy)
+    #             accuracy_angles.append(angles[idx])
         
-        # Plot as distinct scatter points (only if we have valid data)
-        if accuracy_values and 'auroc' in metric:
-            ax.scatter(accuracy_angles, accuracy_values, s=200, c='red', marker='*', 
-                       edgecolors='black', linewidths=2, zorder=100, 
-                       label='Ensemble Balanced Accuracy', alpha=1.0)
-            print(f"  Added {len(accuracy_values)} accuracy markers")
-        else:
-            print("  No valid accuracy values found")
+        # # Plot as distinct scatter points (only if we have valid data)
+        # if accuracy_values and 'auroc' in metric:
+        #     ax.scatter(accuracy_angles, accuracy_values, s=200, c='red', marker='*', 
+        #                edgecolors='black', linewidths=2, zorder=100, 
+        #                label='Ensemble Balanced Accuracy', alpha=1.0)
+        #     print(f"  Added {len(accuracy_values)} accuracy markers")
+        # else:
+        #     print("  No valid accuracy values found")
     
     # Set labels - setup names only (increased font size for readability)
     ax.set_xticks(angles[:-1])
@@ -465,12 +476,18 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
         y_ticks = np.arange(y_min, y_max + 0.05, tick_step)
         ax.set_yticks(y_ticks)
         ax.set_yticklabels([f'{y:.2f}' for y in y_ticks], size=11, fontweight='medium')
-    else:  # augrc - square transform for MORE space at edges (near 0), LESS at center (near 0.30)
-        # Original tick values (what we want to display) - from center (0.30) to edge (0)
+    else:  # augrc - square transform for MORE space at edges (near 0), LESS at center (near max_display)
+        # Original tick values (what we want to display) - from center (max_display) to edge (0)
         # Using square transform to give more visual space at edges (good performance)
-        original_ticks = np.array([0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.02, 0.01, 0.0])
+        # Determine max_display based on shift type
+        if shift in ['population_shift', 'new_class_shift']:
+            augrc_max_display = 0.45
+            original_ticks = np.array([0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.02, 0.01, 0.0])
+        else:
+            augrc_max_display = 0.3
+            original_ticks = np.array([0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.02, 0.01, 0.0])
         # Transform using square (where they'll actually be positioned)
-        transformed_ticks = augrc_log_transform(original_ticks, max_display=0.30, scale_factor=50.0)
+        transformed_ticks = augrc_log_transform(original_ticks, max_display=augrc_max_display, scale_factor=50.0)
         
         # Set limits in transformed space (0.30 at center=0, 0 at edge=large)
         y_min, y_max = transformed_ticks[0], transformed_ticks[-1]
@@ -480,6 +497,13 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     
     ax.set_ylim(y_min, y_max)
     ax.set_rlim(y_min, y_max)  # Also set radial limits explicitly
+    
+    # Determine max_display for AUGRC based on shift type
+    if metric == 'augrc':
+        if shift in ['population_shift', 'new_class_shift']:
+            augrc_max_display = 0.45
+        else:
+            augrc_max_display = 0.3
     
     # Add dataset family names (larger, further out, with background)
     # Position based on metric scale for visibility (AFTER y_max is defined)

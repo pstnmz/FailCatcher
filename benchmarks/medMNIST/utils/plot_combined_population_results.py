@@ -226,14 +226,21 @@ def create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, 
     
     auroc_matrix_with_agg = np.vstack([auroc_matrix, auroc_agg_row])
     augrc_matrix_with_agg = np.vstack([augrc_matrix, augrc_agg_row])
-    methods_with_agg = methods + ['⚡ Mean Aggregation']
+    
+    # Rename method labels for display
+    methods_display = [m.replace('MSR_calibrated', 'MSR-S')
+                        .replace('KNN_Raw', 'KNN')
+                        .replace('Ensembling', 'DE')
+                        .replace('MCDropout', 'MCD') 
+                       for m in methods]
+    methods_with_agg = methods_display + ['⚡ Mean Agg']
     
     # Create figure with GridSpec for complex layout
     # Smaller figure since only 3 datasets
-    fig = plt.figure(figsize=(16, 25))
+    fig = plt.figure(figsize=(16, 21))
     
     # Define grid: 4 rows (radar top half, heatmap1, heatmap2)
-    gs = fig.add_gridspec(4, 2, height_ratios=[0.85, 0.90, 0.25, 0.30], 
+    gs = fig.add_gridspec(4, 2, height_ratios=[0.85, 0.90, 0.30, 0.30], 
                          hspace=0.05, wspace=0.45,
                          left=0.10, right=0.90, top=0.96, bottom=0.08)
     
@@ -299,6 +306,14 @@ def create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, 
         all_labels.append(all_labels.pop(idx))
         all_handles.append(all_handles.pop(idx))
     
+    # Rename method labels for radar plots
+    all_labels = [label.replace('KNN_Raw', 'KNN')
+                       .replace('Ensembling', 'DE')
+                       .replace('MCDropout', 'MCD')
+                       .replace('MSR_calibrated', 'MSR-S')
+                       .replace('Mean_Aggregation', 'Mean Agg')
+                  for label in all_labels]
+    
     # Add legend for radar plots - centered between the 4 radars
     fig.legend(all_handles, all_labels, loc='center', ncol=2,
               fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.66))
@@ -308,8 +323,9 @@ def create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, 
     # ========================
     print("\nGenerating heatmaps...")
     
-    # Fixed colormap range for consistency across all shift types
-    vmin, vmax = -0.2, 0.2
+    # Use separate color scales for each metric (AUGRC has smaller typical range)
+    vmin_auroc, vmax_auroc = -0.2, 0.2
+    vmin_augrc, vmax_augrc = -0.1, 0.1
     
     # AUROC_f heatmap
     sns.heatmap(auroc_matrix_with_agg,
@@ -317,8 +333,8 @@ def create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, 
                 yticklabels=methods_with_agg,
                 cmap='RdBu_r',
                 center=0,
-                vmin=vmin,
-                vmax=vmax,
+                vmin=vmin_auroc,
+                vmax=vmax_auroc,
                 annot=False,
                 cbar=False,
                 ax=heatmap_ax1)
@@ -334,14 +350,14 @@ def create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, 
                 yticklabels=methods_with_agg,
                 cmap='RdBu_r',
                 center=0,
-                vmin=vmin,
-                vmax=vmax,
+                vmin=vmin_augrc,
+                vmax=vmax_augrc,
                 annot=False,
                 cbar=False,
                 ax=heatmap_ax2)
     
     heatmap_ax2.set_title('AUGRC: Ensemble vs Mean Per-Fold',
-                         fontsize=12, fontweight='bold', pad=20)
+                         fontsize=12, fontweight='bold', pad=5)
     heatmap_ax2.set_ylabel('')
 
     # Parse display names for multi-line x labels
@@ -431,11 +447,18 @@ def create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, 
         heatmap_ax2.text(center, -0.38, dname, transform=heatmap_ax2.get_xaxis_transform(), 
                  ha='center', va='top', fontsize=9, fontweight='bold')
     
-    # Add colorbar for heatmaps
-    cbar_ax = fig.add_axes([0.91, 0.08, 0.015, 0.18])  # Positioned for narrower figure
-    mappable = heatmap_ax2.collections[0]
-    cbar = fig.colorbar(mappable, cax=cbar_ax, orientation='vertical')
-    cbar.set_label('Difference (Ensemble - Mean Per-Fold)', fontsize=9)
+    # Add separate colorbars for each heatmap
+    # AUROC_f colorbar (aligned with top heatmap)
+    cbar_ax1 = fig.add_axes([0.92, 0.21, 0.01, 0.09])  # [left, bottom, width, height]
+    mappable1 = heatmap_ax1.collections[0]
+    cbar1 = fig.colorbar(mappable1, cax=cbar_ax1, orientation='vertical')
+    cbar1.set_label('ΔAUROC_f', fontsize=9)
+    
+    # AUGRC colorbar (aligned with bottom heatmap)
+    cbar_ax2 = fig.add_axes([0.92, 0.09, 0.01, 0.09])  # [left, bottom, width, height]
+    mappable2 = heatmap_ax2.collections[0]
+    cbar2 = fig.colorbar(mappable2, cax=cbar_ax2, orientation='vertical')
+    cbar2.set_label('ΔAUGRC', fontsize=9)
     
     # Add main title
     fig.suptitle('CSF Performances - Population & New Class Shift', 

@@ -163,21 +163,21 @@ def create_combined_heatmap(auroc_f_diff, augrc_diff, output_path):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(22, len(display_names) * 0.35), 
                                                     len(methods_with_agg) * row_height * 2.5))
     
-    # Find common vmax for symmetric colormap across both plots
-    abs_max = max(np.nanmax(np.abs(auroc_matrix_with_agg)), np.nanmax(np.abs(augrc_matrix_with_agg)))
-    vmin, vmax = -abs_max, abs_max
+    # Use separate color scales for each metric (AUGRC has smaller typical range)
+    vmin_auroc, vmax_auroc = -0.2, 0.2
+    vmin_augrc, vmax_augrc = -0.1, 0.1
     
-    # AUROC_f heatmap (top) — draw without a colorbar (we will add a single shared colorbar)
+    # AUROC_f heatmap (top) with its own colorbar
     sns.heatmap(auroc_matrix_with_agg, 
                 xticklabels=[],  # No x labels on top plot
                 yticklabels=methods_with_agg,
                 cmap='RdBu_r',
                 center=0,
-                vmin=vmin,
-                vmax=vmax,
+                vmin=vmin_auroc,
+                vmax=vmax_auroc,
                 annot=False,
                 fmt='.3f',
-                cbar=False,
+                cbar_kws={'label': 'ΔAUROC_f (Ensemble - Mean Per-Fold)', 'shrink': 0.8, 'aspect': 20, 'pad': 0.02},
                 ax=ax1)
     
     ax1.set_title('AUROC_f: Ensemble vs Mean Per-Fold', fontsize=14, fontweight='bold', pad=10)
@@ -185,17 +185,17 @@ def create_combined_heatmap(auroc_f_diff, augrc_diff, output_path):
     ax1.set_ylabel('', fontsize=11, fontweight='bold')
     plt.setp(ax1.get_yticklabels(), rotation=0)
     
-    # AUGRC heatmap (bottom) — no colorbar
+    # AUGRC heatmap (bottom) with its own colorbar
     sns.heatmap(augrc_matrix_with_agg, 
                 xticklabels=display_names, 
                 yticklabels=methods_with_agg,
                 cmap='RdBu_r',
                 center=0,
-                vmin=vmin,
-                vmax=vmax,
+                vmin=vmin_augrc,
+                vmax=vmax_augrc,
                 annot=False,
                 fmt='.3f',
-                cbar=False,
+                cbar_kws={'label': 'ΔAUGRC (Ensemble - Mean Per-Fold)', 'shrink': 0.8, 'aspect': 20, 'pad': 0.02},
                 ax=ax2)
     
     ax2.set_title('AUGRC: Ensemble vs Mean Per-Fold', fontsize=14, fontweight='bold', pad=10)
@@ -288,16 +288,8 @@ def create_combined_heatmap(auroc_f_diff, augrc_diff, output_path):
         ax2.text(center, -0.38, dname, transform=ax2.get_xaxis_transform(), 
                  ha='center', va='top', fontsize=9, fontweight='bold')
 
-    # Adjust layout to make room for labels and colorbar
-    # Don't use tight_layout as it interferes with colorbar positioning
-    plt.subplots_adjust(bottom=0.18, right=0.82, top=0.95, left=0.08)
-    
-    # Add a single shared colorbar on the right for both heatmaps
-    # Create a new axes for the colorbar manually
-    cbar_ax = fig.add_axes([0.85, 0.18, 0.015, 0.77])  # [left, bottom, width, height] - thinner colorbar
-    mappable = ax2.collections[0]
-    cbar = fig.colorbar(mappable, cax=cbar_ax, orientation='vertical')
-    cbar.set_label('Difference (Ensemble - Mean Per-Fold)')
+    # Adjust layout to make room for labels (colorbars are now integrated in each heatmap)
+    plt.subplots_adjust(bottom=0.18, right=0.98, top=0.95, left=0.08)
     
     # Save
     plt.savefig(output_path, dpi=300)
