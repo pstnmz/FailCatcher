@@ -9,6 +9,7 @@ Automatically runs all combinations of:
 - UQ methods (with setup-specific filtering)
 
 Usage:
+    # Run full benchmark
     python launcher_benchmark.py --python /path/to/venv/bin/python --gpu 0
     
     # Dry run (just print commands)
@@ -20,8 +21,14 @@ Usage:
     # Run specific models only
     python launcher_benchmark.py --models resnet18
     
-    # Run specific setups only
-    python launcher_benchmark.py --setups DA DO
+    # Run specific setups only (use "" for standard)
+    python launcher_benchmark.py --setups "" DA DO
+    
+    # New class shift evaluation (AMOS only)
+    python launcher_benchmark.py --datasets amos2022 --new-class-shift
+    
+    # Covariate shift evaluation
+    python launcher_benchmark.py --corruption-severity 3 --corrupt-test
 """
 
 import subprocess
@@ -50,6 +57,11 @@ DATASETS_EXTERNAL = [
     'amos2022',  # OrganaMNIST → AMOS-2022 external test
     'dermamnist-e-external',  # DermaMNIST-E external centers,
     'pathmnist',  # PathMNIST external test set
+]
+
+# Datasets supporting new class shift evaluation
+DATASETS_NEW_CLASS_SHIFT = [
+    'amos2022',  # Only AMOS has new/unseen classes (9 unmapped organs)
 ]
 
 # Model backbones
@@ -127,6 +139,7 @@ def generate_command(
     gpu: int,
     per_fold_eval: bool = True,
     output_dir: str = './uq_benchmark_results',
+    new_class_shift: bool = False,
     **kwargs
 ) -> str:
     """
@@ -142,6 +155,7 @@ def generate_command(
         gpu: GPU device ID
         per_fold_eval: Use per-fold evaluation
         output_dir: Output directory for results
+        new_class_shift: Enable new class shift evaluation (only for amos2022)
         **kwargs: Additional arguments (batch_size, gps_subsample, etc.)
     
     Returns:
@@ -191,6 +205,10 @@ def generate_command(
         if kwargs.get('corrupt_calib', False):
             cmd_parts.append("--corrupt-calib")
     
+    # New class shift evaluation (only for amos2022)
+    if new_class_shift and dataset in DATASETS_NEW_CLASS_SHIFT:
+        cmd_parts.append("--new-class-shift")
+    
     return ' '.join(cmd_parts)
 
 
@@ -206,7 +224,8 @@ def generate_all_commands(
     output_dir: str = './uq_benchmark_results',
     corruption_severity: int = 0,
     corrupt_test: bool = False,
-    corrupt_calib: bool = False
+    corrupt_calib: bool = False,
+    new_class_shift: bool = False
 ) -> List[Dict]:
     """
     Generate all benchmark commands for specified configurations.
@@ -217,6 +236,11 @@ def generate_all_commands(
     commands = []
     
     for dataset in datasets:
+        # Skip new_class_shift for datasets that don't support it
+        if new_class_shift and dataset not in DATASETS_NEW_CLASS_SHIFT:
+            print(f"⚠️  Skipping {dataset}: new_class_shift only supported for {DATASETS_NEW_CLASS_SHIFT}")
+            continue
+            
         for model in models:
             for setup in setups:
                 # Get compatible methods for this setup
@@ -238,7 +262,8 @@ def generate_all_commands(
                     output_dir=output_dir,
                     corruption_severity=corruption_severity,
                     corrupt_test=corrupt_test,
-                    corrupt_calib=corrupt_calib
+                    corrupt_calib=corrupt_calib,
+                    new_class_shift=new_class_shift
                 )
                 
                 commands.append({
@@ -247,7 +272,8 @@ def generate_all_commands(
                         'model': model,
                         'setup': setup or 'standard',
                         'methods': methods,
-                        'num_methods': len(methods)
+                        'num_methods': len(methods),
+                        'new_class_shift': new_class_shift and dataset in DATASETS_NEW_CLASS_SHIFT
                     },
                     'command': cmd
                 })
@@ -286,6 +312,8 @@ def run_commands(commands: List[Dict], dry_run: bool = False, verbose: bool = Tr
         print(f"  Model: {config['model']}")
         print(f"  Setup: {config['setup']}")
         print(f"  Methods ({config['num_methods']}): {', '.join(config['methods'])}")
+        if config.get('new_class_shift'):
+            print(f"  Mode: New class shift evaluation")
         print(f"\n  Command: {command}\n")
         
         if dry_run:
@@ -407,6 +435,12 @@ def main():
         help='Apply corruption to calibration set (requires --corruption-severity > 0)'
     )
     
+    # New class shift evaluation
+    parser.add_argument(
+        '--new-class-shift', action='store_true', default=False,
+        help='Enable new class shift evaluation (only for amos2022: evaluates on unseen organ classes)'
+    )
+    
     # Control flags
     parser.add_argument(
         '--dry-run', action='store_true',
@@ -451,7 +485,8 @@ def main():
         output_dir=args.output_dir,
         corruption_severity=args.corruption_severity,
         corrupt_test=args.corrupt_test,
-        corrupt_calib=args.corrupt_calib
+        corrupt_calib=args.corrupt_calib,
+        new_class_shift=args.new_class_shift
     )
     
     if not commands:

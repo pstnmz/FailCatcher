@@ -1,9 +1,12 @@
 """
-Combined visualization of in-distribution UQ benchmark results.
+Combined visualization of population shift and new class shift UQ benchmark results.
 
 Creates a single figure with:
 - Top: 2x2 radar plots (ResNet18/ViT x AUROC_f/AUGRC)
 - Bottom: 2 stacked heatmaps showing ensemble vs mean per-fold differences
+
+Population shifts include: AMOS, dermamnist-e-external, pathmnist
+New class shifts include: AMOS new classes (OOD detection)
 """
 
 import json
@@ -22,28 +25,52 @@ from generate_radar_plots import create_radar_plot_on_axis, parse_results_direct
 from plot_ensemble_vs_mean_heatmap import compute_differences, prepare_heatmap_data
 
 
-def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregation='mean', shift='in_distribution'):
+def create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, comp_eval_dir, aggregation='mean'):
     """
     Create a combined figure with radar plots on top and heatmaps below.
     
     Args:
         results_dir: Main results directory
-        id_results_dir: ID results directory with JSON files
+        pop_results_dir: Population shift results directory with JSON files
+        new_class_results_dir: New class shift results directory with JSON files
         comp_eval_dir: Comprehensive evaluation directory
         aggregation: Aggregation strategy for radar plots
-        shift: Shift type - 'in_distribution' or 'corruption_shifts'
     
     Returns:
         fig: matplotlib figure
     """
-    # Parse results for radar plots
-    results_auroc = parse_results_directory(id_results_dir, metric='auroc_f')
-    results_augrc = parse_results_directory(id_results_dir, metric='augrc')
+    # Parse results for radar plots from both directories
+    results_auroc_pop = parse_results_directory(pop_results_dir, metric='auroc_f')
+    results_augrc_pop = parse_results_directory(pop_results_dir, metric='augrc')
+    results_auroc_new = parse_results_directory(new_class_results_dir, metric='auroc_f')
+    results_augrc_new = parse_results_directory(new_class_results_dir, metric='augrc')
     
-    # Load data for heatmaps (same logic as load_comprehensive_results in standalone script)
-    json_files = list(id_results_dir.glob('uq_benchmark_*.json'))
+    # Merge results - add new_class as additional dataset
+    def merge_results(pop_res, new_res):
+        merged = {}
+        for model in ['resnet18', 'vit_b_16']:
+            merged[model] = {}
+            # Add population shift datasets
+            if model in pop_res:
+                for dataset in pop_res[model]:
+                    merged[model][dataset] = pop_res[model][dataset]
+            # Add new class shift datasets (prefix with "new_class_")
+            if model in new_res:
+                for dataset in new_res[model]:
+                    # Rename amos2022 to new_class_amos2022 to distinguish
+                    new_dataset_name = f"new_class_{dataset}"
+                    merged[model][new_dataset_name] = new_res[model][dataset]
+        return merged
+    
+    results_auroc = merge_results(results_auroc_pop, results_auroc_new)
+    results_augrc = merge_results(results_augrc_pop, results_augrc_new)
+    
+    # Load data for heatmaps from both directories
     all_data = {}
-    for json_file in json_files:
+    
+    # Load population shift data
+    json_files_pop = list(pop_results_dir.glob('uq_benchmark_*.json'))
+    for json_file in json_files_pop:
         with open(json_file, 'r') as f:
             data = json.load(f)
             # Parse filename: uq_benchmark_{dataset}_{model}_{setup}_{timestamp}.json
@@ -63,6 +90,27 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
                     key = f"{dataset}_{model}_{setup}"
                     all_data[key] = data
     
+    # Load new class shift data
+    json_files_new = list(new_class_results_dir.glob('uq_benchmark_*.json'))
+    for json_file in json_files_new:
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+            # Parse filename: uq_benchmark_{dataset}_{model}_{setup}_{timestamp}.json
+            filename = json_file.stem
+            parts = filename.replace('uq_benchmark_', '').rsplit('_', 1)
+            
+            if len(parts) == 2:
+                prefix, timestamp = parts
+                prefix_parts = prefix.split('_')
+                
+                if len(prefix_parts) >= 2:
+                    setup = prefix_parts[-1]
+                    model = prefix_parts[-2]
+                    dataset = '_'.join(prefix_parts[:-2])
+                    # Prefix with "new_class_" to distinguish
+                    key = f"new_class_{dataset}_{model}_{setup}"
+                    all_data[key] = data
+    
     # Compute differences for heatmaps
     auroc_diffs, augrc_diffs = compute_differences(all_data)
     
@@ -74,8 +122,8 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     setup_order = {'standard': 0, 'DA': 1, 'DO': 2, 'DADO': 3}
     
     def get_sort_key(name):
-        # Remove suffixes
-        clean_name = name.replace('_corrupt_severity3_test', '').replace('_test', '')
+        # Remove common suffixes
+        clean_name = name.replace('_population_shift_test', '').replace('_test', '')
         
         # Parse setup
         setup = 'standard'
@@ -107,14 +155,20 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     auroc_matrix = auroc_matrix[:, sorted_indices]
     augrc_matrix = augrc_matrix[:, sorted_indices]
     
-    # Create aggregated row for heatmaps using actual Mean_Aggregation differences
-    # For each dataset: ensemble_Mean_Agg - per_fold_Mean_Agg (same pattern as individual methods)
+    # Create aggregated row for heatmaps - compute actual Mean_Aggregation differences
+    print("\nComputing Mean_Aggregation differences for heatmaps...")
     auroc_agg_row_list = []
     augrc_agg_row_list = []
     
     for display_name in display_names:
-        # Parse display_name to extract dataset, model, setup
-        clean_name = display_name.replace('_corrupt_severity3_test', '').replace('_test', '')
+        # Parse display_name to get dataset, model, setup
+        clean_name = display_name.replace('_population_shift_test', '').replace('_test', '')
+        
+        # Determine shift type based on display_name
+        if 'new_class_' in display_name:
+            shift = 'new_class_shift'
+        else:
+            shift = 'population_shift'
         
         # Parse setup
         setup = 'standard'
@@ -125,54 +179,46 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
                 break
         
         # Parse model
-        model = 'unknown'
         if '_vit_b_16' in clean_name:
             model = 'vit_b_16'
             clean_name = clean_name.replace('_vit_b_16', '')
         elif '_resnet18' in clean_name:
             model = 'resnet18'
             clean_name = clean_name.replace('_resnet18', '')
-        
-        # Remaining is dataset
-        dataset = clean_name
-        
-        # Construct dataset_key with setup
-        if setup == 'standard':
-            dataset_key = dataset
         else:
-            dataset_key = f"{dataset}_{setup}"
+            model = 'resnet18'
         
-        # Compute Mean_Aggregation differences
-        # Ensemble mode
+        dataset = clean_name
+        dataset_key = f"{dataset}_{setup}"
+        
+        # Compute ensemble-based Mean_Aggregation (using ensemble scores + ensemble correct/incorrect)
         ensemble_auroc = compute_mean_aggregation_metric(
-            results_dir, dataset_key, model, 
-            metric='auroc_f', aggregation='mean', 
-            shift=shift, use_ensemble=True
+            results_dir, dataset_key, model, metric='auroc_f', 
+            aggregation='mean', shift=shift, use_ensemble=True
         )
-        # Per-fold mode
+        
+        # Compute per-fold-based Mean_Aggregation (using per-fold scores + per-fold correct/incorrect)
         perfold_auroc = compute_mean_aggregation_metric(
-            results_dir, dataset_key, model, 
-            metric='auroc_f', aggregation='mean', 
-            shift=shift, use_ensemble=False
+            results_dir, dataset_key, model, metric='auroc_f',
+            aggregation='mean', shift=shift, use_ensemble=False
         )
+        
+        # Difference: ensemble - perfold
+        auroc_diff = ensemble_auroc - perfold_auroc if not np.isnan(ensemble_auroc) and not np.isnan(perfold_auroc) else np.nan
+        auroc_agg_row_list.append(auroc_diff)
         
         # Same for AUGRC
         ensemble_augrc = compute_mean_aggregation_metric(
-            results_dir, dataset_key, model, 
-            metric='augrc', aggregation='mean', 
-            shift=shift, use_ensemble=True
+            results_dir, dataset_key, model, metric='augrc',
+            aggregation='mean', shift=shift, use_ensemble=True
         )
+        
         perfold_augrc = compute_mean_aggregation_metric(
-            results_dir, dataset_key, model, 
-            metric='augrc', aggregation='mean', 
-            shift=shift, use_ensemble=False
+            results_dir, dataset_key, model, metric='augrc',
+            aggregation='mean', shift=shift, use_ensemble=False
         )
         
-        # Compute differences (same as individual methods)
-        auroc_diff = ensemble_auroc - perfold_auroc if not np.isnan(ensemble_auroc) and not np.isnan(perfold_auroc) else np.nan
         augrc_diff = ensemble_augrc - perfold_augrc if not np.isnan(ensemble_augrc) and not np.isnan(perfold_augrc) else np.nan
-        
-        auroc_agg_row_list.append(auroc_diff)
         augrc_agg_row_list.append(augrc_diff)
     
     auroc_agg_row = np.array(auroc_agg_row_list).reshape(1, -1)
@@ -183,12 +229,13 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     methods_with_agg = methods + ['⚡ Mean Aggregation']
     
     # Create figure with GridSpec for complex layout
-    fig = plt.figure(figsize=(19, 23))
+    # Smaller figure since only 3 datasets
+    fig = plt.figure(figsize=(16, 25))
     
-    # Define grid: 3 rows (radar top half, heatmap1, heatmap2)
-    gs = fig.add_gridspec(4, 2, height_ratios=[0.85, 0.90, 0.25, 0.25], 
+    # Define grid: 4 rows (radar top half, heatmap1, heatmap2)
+    gs = fig.add_gridspec(4, 2, height_ratios=[0.85, 0.90, 0.25, 0.30], 
                          hspace=0.05, wspace=0.45,
-                         left=0.10, right=0.90, top=0.96, bottom=0.06)
+                         left=0.10, right=0.90, top=0.96, bottom=0.08)
     
     # Create radar plot axes (top 2 rows, 2 columns)
     radar_axes = [
@@ -228,7 +275,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
             handles, labels = create_radar_plot_on_axis(
                 ax, model_results, model_name,
                 results_dir=results_dir, runs_dir=comp_eval_dir,
-                metric=metric, aggregation=aggregation, shift=shift
+                metric=metric, aggregation=aggregation, shift='population_shift'
             )
             
             # Collect legend info from first subplot
@@ -245,6 +292,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
             else:
                 ax.set_title(f'{model_display}\nPer-fold {aggregation.capitalize()} {metric_display}',
                              fontsize=14, fontweight='bold', pad=30, x=1.1, ha='right')
+    
     # Move "Mean_Aggregation" to bottom of legend
     if 'Mean_Aggregation' in all_labels:
         idx = all_labels.index('Mean_Aggregation')
@@ -253,14 +301,14 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     
     # Add legend for radar plots - centered between the 4 radars
     fig.legend(all_handles, all_labels, loc='center', ncol=2,
-              fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.615))
+              fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.66))
     
     # ========================
     # Generate heatmaps
     # ========================
     print("\nGenerating heatmaps...")
     
-    # Fixed colormap range for consistency across ID and corruption shifts
+    # Fixed colormap range for consistency across all shift types
     vmin, vmax = -0.2, 0.2
     
     # AUROC_f heatmap
@@ -293,10 +341,10 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
                 ax=heatmap_ax2)
     
     heatmap_ax2.set_title('AUGRC: Ensemble vs Mean Per-Fold',
-                         fontsize=12, fontweight='bold', pad=5)
+                         fontsize=12, fontweight='bold', pad=20)
     heatmap_ax2.set_ylabel('')
 
-    # Parse display names for multi-line x labels (exact copy from standalone script)
+    # Parse display names for multi-line x labels
     setups = []
     models = []
     datasets = []
@@ -305,7 +353,7 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
     
     for name in display_names:
         # Remove common suffixes if present
-        clean_name = name.replace('_corrupt_severity3_test', '').replace('_test', '')
+        clean_name = name.replace('_population_shift_test', '').replace('_test', '')
         
         # Try to identify setup, model, dataset properly
         setup = 'standard'
@@ -384,56 +432,48 @@ def create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregati
                  ha='center', va='top', fontsize=9, fontweight='bold')
     
     # Add colorbar for heatmaps
-    cbar_ax = fig.add_axes([0.92, 0.07, 0.01, 0.18])  # Smaller and positioned to match heatmaps
+    cbar_ax = fig.add_axes([0.91, 0.08, 0.015, 0.18])  # Positioned for narrower figure
     mappable = heatmap_ax2.collections[0]
     cbar = fig.colorbar(mappable, cax=cbar_ax, orientation='vertical')
     cbar.set_label('Difference (Ensemble - Mean Per-Fold)', fontsize=9)
     
     # Add main title
-    title_shift = 'Corruption Shifts' if shift == 'corruption_shifts' else 'In Distribution'
-    fig.suptitle(f'CSF Performances - {title_shift}', 
+    fig.suptitle('CSF Performances - Population & New Class Shift', 
                 fontsize=20, fontweight='bold', y=0.99)
     
     return fig
 
 
-def main(aggregation='mean', shift='in_distribution'):
+def main(aggregation='mean'):
     """Main function to generate combined figure."""
     
     print("=" * 80)
-    print("Combined Results Visualization")
+    print("Combined Population Shift & New Class Shift Results Visualization")
     print(f"Aggregation: {aggregation.upper()}")
-    print(f"Shift: {shift}")
     print("=" * 80)
     
     # Get paths
     script_dir = Path(__file__).parent
     workspace_root = script_dir.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
-    
-    # Route to correct directories based on shift type
-    if shift == 'corruption_shifts':
-        id_results_dir = results_dir / 'corruption_shifts'
-        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'corruption_shifts'
-        output_subdir = 'combined_corruption'
-    else:
-        id_results_dir = results_dir / 'id_results'
-        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
-        output_subdir = 'combined_id'
+    pop_results_dir = results_dir / 'population_shifts'
+    new_class_results_dir = results_dir / 'new_class_shifts'
+    comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'population_shift'
     
     print(f"Workspace root: {workspace_root}")
-    print(f"Results directory: {id_results_dir}")
+    print(f"Population shift results: {pop_results_dir}")
+    print(f"New class shift results: {new_class_results_dir}")
     print(f"Comprehensive eval: {comp_eval_dir}")
     
     # Create output directory
-    output_dir = results_dir / 'figures' / output_subdir
+    output_dir = results_dir / 'figures' / 'combined_population'
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Generate combined figure
-    fig = create_combined_figure(results_dir, id_results_dir, comp_eval_dir, aggregation, shift)
+    fig = create_combined_figure(results_dir, pop_results_dir, new_class_results_dir, comp_eval_dir, aggregation)
     
     # Save
-    output_path = output_dir / f'combined_results_{aggregation}_{shift}.png'
+    output_path = output_dir / f'combined_results_{aggregation}_population_and_new_class_shift.png'
     fig.savefig(output_path, dpi=300)
     print(f"\n✓ Saved to {output_path}")
     
@@ -446,16 +486,10 @@ def main(aggregation='mean', shift='in_distribution'):
 
 if __name__ == '__main__':
     aggregation = sys.argv[1] if len(sys.argv) > 1 else 'mean'
-    shift = sys.argv[2] if len(sys.argv) > 2 else 'in_distribution'
     
     if aggregation not in ['mean', 'min', 'max', 'vote']:
         print(f"Unknown aggregation: {aggregation}")
-        print("Usage: python plot_combined_id_results.py [mean|min|max|vote] [in_distribution|corruption_shifts]")
+        print("Usage: python plot_combined_population_results.py [mean|min|max|vote]")
         sys.exit(1)
     
-    if shift not in ['in_distribution', 'corruption_shifts']:
-        print(f"Unknown shift type: {shift}")
-        print("Usage: python plot_combined_id_results.py [mean|min|max|vote] [in_distribution|corruption_shifts]")
-        sys.exit(1)
-    
-    main(aggregation=aggregation, shift=shift)
+    main(aggregation=aggregation)

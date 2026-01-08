@@ -32,10 +32,11 @@ class AMOSDataset(torch.utils.data.Dataset):
     Custom dataset for AMOS-2022 external test data.
     Handles loading from .npz files and applying transforms.
     """
-    def __init__(self, images, labels, transform=None):
+    def __init__(self, images, labels, transform=None, original_labels=None):
         self.images = images
         self.labels = labels
         self.transform = transform
+        self.original_labels = original_labels  # For new class shift: original OrganaMNIST labels
     
     def __len__(self):
         return len(self.images)
@@ -162,6 +163,155 @@ def load_amos_dataset(transform, transform_tta, batch_size=256, workspace_root=N
     print(f"  AMOS: {len(test_dataset)} samples (filtered from {len(amos_images)})")
     
     return test_dataset, test_loader, test_dataset_tta, filtered_images, filtered_labels
+
+
+def load_amos_for_new_class_shift(transform, transform_tta, models, device, batch_size=256, workspace_root=None):
+    """
+    Load AMOS-2022 dataset for new class shift evaluation.
+    Creates artificial test set with:
+    - New classes (unmapped organs): All samples (these are failures by definition)
+    - Known classes (mapped organs): Only samples correctly predicted by ALL 5 folds (unanimous agreement)
+    
+    This paradigm tests UQ methods' ability to detect novel/unseen classes while avoiding
+    confounding effects from samples that are simply hard to classify.
+    
+    Args:
+        transform: Transform for normalized data
+        transform_tta: Transform for unnormalized data (TTA)
+        models: List of 5 trained models (CV folds)
+        device: torch device
+        batch_size: Batch size for DataLoader
+        workspace_root: Path to workspace root (optional, auto-detected if None)
+    
+    Returns:
+        tuple: (test_dataset, test_loader, test_dataset_tta)
+            All use artificial labels: 0 = correctly predicted known class, 1 = new class (failure)
+    """
+    if workspace_root is None:
+        workspace_root = Path(__file__).resolve().parent.parent.parent.parent
+    
+    print("  Loading AMOS for new class shift evaluation...")
+    amos_path = workspace_root / 'benchmarks' / 'medMNIST' / 'Data' / 'AMOS_2022' / 'amos_external_test_224.npz'
+    
+    # Check if file is a Git LFS pointer
+    if amos_path.stat().st_size < 1000:
+        raise FileNotFoundError(
+            "\n❌ AMOS dataset file appears to be a Git LFS pointer.\n"
+            "   Please download the actual file using: git lfs pull"
+        )
+    
+    try:
+        amos_data = np.load(str(amos_path), allow_pickle=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"\\n❌ Failed to load AMOS dataset from {amos_path}\\n"
+            f"   Error: {e}\\n"
+            f"   File size: {amos_path.stat().st_size} bytes"
+        ) from e
+    
+    amos_images = amos_data['test_images']  # (N, 224, 224, 1)
+    amos_labels = amos_data['test_labels']  # (N, 15) - AMOS organ labels
+    
+    # OrganaMNIST to AMOS mapping (6 known organs)
+    amos_to_organamnist = {
+        0: 10,  # spleen → spleen
+        1: 5,   # right kidney → kidney-right
+        2: 4,   # left kidney → kidney-left
+        5: 6,   # liver → liver
+        9: 9,   # pancreas → pancreas
+        13: 0,  # bladder → bladder
+    }
+    
+    # Separate samples into known vs new classes
+    known_class_indices = []
+    known_class_labels_organamnist = []  # For model evaluation
+    new_class_indices = []
+    
+    for idx in range(len(amos_labels)):
+        amos_organ_id = np.argmax(amos_labels[idx])
+        if amos_organ_id in amos_to_organamnist:
+            known_class_indices.append(idx)
+            known_class_labels_organamnist.append(amos_to_organamnist[amos_organ_id])
+        else:
+            new_class_indices.append(idx)
+    
+    print(f"  Known classes (mapped): {len(known_class_indices)} samples")
+    print(f"  New classes (unmapped): {len(new_class_indices)} samples")
+    
+    # Evaluate models on known class samples to find unanimous correct predictions
+    print("  Evaluating models to find unanimous correct predictions...")
+    known_images = amos_images[known_class_indices]
+    known_labels = np.array(known_class_labels_organamnist)
+    
+    # Create temporary dataset for evaluation (normalized)
+    temp_dataset = AMOSDataset(known_images, known_labels, transform=transform)
+    temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    
+    # Get predictions from all 5 folds
+    all_fold_predictions = []  # [K, N_known]
+    for fold_idx, model in enumerate(models):
+        model.eval()
+        fold_preds = []
+        with torch.no_grad():
+            for batch in temp_loader:
+                if isinstance(batch, dict):
+                    images = batch["image"].to(device)
+                    labels = batch["label"]
+                else:
+                    images, labels = batch
+                    images = images.to(device)
+                
+                outputs = model(images)
+                preds = torch.argmax(outputs, dim=1).cpu().numpy()
+                fold_preds.append(preds)
+        
+        all_fold_predictions.append(np.concatenate(fold_preds))
+        fold_acc = np.mean(all_fold_predictions[-1] == known_labels)
+        print(f"    Fold {fold_idx}: {fold_acc:.4f} accuracy on known classes")
+    
+    all_fold_predictions = np.stack(all_fold_predictions, axis=0)  # [K, N_known]
+    
+    # Find unanimous correct predictions (all 5 folds agree and are correct)
+    unanimous_correct_mask = np.all(all_fold_predictions == known_labels[None, :], axis=0)
+    unanimous_correct_local_idx = np.where(unanimous_correct_mask)[0]  # Indices within known_class_indices
+    
+    print(f"  Unanimous correct: {len(unanimous_correct_local_idx)}/{len(known_class_indices)} "
+          f"({100*len(unanimous_correct_local_idx)/len(known_class_indices):.1f}%)")
+    
+    # Create artificial test set
+    # Correct samples: unanimous correct predictions from known classes
+    correct_global_indices = [known_class_indices[i] for i in unanimous_correct_local_idx]
+    correct_images = amos_images[correct_global_indices]
+    correct_original_labels = known_labels[unanimous_correct_local_idx]  # Keep original OrganaMNIST labels
+    
+    # Failure samples: all new class samples
+    failure_images = amos_images[new_class_indices]
+    failure_original_labels = np.full(len(failure_images), -1, dtype=np.int64)  # -1 = new class (no valid label)
+    
+    # Combine
+    artificial_images = np.concatenate([correct_images, failure_images], axis=0)
+    original_labels = np.concatenate([correct_original_labels, failure_original_labels], axis=0)
+    
+    # Binary ground truth for failure detection: 0 = correct (known class), 1 = failure (new class)
+    binary_gt = np.concatenate([
+        np.zeros(len(correct_images), dtype=np.int64),  # Known classes = not failures
+        np.ones(len(failure_images), dtype=np.int64)    # New classes = failures
+    ], axis=0)
+    
+    print(f"  Artificial test set: {len(correct_images)} correct + {len(failure_images)} failures "
+          f"= {len(artificial_images)} total")
+    print(f"  Failure rate: {100*len(failure_images)/len(artificial_images):.1f}%")
+    
+    # Create datasets with original labels for model evaluation, binary_gt stored as attribute
+    test_dataset = AMOSDataset(artificial_images, original_labels, transform=transform)
+    test_dataset.binary_gt = binary_gt  # For failure detection metrics
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+    )
+    test_dataset_tta = AMOSDataset(artificial_images, original_labels, transform=transform_tta)
+    test_dataset_tta.binary_gt = binary_gt
+    
+    return test_dataset, test_loader, test_dataset_tta
 
 
 def subsample_dataset_failure_aware(dataset, models, device, max_samples=None, 

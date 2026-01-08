@@ -260,7 +260,11 @@ class FailureDetector:
         self,
         y_scores: np.ndarray,
         y_true: np.ndarray,
-        y_pred: Optional[np.ndarray] = None
+        y_pred: Optional[np.ndarray] = None,
+        correct_idx: Optional[np.ndarray] = None,
+        incorrect_idx: Optional[np.ndarray] = None,
+        per_fold_correct_idx: Optional[list] = None,
+        per_fold_incorrect_idx: Optional[list] = None
     ):
         """
         Set pre-computed test predictions to avoid recomputing.
@@ -269,19 +273,27 @@ class FailureDetector:
             y_scores: Ensemble probability scores [N, num_classes]
             y_true: True labels [N]
             y_pred: Predicted labels [N] (optional, will compute from y_scores if not provided)
+            correct_idx: Pre-computed correct prediction indices (optional)
+            incorrect_idx: Pre-computed incorrect prediction indices (optional)
+            per_fold_correct_idx: List of correct indices for each fold (optional)
+            per_fold_incorrect_idx: List of incorrect indices for each fold (optional)
         """
         if y_pred is None:
             y_pred = np.argmax(y_scores, axis=1)
         
-        correct_idx = np.where(y_pred == y_true)[0]
-        incorrect_idx = np.where(y_pred != y_true)[0]
+        # Use pre-computed indices if provided, otherwise compute from y_pred vs y_true
+        if correct_idx is None or incorrect_idx is None:
+            correct_idx = np.where(y_pred == y_true)[0]
+            incorrect_idx = np.where(y_pred != y_true)[0]
         
         self._test_predictions_cache = {
             'y_scores': y_scores,
             'y_true': y_true,
             'y_pred': y_pred,
             'correct_idx': correct_idx,
-            'incorrect_idx': incorrect_idx
+            'incorrect_idx': incorrect_idx,
+            'per_fold_correct_idx': per_fold_correct_idx,
+            'per_fold_incorrect_idx': per_fold_incorrect_idx
         }
     
     def _get_per_fold_predictions(self, batch_size):
@@ -1565,11 +1577,22 @@ class FailureDetector:
         """Compute all evaluation metrics."""
         # Check if uncertainties are per-fold [num_folds, N] or averaged [N]
         if uncertainties.ndim == 2:
+            # Get per-fold correct/incorrect indices from cache if available
+            per_fold_correct_idx = None
+            per_fold_incorrect_idx = None
+            if self._test_predictions_cache is not None:
+                per_fold_correct_idx = self._test_predictions_cache.get('per_fold_correct_idx')
+                per_fold_incorrect_idx = self._test_predictions_cache.get('per_fold_incorrect_idx')
+            
             # Per-fold uncertainties: compute metrics per fold, then aggregate
             metrics = uq.compute_all_metrics_per_fold(
                 uncertainties, predictions, labels, 
                 predictions_per_fold=predictions_per_fold,
-                ensemble_uncertainties=ensemble_uncertainties
+                ensemble_uncertainties=ensemble_uncertainties,
+                per_fold_correct_idx=per_fold_correct_idx,
+                per_fold_incorrect_idx=per_fold_incorrect_idx,
+                ensemble_correct_idx=correct_idx,
+                ensemble_incorrect_idx=incorrect_idx
             )
         else:
             # Single uncertainty array: compute standard metrics
@@ -1638,6 +1661,10 @@ class FailureDetector:
             
             y_pred = self._test_predictions_cache['y_pred']
             y_true = self._test_predictions_cache['y_true']
+            correct_idx = self._test_predictions_cache.get('correct_idx')
+            incorrect_idx = self._test_predictions_cache.get('incorrect_idx')
+            per_fold_correct_idx = self._test_predictions_cache.get('per_fold_correct_idx')
+            per_fold_incorrect_idx = self._test_predictions_cache.get('per_fold_incorrect_idx')
             
             print(f"\n📊 Generating evaluation plots...")
             for method_name, metric_values in self._uncertainties.items():
@@ -1676,7 +1703,11 @@ class FailureDetector:
                         predictions_per_fold=predictions_per_fold,
                         model_backbone=model_backbone,
                         setup=setup,
-                        corruption_info=corruption_info
+                        corruption_info=corruption_info,
+                        correct_idx=correct_idx,
+                        incorrect_idx=incorrect_idx,
+                        per_fold_correct_idx=per_fold_correct_idx,
+                        per_fold_incorrect_idx=per_fold_incorrect_idx
                     )
                     print(f"  ✓ {method_name}: {len(fig_paths)} plots saved")
                 except Exception as e:

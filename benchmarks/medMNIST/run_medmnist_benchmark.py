@@ -38,7 +38,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                            batch_size=4000, image_size=224, gpu_id=0, per_fold_eval=True,
                            model_backbone='resnet18', setup='', gps_calib_samples=None,
                            min_failure_ratio=0.3, corruption_severity=0,
-                           corrupt_test=False, corrupt_calib=False):
+                           corrupt_test=False, corrupt_calib=False, new_class_shift=False):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -58,10 +58,15 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                             When enabled, randomly applies available medmnistc corruptions
         corrupt_test: If True, apply corruption to test set (requires corruption_severity > 0)
         corrupt_calib: If True, apply corruption to calibration set (requires corruption_severity > 0)
+        new_class_shift: If True, create artificial test set with new classes (failures) + unanimous correct predictions
+                        Only supported for AMOS2022 dataset
     """
     print(f"\n{'='*80}")
     print(f"MedMNIST Benchmark: {flag}")
     print(f"Using FailCatcher v{FailCatcher.__version__}")
+    if new_class_shift:
+        print(f"New Class Shift: Evaluating unseen classes (artificial test set)")
+        print(f"  Test = New classes (failures) + Unanimous correct predictions (known classes)")
     if corruption_severity > 0:
         print(f"Covariate Shift: Random corruptions (severity={corruption_severity}/5)")
         print(f"  Test set: {'✓ Corrupted' if corrupt_test else '✗ Clean'}")
@@ -178,9 +183,17 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             tr.load_datasets('organamnist', color, image_size, transform_tta, batch_size)
         
         # Load AMOS external test dataset
-        test_dataset, test_loader, test_dataset_tta, _, _ = dataset_utils.load_amos_dataset(
-            transform, transform_tta, batch_size, workspace_root=Path(__file__).resolve().parent.parent.parent
-        )
+        if new_class_shift:
+            # Load full AMOS dataset including unmapped classes
+            test_dataset, test_loader, test_dataset_tta = dataset_utils.load_amos_for_new_class_shift(
+                transform, transform_tta, models, device, batch_size,
+                workspace_root=Path(__file__).resolve().parent.parent.parent
+            )
+        else:
+            # Load standard AMOS dataset (only mapped classes)
+            test_dataset, test_loader, test_dataset_tta, _, _ = dataset_utils.load_amos_dataset(
+                transform, transform_tta, batch_size, workspace_root=Path(__file__).resolve().parent.parent.parent
+            )
         
         # Apply corruptions if requested
         if corruption_severity > 0 and corrupt_test:
@@ -224,8 +237,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         if corrupt_calib:
             corruption_suffix += "_calib"
     
-    calib_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}{corruption_suffix}_calib_results.npz')
-    test_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}{corruption_suffix}_test_results.npz')
+    # Add new class shift to cache key
+    new_class_suffix = "_new_class_shift" if new_class_shift else ""
+    
+    calib_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}{corruption_suffix}{new_class_suffix}_calib_results.npz')
+    test_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}{corruption_suffix}{new_class_suffix}_test_results.npz')
     
     # Try to load cached results FIRST
     cache_loaded = False
@@ -262,6 +278,13 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         incorrect_idx = test_cache['incorrect_idx']
         indiv_scores = test_cache['indiv_scores']  # [N, K, C]
         logits = test_cache['logits']  # [N, C]
+        
+        # For new class shift: override with binary ground truth
+        if new_class_shift and hasattr(test_dataset, 'binary_gt'):
+            print("  ✓ Using binary ground truth for new class shift evaluation (from cache)")
+            y_true = test_dataset.binary_gt
+            correct_idx = np.where(y_true == 0)[0]
+            incorrect_idx = np.where(y_true == 1)[0]
         
         # Check if per-fold logits are cached (new format)
         if 'indiv_logits' in test_cache.files:
@@ -300,8 +323,13 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             per_fold_incorrect_idx_calib = []
             
             for fold_idx in range(per_fold_predictions.shape[0]):
-                fold_correct = np.where(per_fold_predictions[fold_idx] == y_true)[0]
-                fold_incorrect = np.where(per_fold_predictions[fold_idx] != y_true)[0]
+                # For new class shift: use binary ground truth
+                if new_class_shift and hasattr(test_dataset, 'binary_gt'):
+                    fold_correct = np.where(y_true == 0)[0]
+                    fold_incorrect = np.where(y_true == 1)[0]
+                else:
+                    fold_correct = np.where(per_fold_predictions[fold_idx] == y_true)[0]
+                    fold_incorrect = np.where(per_fold_predictions[fold_idx] != y_true)[0]
                 per_fold_correct_idx.append(fold_correct)
                 per_fold_incorrect_idx.append(fold_incorrect)
                 
@@ -321,8 +349,16 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         y_pred = np.argmax(y_scores, axis=1)
         y_pred_calib = np.argmax(y_scores_calib, axis=1)
         
-        print(f"  ✓ Loaded cached results")
-        print(f"  Test accuracy: {len(correct_idx) / len(y_true):.4f}")
+        # For new class shift: extract binary_gt from cache and use it as y_true for risk computation
+        if new_class_shift and 'binary_gt' in test_cache.files:
+            binary_gt = test_cache['binary_gt']
+            print(f"  ✓ Loaded cached results (new class shift mode)")
+            print(f"  Test accuracy: {len(correct_idx) / len(binary_gt):.4f} (failure rate: {np.sum(binary_gt)/len(binary_gt):.4f})")
+            # Override y_true with binary_gt for proper risk computation
+            y_true = binary_gt
+        else:
+            print(f"  ✓ Loaded cached results")
+            print(f"  Test accuracy: {len(correct_idx) / len(y_true):.4f}")
     
     else:
         # No cache - evaluate models
@@ -330,6 +366,18 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         y_true, y_scores, y_pred, correct_idx, incorrect_idx, indiv_scores_raw, logits = uq.evaluate_models_on_loader(
             models, test_loader, device, return_logits=True
         )
+        
+        # For new class shift: replace y_true with binary ground truth for failure detection
+        if new_class_shift and hasattr(test_dataset, 'binary_gt'):
+            print("  ✓ Using binary ground truth for new class shift evaluation")
+            y_true_original = y_true.copy()  # Keep original labels
+            y_true = test_dataset.binary_gt  # Binary: 0=correct (known class), 1=failure (new class)
+            
+            # Recompute correct/incorrect based on binary ground truth
+            # Correct = known class samples (-1 in original labels means new class)
+            correct_idx = np.where(y_true == 0)[0]  # Known classes
+            incorrect_idx = np.where(y_true == 1)[0]  # New classes (all failures by definition)
+            print(f"  Binary GT: {len(correct_idx)} known class (correct), {len(incorrect_idx)} new class (failures)")
         
         # Calibration set
         y_true_calib, y_scores_calib, y_pred_calib, correct_idx_calib, incorrect_idx_calib, indiv_scores_calib_raw, logits_calib = \
@@ -388,8 +436,17 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         for fold_idx in range(len(models)):
             # Test set
             fold_preds = np.argmax(indiv_scores[fold_idx], axis=1)  # [N]
-            fold_correct = np.where(fold_preds == y_true)[0]
-            fold_incorrect = np.where(fold_preds != y_true)[0]
+            
+            # For new class shift: use binary ground truth
+            if new_class_shift and hasattr(test_dataset, 'binary_gt'):
+                # Known classes (binary_gt=0): correct if model predicts correct original label
+                # New classes (binary_gt=1): always incorrect (failures by definition)
+                fold_correct = np.where(y_true == 0)[0]  # All known class samples
+                fold_incorrect = np.where(y_true == 1)[0]  # All new class samples
+            else:
+                fold_correct = np.where(fold_preds == y_true)[0]
+                fold_incorrect = np.where(fold_preds != y_true)[0]
+            
             per_fold_correct_idx.append(fold_correct)
             per_fold_incorrect_idx.append(fold_incorrect)
             
@@ -422,8 +479,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             per_fold_incorrect_idx=np.array(per_fold_incorrect_idx_calib, dtype=object),  # Object array
             per_fold_predictions=per_fold_predictions_calib  # [K, N_calib]
         )
-        np.savez_compressed(
-            test_cache_path,
+        # Save test cache (with binary_gt if new_class_shift)
+        cache_data = dict(
             y_true=y_true,
             y_scores=y_scores,
             y_pred=y_pred,
@@ -436,6 +493,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             per_fold_incorrect_idx=np.array(per_fold_incorrect_idx, dtype=object),  # Object array
             per_fold_predictions=per_fold_predictions  # [K, N]
         )
+        if new_class_shift and hasattr(test_dataset, 'binary_gt'):
+            cache_data['binary_gt'] = test_dataset.binary_gt  # Save binary ground truth for risk computation
+        np.savez_compressed(test_cache_path, **cache_data)
         print(f"  ✓ Cached to {cache_dir}")
     
     # ========================================================================
@@ -451,7 +511,12 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     )
     
     # Set predictions once to avoid recomputing for each method
-    detector.set_test_predictions(y_scores, y_true, y_pred)
+    # For new_class_shift: pass pre-computed correct/incorrect indices to avoid recomputation
+    if new_class_shift:
+        detector.set_test_predictions(y_scores, y_true, y_pred, correct_idx, incorrect_idx,
+                                      per_fold_correct_idx, per_fold_incorrect_idx)
+    else:
+        detector.set_test_predictions(y_scores, y_true, y_pred)
     
     # Set per-fold predictions to avoid redundant vanilla inference
     # This is especially important when running multiple UQ methods
@@ -791,6 +856,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             corruption_parts.append("calib")
         corruption_info = "_".join(corruption_parts)
     
+    # Override output directory for new class shift
+    if new_class_shift:
+        output_dir = os.path.join(output_dir, 'new_class_shifts')
+        os.makedirs(output_dir, exist_ok=True)
+    
     # Save all results using the detector's save_results method
     saved_paths = detector.save_results(
         output_dir=output_dir,
@@ -907,6 +977,10 @@ if __name__ == '__main__':
         '--list-corruptions', action='store_true',
         help='List available corruptions for the specified dataset and exit'
     )
+    parser.add_argument(
+        '--new-class-shift', action='store_true', default=False,
+        help='Evaluate new class shift (AMOS only): Create artificial test set with new classes (failures) + unanimous correct predictions (known classes)'
+    )
     
     args = parser.parse_args()
     
@@ -940,5 +1014,6 @@ if __name__ == '__main__':
         min_failure_ratio=args.min_failure_ratio,
         corruption_severity=args.corruption_severity,
         corrupt_test=args.corrupt_test,
-        corrupt_calib=args.corrupt_calib
+        corrupt_calib=args.corrupt_calib,
+        new_class_shift=args.new_class_shift
     )

@@ -312,7 +312,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     print(f"  Computing {agg_display} aggregation {metric_name} for each dataset...")
     mean_agg_count = 0
     for dataset_key in dataset_keys:
-        mean_agg_value = compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric=metric, aggregation=aggregation, shift=shift, use_ensemble=False)
+        mean_agg_value = compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric=metric, aggregation=aggregation)
         if not np.isnan(mean_agg_value):
             model_results[dataset_key]['Mean_Aggregation'] = mean_agg_value
             mean_agg_count += 1
@@ -539,13 +539,13 @@ def generate_summary_table(results, output_path):
     print(f"\n✓ Summary table saved to {output_path}")
 
 
-def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric='auroc_f', aggregation='mean', shift='in_distribution', use_ensemble=False):
+def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric='auroc_f', aggregation='mean'):
     """
     Compute specified metric for aggregation of z-scored UQ methods.
     
-    Computes per-fold aggregation by default, or ensemble-based if use_ensemble=True:
-    - Per-fold (use_ensemble=False): For each fold: z-score normalize methods -> aggregate -> compute metric -> average across folds
-    - Ensemble (use_ensemble=True): Z-score normalize ensemble scores -> aggregate -> compute single metric with ensemble indices
+    Computes per-fold aggregation:
+    - For each fold: z-score normalize methods -> aggregate (mean/min/max/vote) -> compute metric
+    - Average metric across all folds
     
     Methods used: MSR, MSR_calibrated, MLS, GPS, KNN_Raw, MC_Dropout (when available)
     Excludes: TTA and Ensembling
@@ -556,18 +556,11 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
         model_name: Model name (e.g., 'resnet18', 'vit_b_16')
         metric: Metric to compute - 'auroc_f' or 'augrc'
         aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote'
-        shift: Shift type - 'in_distribution', 'corruption_shifts', 'population_shift', 'new_class_shift'
-        use_ensemble: If True, use ensemble scores/indices. If False, use per-fold scores/indices (default)
     
     Returns:
-        float: Metric value (single for ensemble, average across folds for per-fold), or NaN if not found
+        float: Average metric value across folds, or NaN if not found
     """
     results_dir = Path(results_dir)
-    
-    # Check if this is a new_class dataset
-    is_new_class = dataset_key.startswith('new_class_')
-    if is_new_class:
-        dataset_key = dataset_key.replace('new_class_', '', 1)
     
     # Parse dataset_key to get base dataset name and setup
     if '_' in dataset_key and dataset_key.split('_')[-1] in ['standard', 'DA', 'DO', 'DADO']:
@@ -584,15 +577,8 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
     else:
         pattern = f"all_metrics_{dataset_name}_{model_name}_{setup}_*.npz"
     
-    # Search in appropriate subdirectory based on shift type
-    if is_new_class:
-        search_dir = results_dir / 'new_class_shifts'
-    elif shift == 'corruption_shifts':
-        search_dir = results_dir / 'corruption_shifts'
-    elif shift == 'population_shift':
-        search_dir = results_dir / 'population_shifts'
-    else:  # in_distribution
-        search_dir = results_dir / 'id_results'
+    # Search in id_results subdirectory
+    search_dir = results_dir / 'id_results'
     
     # Find matching npz files
     all_npz_files = list(search_dir.glob(pattern))
@@ -614,35 +600,25 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
     try:
         data = np.load(npz_file, allow_pickle=True)
         
-        # Get cache file path
+        # Methods to aggregate (exclude TTA and Ensembling)
+        methods_to_use = ['MSR', 'MSR_calibrated', 'MLS', 'GPS', 'KNN_Raw', 'MC_Dropout']
+        per_fold_keys = [f'{m}_per_fold' for m in methods_to_use]
+        
+        # Check which per_fold keys exist (MC_Dropout may not be available)
+        available_keys = [k for k in per_fold_keys if k in data.keys()]
+        if not available_keys:
+            return np.nan
+        
+        # Get number of folds
+        first_key = available_keys[0]
+        num_folds = len(data[first_key])
+        
+        # Get labels from cached test results
         cache_dir = results_dir / 'cache'
-        if is_new_class:
-            if setup == 'standard':
-                cache_pattern = f"{dataset_name}_{model_name}_new_class_shift_test_results.npz"
-            else:
-                cache_pattern = f"{dataset_name}_{model_name}_{setup}_new_class_shift_test_results.npz"
-        elif shift == 'corruption_shifts':
-            if setup == 'standard':
-                cache_pattern_v2 = f"{dataset_name}_{model_name}_corrupt3_test_test_results.npz"
-                cache_pattern = f"{dataset_name}_{model_name}_corrupt3_test_results.npz"
-                if (cache_dir / cache_pattern_v2).exists():
-                    cache_pattern = cache_pattern_v2
-            else:
-                cache_pattern_v2 = f"{dataset_name}_{model_name}_{setup}_corrupt3_test_test_results.npz"
-                cache_pattern = f"{dataset_name}_{model_name}_{setup}_corrupt3_test_results.npz"
-                if (cache_dir / cache_pattern_v2).exists():
-                    cache_pattern = cache_pattern_v2
+        if setup == 'standard':
+            cache_pattern = f"{dataset_name}_{model_name}_test_results.npz"
         else:
-            if setup == 'standard':
-                cache_pattern_v2 = f"{dataset_name}_{model_name}_test_test_results.npz"
-                cache_pattern = f"{dataset_name}_{model_name}_test_results.npz"
-                if (cache_dir / cache_pattern_v2).exists():
-                    cache_pattern = cache_pattern_v2
-            else:
-                cache_pattern_v2 = f"{dataset_name}_{model_name}_{setup}_test_test_results.npz"
-                cache_pattern = f"{dataset_name}_{model_name}_{setup}_test_results.npz"
-                if (cache_dir / cache_pattern_v2).exists():
-                    cache_pattern = cache_pattern_v2
+            cache_pattern = f"{dataset_name}_{model_name}_{setup}_test_results.npz"
         
         cache_file_path = cache_dir / cache_pattern
         if not cache_file_path.exists():
@@ -650,20 +626,24 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
         
         cache_data = np.load(cache_file_path, allow_pickle=True)
         
-        if use_ensemble:
-            # ENSEMBLE MODE: Use ensemble scores with ensemble correct/incorrect indices
-            method_keys = [k for k in data.keys() 
-                          if not k.endswith('_per_fold') 
-                          and not k.endswith('_ensemble') 
-                          and k not in ['TTA', 'Ensembling']]
-            
-            if not method_keys:
-                return np.nan
-            
-            # Z-score normalize ensemble scores
+        # Get per-fold data
+        per_fold_correct = cache_data['per_fold_correct_idx']
+        per_fold_incorrect = cache_data['per_fold_incorrect_idx']
+        
+        # For AUGRC, we also need predictions and labels
+        if metric == 'augrc':
+            per_fold_predictions = cache_data['per_fold_predictions']
+            y_true = cache_data['y_true']
+        
+        # Compute metric for each fold
+        fold_metrics = []
+        
+        for fold_idx in range(num_folds):
+            # Z-score normalize each method for this fold
             normalized_arrays = []
-            for method_name in method_keys:
-                uncertainties = data[method_name]
+            
+            for key in available_keys:
+                uncertainties = data[key][fold_idx]
                 mean_val = np.mean(uncertainties)
                 std_val = np.std(uncertainties)
                 
@@ -672,9 +652,9 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
                     normalized_arrays.append(z_score)
             
             if not normalized_arrays:
-                return np.nan
+                continue
             
-            # Apply aggregation
+            # Apply aggregation strategy
             stacked = np.stack(normalized_arrays, axis=0)
             if aggregation == 'mean':
                 aggregated = np.mean(stacked, axis=0)
@@ -683,154 +663,55 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
             elif aggregation == 'max':
                 aggregated = np.max(stacked, axis=0)
             elif aggregation == 'vote':
+                # Majority vote: count how many methods have z-score > 0
                 aggregated = np.sum(stacked > 0, axis=0) / len(normalized_arrays)
             else:
-                return np.nan
+                continue
             
-            # Get ensemble correct/incorrect indices
-            if 'correct_idx' in cache_data and 'incorrect_idx' in cache_data:
-                correct_idx = np.asarray(cache_data['correct_idx'], dtype=int)
-                incorrect_idx = np.asarray(cache_data['incorrect_idx'], dtype=int)
-            elif 'per_fold_correct_idx' in cache_data:
-                correct_idx = np.asarray(cache_data['per_fold_correct_idx'][0], dtype=int)
-                incorrect_idx = np.asarray(cache_data['per_fold_incorrect_idx'][0], dtype=int)
-            else:
-                return np.nan
+            # Get indices for this fold
+            correct_idx = per_fold_correct[fold_idx]
+            incorrect_idx = per_fold_incorrect[fold_idx]
             
+            # Build failure labels
             n_samples = len(correct_idx) + len(incorrect_idx)
             failure_labels = np.zeros(n_samples)
             failure_labels[incorrect_idx] = 1
             
             if len(failure_labels) != len(aggregated):
-                return np.nan
+                continue
             
-            # Compute metric
+            # Compute metric for this fold
             if metric == 'auroc_f':
                 from sklearn.metrics import roc_auc_score
-                result = roc_auc_score(failure_labels, aggregated)
+                fold_metric = roc_auc_score(failure_labels, aggregated)
             elif metric == 'augrc':
-                if 'y_pred' in cache_data and 'y_true' in cache_data:
-                    predictions = cache_data['y_pred']
-                    labels = cache_data['y_true']
-                    
-                    import sys
-                    sys.path.insert(0, str(results_dir.parent))
-                    from FailCatcher.evaluation.evaluation import compute_augrc
-                    
-                    result, _ = compute_augrc(aggregated, predictions, labels,
-                                             correct_idx=correct_idx, incorrect_idx=incorrect_idx)
-                else:
-                    return np.nan
+                # Import compute_augrc from evaluation.py
+                import sys
+                sys.path.insert(0, str(results_dir.parent))
+                from FailCatcher.evaluation.evaluation import compute_augrc
+                
+                # Get predictions and labels for this fold
+                predictions = per_fold_predictions[fold_idx]
+                labels = y_true  # Full dataset labels
+                
+                # compute_augrc returns (augrc_value, metrics_dict)
+                fold_metric, _ = compute_augrc(aggregated, predictions, labels)
             else:
-                return np.nan
+                continue
             
-            return result
+            fold_metrics.append(fold_metric)
         
-        else:
-            # PER-FOLD MODE: Use per-fold scores with per-fold correct/incorrect indices
-            per_fold_keys = [k for k in data.keys() 
-                            if k.endswith('_per_fold') 
-                            and k not in ['TTA_per_fold', 'Ensembling_per_fold']]
-            
-            if not per_fold_keys:
-                return np.nan
-            
-            # Get number of folds
-            num_folds = len(data[per_fold_keys[0]])
-            
-            # Get per-fold correct/incorrect indices
-            if 'per_fold_correct_idx' in cache_data:
-                per_fold_correct = [np.asarray(idx, dtype=int) for idx in cache_data['per_fold_correct_idx']]
-                per_fold_incorrect = [np.asarray(idx, dtype=int) for idx in cache_data['per_fold_incorrect_idx']]
-            else:
-                return np.nan
-            
-            # For AUGRC, we also need per-fold predictions
-            if metric == 'augrc':
-                if 'per_fold_predictions' in cache_data:
-                    per_fold_predictions = cache_data['per_fold_predictions']
-                else:
-                    per_fold_predictions = None
-                y_true = cache_data['y_true']
-            
-            # Compute metric for each fold
-            fold_metrics = []
-            
-            for fold_idx in range(num_folds):
-                # Z-score normalize each method for this fold
-                normalized_arrays = []
-                
-                for key in per_fold_keys:
-                    uncertainties = data[key][fold_idx]
-                    mean_val = np.mean(uncertainties)
-                    std_val = np.std(uncertainties)
-                    
-                    if std_val > 0:
-                        z_score = (uncertainties - mean_val) / std_val
-                        normalized_arrays.append(z_score)
-                
-                if not normalized_arrays:
-                    continue
-                
-                # Apply aggregation strategy
-                stacked = np.stack(normalized_arrays, axis=0)
-                if aggregation == 'mean':
-                    aggregated = np.mean(stacked, axis=0)
-                elif aggregation == 'min':
-                    aggregated = np.min(stacked, axis=0)
-                elif aggregation == 'max':
-                    aggregated = np.max(stacked, axis=0)
-                elif aggregation == 'vote':
-                    aggregated = np.sum(stacked > 0, axis=0) / len(normalized_arrays)
-                else:
-                    continue
-                
-                # Get indices for this fold
-                correct_idx = per_fold_correct[fold_idx]
-                incorrect_idx = per_fold_incorrect[fold_idx]
-                
-                # Build failure labels
-                n_samples = len(correct_idx) + len(incorrect_idx)
-                failure_labels = np.zeros(n_samples)
-                failure_labels[incorrect_idx] = 1
-                
-                if len(failure_labels) != len(aggregated):
-                    continue
-                
-                # Compute metric for this fold
-                if metric == 'auroc_f':
-                    from sklearn.metrics import roc_auc_score
-                    fold_metric = roc_auc_score(failure_labels, aggregated)
-                elif metric == 'augrc':
-                    if per_fold_predictions is None:
-                        continue
-                    
-                    import sys
-                    sys.path.insert(0, str(results_dir.parent))
-                    from FailCatcher.evaluation.evaluation import compute_augrc
-                    
-                    predictions = per_fold_predictions[fold_idx]
-                    labels = y_true
-                    
-                    fold_metric, _ = compute_augrc(aggregated, predictions, labels, 
-                                                   correct_idx=correct_idx, incorrect_idx=incorrect_idx)
-                else:
-                    continue
-                
-                fold_metrics.append(fold_metric)
-            
-            if not fold_metrics:
-                return np.nan
-            
-            # Average across folds
-            return np.mean(fold_metrics)
+        if not fold_metrics:
+            return np.nan
+        
+        # Average across folds
+        return np.mean(fold_metrics)
         
     except Exception as e:
         import traceback
         print(f"    Warning: Could not compute mean aggregation for {dataset_key}: {e}")
         traceback.print_exc()
         return np.nan
-
 
 
 def aggregate_uq_methods(npz_path, aggregation='mean', methods=None, output_path=None):

@@ -60,7 +60,7 @@ def compute_roc_curve(uncertainties, correct_idx, incorrect_idx):
     return fpr, tpr, thresholds, auroc
 
 
-def compute_aurc(uncertainties, predictions, labels, num_bins=1000):
+def compute_aurc(uncertainties, predictions, labels, num_bins=1000, correct_idx=None, incorrect_idx=None):
     """
     Compute Area Under Risk-Coverage Curve (AURC).
     
@@ -73,6 +73,8 @@ def compute_aurc(uncertainties, predictions, labels, num_bins=1000):
         predictions: Array of predicted labels [N]
         labels: Array of true labels [N]
         num_bins: Number of coverage bins (default: 1000)
+        correct_idx: Optional pre-computed indices of correct predictions
+        incorrect_idx: Optional pre-computed indices of incorrect predictions
     
     Returns:
         float: AURC score (lower = better, range [0, 1])
@@ -89,7 +91,15 @@ def compute_aurc(uncertainties, predictions, labels, num_bins=1000):
     sorted_labels = labels[sorted_indices]
     
     # Compute cumulative errors and coverage
-    errors = (sorted_predictions != sorted_labels).astype(float)
+    # Use pre-computed indices if provided (for new_class_shift where predictions are multi-class but labels are binary)
+    if correct_idx is not None and incorrect_idx is not None:
+        errors_array = np.zeros(n_samples, dtype=float)
+        # Ensure indices are integer arrays (might be object dtype from cache)
+        incorrect_idx_int = np.asarray(incorrect_idx, dtype=int)
+        errors_array[incorrect_idx_int] = 1.0
+        errors = errors_array[sorted_indices]
+    else:
+        errors = (sorted_predictions != sorted_labels).astype(float)
     
     # Coverage percentages
     coverages = []
@@ -133,7 +143,7 @@ def compute_aurc(uncertainties, predictions, labels, num_bins=1000):
     }
 
 
-def compute_augrc(uncertainties, predictions, labels, num_bins=1000):
+def compute_augrc(uncertainties, predictions, labels, num_bins=1000, correct_idx=None, incorrect_idx=None):
     """
     Compute Area Under Generalized Risk-Coverage Curve (AUGRC).
     
@@ -162,6 +172,8 @@ def compute_augrc(uncertainties, predictions, labels, num_bins=1000):
         predictions: Array of predicted labels [N]
         labels: Array of true labels [N]
         num_bins: Number of coverage bins (default: 1000, not used but kept for compatibility)
+        correct_idx: Optional pre-computed indices of correct predictions
+        incorrect_idx: Optional pre-computed indices of incorrect predictions
     
     Returns:
         float: AUGRC score (0-0.5, lower is better)
@@ -174,17 +186,21 @@ def compute_augrc(uncertainties, predictions, labels, num_bins=1000):
             - risks: Risk at each coverage
     """
     n_samples = len(uncertainties)
-    errors = (predictions != labels).astype(float)
-    n_errors = errors.sum()
     
-    # Compute accuracy
+    # Use pre-computed indices if provided (for new_class_shift where predictions are multi-class but labels are binary)
+    if correct_idx is not None and incorrect_idx is not None:
+        n_errors = len(incorrect_idx)
+    else:
+        errors = (predictions != labels).astype(float)
+        n_errors = errors.sum()
+        correct_idx = np.where(~errors.astype(bool))[0]
+        incorrect_idx = np.where(errors.astype(bool))[0]
+    
+    # Compute accuracy from indices from indices
     acc = 1.0 - (n_errors / n_samples)
     error_rate = n_errors / n_samples
     
     # Compute AUROC_f (AUROC for failure prediction)
-    correct_idx = np.where(~errors.astype(bool))[0]
-    incorrect_idx = np.where(errors.astype(bool))[0]
-    
     if len(incorrect_idx) > 0 and len(correct_idx) > 0:
         auroc_f = compute_auroc(uncertainties, correct_idx, incorrect_idx)
     else:
@@ -198,7 +214,7 @@ def compute_augrc(uncertainties, predictions, labels, num_bins=1000):
     augrc = term1 + term2
     
     # Also compute AURC for comparison (legacy metric)
-    aurc, aurc_metrics = compute_aurc(uncertainties, predictions, labels, num_bins)
+    aurc, aurc_metrics = compute_aurc(uncertainties, predictions, labels, num_bins, correct_idx, incorrect_idx)
     
     return augrc, {
         'auroc_f': float(auroc_f),
@@ -238,8 +254,8 @@ def compute_all_metrics(uncertainties, predictions, labels, correct_idx=None, in
         auroc_f = np.nan
     
     # AURC and AUGRC
-    aurc, aurc_metrics = compute_aurc(uncertainties, predictions, labels)
-    augrc, augrc_metrics = compute_augrc(uncertainties, predictions, labels)
+    aurc, aurc_metrics = compute_aurc(uncertainties, predictions, labels, correct_idx=correct_idx, incorrect_idx=incorrect_idx)
+    augrc, augrc_metrics = compute_augrc(uncertainties, predictions, labels, correct_idx=correct_idx, incorrect_idx=incorrect_idx)
     
     return {
         'auroc_f': float(auroc_f),
@@ -253,7 +269,9 @@ def compute_all_metrics(uncertainties, predictions, labels, correct_idx=None, in
     }
 
 
-def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, predictions_per_fold=None, ensemble_uncertainties=None):
+def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, predictions_per_fold=None, ensemble_uncertainties=None,
+                                per_fold_correct_idx=None, per_fold_incorrect_idx=None,
+                                ensemble_correct_idx=None, ensemble_incorrect_idx=None):
     """
     Compute metrics independently for each fold, then aggregate with mean±std.
     
@@ -268,6 +286,10 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, pr
         labels: Array of true labels [N]
         predictions_per_fold: Optional [num_folds, N] array of per-fold predictions (CORRECT approach)
         ensemble_uncertainties: Optional [N] array of TRUE ensemble uncertainties (for correct auroc_f)
+        per_fold_correct_idx: Optional list of correct indices for each fold (avoids recomputation from predictions)
+        per_fold_incorrect_idx: Optional list of incorrect indices for each fold (avoids recomputation from predictions)
+        ensemble_correct_idx: Optional correct indices for ensemble (avoids recomputation from predictions)
+        ensemble_incorrect_idx: Optional incorrect indices for ensemble (avoids recomputation from predictions)
     
     Returns:
         dict: Aggregated metrics with mean and std:
@@ -279,10 +301,15 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, pr
     """
     num_folds = uncertainties_per_fold.shape[0]
     
-    # Compute correct/incorrect for ensemble predictions (for accuracy reporting)
-    errors_ensemble = (predictions != labels)
-    correct_idx_ensemble = np.where(~errors_ensemble)[0]
-    incorrect_idx_ensemble = np.where(errors_ensemble)[0]
+    # Compute correct/incorrect for ensemble predictions
+    # Use pre-computed if provided, otherwise compute from predictions vs labels
+    if ensemble_correct_idx is not None and ensemble_incorrect_idx is not None:
+        correct_idx_ensemble = ensemble_correct_idx
+        incorrect_idx_ensemble = ensemble_incorrect_idx
+    else:
+        errors_ensemble = (predictions != labels)
+        correct_idx_ensemble = np.where(~errors_ensemble)[0]
+        incorrect_idx_ensemble = np.where(errors_ensemble)[0]
     
     # Compute metrics for each fold independently
     per_fold_metrics = []
@@ -294,9 +321,15 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, pr
         fold_uncertainties = uncertainties_per_fold[fold_idx]
     
         fold_predictions = predictions_per_fold[fold_idx]
-        fold_errors = (fold_predictions != labels)
-        fold_correct_idx = np.where(~fold_errors)[0]
-        fold_incorrect_idx = np.where(fold_errors)[0]
+        
+        # Use pre-computed indices if provided, otherwise compute from predictions
+        if per_fold_correct_idx is not None and per_fold_incorrect_idx is not None:
+            fold_correct_idx = per_fold_correct_idx[fold_idx]
+            fold_incorrect_idx = per_fold_incorrect_idx[fold_idx]
+        else:
+            fold_errors = (fold_predictions != labels)
+            fold_correct_idx = np.where(~fold_errors)[0]
+            fold_incorrect_idx = np.where(fold_errors)[0]
 
         # Compute metrics for this fold
         fold_metrics = compute_all_metrics(
@@ -364,7 +397,8 @@ def compute_all_metrics_per_fold(uncertainties_per_fold, predictions, labels, pr
 def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None, 
                               show_optimal=True, save_path=None, 
                               uncertainties_per_fold=None, ensemble_uncertainties=None,
-                              predictions_per_fold=None):
+                              predictions_per_fold=None, correct_idx=None, incorrect_idx=None,
+                              per_fold_correct_idx=None, per_fold_incorrect_idx=None):
     """
     Plot Risk-Coverage curve (Selective Risk) and Generalized Risk.
     
@@ -381,6 +415,10 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
         uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
         ensemble_uncertainties: Optional [N] array for ensemble reference (when per-fold provided)
         predictions_per_fold: Optional [num_folds, N] array of per-fold predictions
+        correct_idx: Optional pre-computed indices of correct predictions
+        incorrect_idx: Optional pre-computed indices of incorrect predictions
+        per_fold_correct_idx: Optional list of per-fold correct indices
+        per_fold_incorrect_idx: Optional list of per-fold incorrect indices
     
     Returns:
         matplotlib figure and axis
@@ -403,14 +441,22 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
         for fold_idx in range(num_folds):
             fold_uncertainties = uncertainties_per_fold[fold_idx]
             
-            # Use per-fold predictions if available, otherwise use ensemble predictions
-            if predictions_per_fold is not None:
-                fold_predictions = predictions_per_fold[fold_idx]
+            # Priority 1: Use pre-computed per-fold indices (for new_class_shift)
+            if per_fold_correct_idx is not None and per_fold_incorrect_idx is not None:
+                fold_correct_idx = per_fold_correct_idx[fold_idx]
+                fold_incorrect_idx = per_fold_incorrect_idx[fold_idx]
+                # For new_class_shift, predictions_per_fold is available but shouldn't be used for comparison
+                fold_predictions = predictions_per_fold[fold_idx] if predictions_per_fold is not None else predictions
             else:
-                fold_predictions = predictions
+                fold_correct_idx = None
+                fold_incorrect_idx = None
+                # Priority 2: Use per-fold predictions if available, otherwise use ensemble predictions
+                fold_predictions = predictions_per_fold[fold_idx] if predictions_per_fold is not None else predictions
             
-            aurc_fold, metrics_fold = compute_aurc(fold_uncertainties, fold_predictions, labels)
-            augrc_fold, _ = compute_augrc(fold_uncertainties, fold_predictions, labels)
+            aurc_fold, metrics_fold = compute_aurc(fold_uncertainties, fold_predictions, labels, 
+                                                   correct_idx=fold_correct_idx, incorrect_idx=fold_incorrect_idx)
+            augrc_fold, _ = compute_augrc(fold_uncertainties, fold_predictions, labels,
+                                         correct_idx=fold_correct_idx, incorrect_idx=fold_incorrect_idx)
             fold_aurc_list.append(aurc_fold)
             fold_augrc_list.append(augrc_fold)
             
@@ -420,8 +466,8 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
                     color='cornflowerblue')
     
     # Compute curves for main uncertainties (ensemble)
-    aurc, metrics = compute_aurc(uncertainties, predictions, labels)
-    augrc, augrc_metrics = compute_augrc(uncertainties, predictions, labels)
+    aurc, metrics = compute_aurc(uncertainties, predictions, labels, correct_idx=correct_idx, incorrect_idx=incorrect_idx)
+    augrc, augrc_metrics = compute_augrc(uncertainties, predictions, labels, correct_idx=correct_idx, incorrect_idx=incorrect_idx)
     
     coverages = metrics['coverages']
     risks = metrics['risks']
@@ -540,7 +586,8 @@ def plot_risk_coverage_curve(uncertainties, predictions, labels, ax=None,
 def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
                                        method_name='UQ Method', save_path=None,
                                        uncertainties_per_fold=None, ensemble_uncertainties=None,
-                                       predictions_per_fold=None):
+                                       predictions_per_fold=None, correct_idx=None, incorrect_idx=None,
+                                       per_fold_correct_idx=None, per_fold_incorrect_idx=None):
     """
     Plot ROC curve for failure prediction (AUROC_f).
     
@@ -559,14 +606,22 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
         uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
         ensemble_uncertainties: Optional [N] array for ensemble reference
         predictions_per_fold: Optional [num_folds, N] array of per-fold predictions
+        correct_idx: Optional pre-computed indices of correct predictions
+        incorrect_idx: Optional pre-computed indices of incorrect predictions
+        per_fold_correct_idx: Optional list of per-fold correct indices
+        per_fold_incorrect_idx: Optional list of per-fold incorrect indices
     
     Returns:
         matplotlib figure
     """
     # Compute ROC for ensemble predictions (reference)
-    errors = (predictions != labels)
-    correct_idx = np.where(~errors)[0]
-    incorrect_idx = np.where(errors)[0]
+    # Use pre-computed indices if provided (for new_class_shift)
+    if correct_idx is not None and incorrect_idx is not None:
+        pass  # Already have indices
+    else:
+        errors = (predictions != labels)
+        correct_idx = np.where(~errors)[0]
+        incorrect_idx = np.where(errors)[0]
     
     # Create figure
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -589,14 +644,18 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
         for fold_idx in range(num_folds):
             fold_uncertainties = uncertainties_per_fold[fold_idx]
             
-            if predictions_per_fold is not None:
-                # CORRECT: Use fold's own predictions
+            # Priority 1: Use pre-computed per-fold indices (for new_class_shift)
+            if per_fold_correct_idx is not None and per_fold_incorrect_idx is not None:
+                fold_correct_idx = per_fold_correct_idx[fold_idx]
+                fold_incorrect_idx = per_fold_incorrect_idx[fold_idx]
+            elif predictions_per_fold is not None:
+                # Priority 2: Compute from fold's own predictions
                 fold_predictions = predictions_per_fold[fold_idx]
                 fold_errors = (fold_predictions != labels)
                 fold_correct_idx = np.where(~fold_errors)[0]
                 fold_incorrect_idx = np.where(fold_errors)[0]
             else:
-                # LEGACY: Use ensemble predictions (less accurate)
+                # Priority 3: LEGACY - Use ensemble predictions (less accurate)
                 fold_correct_idx = correct_idx
                 fold_incorrect_idx = incorrect_idx
             
@@ -680,7 +739,8 @@ def plot_roc_curve_failure_prediction(uncertainties, predictions, labels,
 def plot_uncertainty_distributions(uncertainties, predictions, labels, 
                                    method_name='UQ Method', save_path=None,
                                    uncertainties_per_fold=None, ensemble_uncertainties=None,
-                                   predictions_per_fold=None):
+                                   predictions_per_fold=None, correct_idx=None, incorrect_idx=None,
+                                   per_fold_correct_idx=None, per_fold_incorrect_idx=None):
     """
     Plot uncertainty score distributions for correct vs incorrect predictions.
     
@@ -698,6 +758,10 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
         uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
         ensemble_uncertainties: Optional [N] array for ensemble reference
         predictions_per_fold: Optional [num_folds, N] array of per-fold predictions (CORRECT for per-fold evaluation)
+        correct_idx: Optional pre-computed indices of correct predictions
+        incorrect_idx: Optional pre-computed indices of incorrect predictions
+        per_fold_correct_idx: Optional list of per-fold correct indices
+        per_fold_incorrect_idx: Optional list of per-fold incorrect indices
     
     Returns:
         matplotlib figure
@@ -719,11 +783,20 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
         
         for fold_idx in range(num_folds):
             fold_unc = uncertainties_per_fold[fold_idx]
-            fold_predictions = predictions_per_fold[fold_idx]
             
-            fold_errors = (fold_predictions != labels)
-            fold_correct_idx = np.where(~fold_errors)[0]
-            fold_incorrect_idx = np.where(fold_errors)[0]
+            # Priority 1: Use pre-computed per-fold indices (for new_class_shift)
+            if per_fold_correct_idx is not None and per_fold_incorrect_idx is not None:
+                fold_correct_idx = np.asarray(per_fold_correct_idx[fold_idx], dtype=int)
+                fold_incorrect_idx = np.asarray(per_fold_incorrect_idx[fold_idx], dtype=int)
+            elif predictions_per_fold is not None:
+                # Priority 2: Compute from fold's own predictions
+                fold_predictions = predictions_per_fold[fold_idx]
+                fold_errors = (fold_predictions != labels)
+                fold_correct_idx = np.where(~fold_errors)[0]
+                fold_incorrect_idx = np.where(fold_errors)[0]
+            else:
+                # Priority 3: Fallback (shouldn't happen if per-fold data provided)
+                raise ValueError("Per-fold uncertainties provided but no way to determine correct/incorrect")
             
             fold_auroc = compute_auroc(fold_unc, fold_correct_idx, fold_incorrect_idx)
             fold_auroc_list.append(fold_auroc)
@@ -758,23 +831,33 @@ def plot_uncertainty_distributions(uncertainties, predictions, labels,
             ax1.axvline(x=i*2 + 0.5, color='gray', linestyle='--', alpha=0.5, linewidth=1)
         
         # Compute overall statistics for text display
-        errors = (predictions != labels)
-        correct_idx = ~errors
-        incorrect_idx = errors
+        # Use pre-computed indices if provided
+        if correct_idx is not None and incorrect_idx is not None:
+            # Ensure indices are integer arrays (might be object dtype from cache)
+            correct_idx = np.asarray(correct_idx, dtype=int)
+            incorrect_idx = np.asarray(incorrect_idx, dtype=int)
+        else:
+            errors = (predictions != labels)
+            correct_idx = ~errors
+            incorrect_idx = errors
         unc_correct = uncertainties[correct_idx]
         unc_incorrect = uncertainties[incorrect_idx]
     else:
         # Single boxplot (no per-fold data)
-        errors = (predictions != labels)
-        correct_idx = ~errors
-        incorrect_idx = errors
+        # Use pre-computed indices if provided
+        if correct_idx is not None and incorrect_idx is not None:
+            # Ensure indices are integer arrays (might be object dtype from cache)
+            correct_idx = np.asarray(correct_idx, dtype=int)
+            incorrect_idx = np.asarray(incorrect_idx, dtype=int)
+        else:
+            errors = (predictions != labels)
+            correct_idx = ~errors
+            incorrect_idx = errors
         
         unc_correct = uncertainties[correct_idx]
         unc_incorrect = uncertainties[incorrect_idx]
         
-        auroc_f = compute_auroc(uncertainties, 
-                               np.where(correct_idx)[0], 
-                               np.where(incorrect_idx)[0]) if len(unc_incorrect) > 0 and len(unc_correct) > 0 else np.nan
+        auroc_f = compute_auroc(uncertainties, correct_idx, incorrect_idx) if len(unc_incorrect) > 0 and len(unc_correct) > 0 else np.nan
         
         box_data = [unc_correct, unc_incorrect]
         box_labels = [f'Correct\n(n={len(unc_correct)})', 
@@ -885,7 +968,8 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
                                method_name='UQ Method', output_dir='./figures',
                                uncertainties_per_fold=None, ensemble_uncertainties=None,
                                predictions_per_fold=None, model_backbone=None, setup=None,
-                               corruption_info=None):
+                               corruption_info=None, correct_idx=None, incorrect_idx=None,
+                               per_fold_correct_idx=None, per_fold_incorrect_idx=None):
     """
     Generate and save all evaluation plots for a UQ method.
     
@@ -903,6 +987,10 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
         uncertainties_per_fold: Optional [num_folds, N] array for per-fold visualization
         ensemble_uncertainties: Optional [N] array for ensemble reference
         predictions_per_fold: Optional [num_folds, N] array of per-fold predictions
+        correct_idx: Optional pre-computed indices of correct predictions (for new_class_shift)
+        incorrect_idx: Optional pre-computed indices of incorrect predictions (for new_class_shift)
+        per_fold_correct_idx: Optional list of per-fold correct indices
+        per_fold_incorrect_idx: Optional list of per-fold incorrect indices
     
     Returns:
         dict: Paths to saved figures
@@ -929,7 +1017,11 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
                                                 save_path=roc_path,
                                                 uncertainties_per_fold=uncertainties_per_fold,
                                                 ensemble_uncertainties=ensemble_uncertainties,
-                                                predictions_per_fold=predictions_per_fold)
+                                                predictions_per_fold=predictions_per_fold,
+                                                correct_idx=correct_idx,
+                                                incorrect_idx=incorrect_idx,
+                                                per_fold_correct_idx=per_fold_correct_idx,
+                                                per_fold_incorrect_idx=per_fold_incorrect_idx)
     plt.close(fig_roc)
     
     # Save risk-coverage curves
@@ -938,7 +1030,11 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
                                          save_path=rc_path,
                                          uncertainties_per_fold=uncertainties_per_fold,
                                          ensemble_uncertainties=ensemble_uncertainties,
-                                         predictions_per_fold=predictions_per_fold)
+                                         predictions_per_fold=predictions_per_fold,
+                                         correct_idx=correct_idx,
+                                         incorrect_idx=incorrect_idx,
+                                         per_fold_correct_idx=per_fold_correct_idx,
+                                         per_fold_incorrect_idx=per_fold_incorrect_idx)
     plt.close(fig_rc)
     
     # Save uncertainty distributions
@@ -948,7 +1044,11 @@ def save_all_evaluation_plots(uncertainties, predictions, labels,
                                               save_path=dist_path,
                                               uncertainties_per_fold=uncertainties_per_fold,
                                               ensemble_uncertainties=ensemble_uncertainties,
-                                              predictions_per_fold=predictions_per_fold)
+                                              predictions_per_fold=predictions_per_fold,
+                                              correct_idx=correct_idx,
+                                              incorrect_idx=incorrect_idx,
+                                              per_fold_correct_idx=per_fold_correct_idx,
+                                              per_fold_incorrect_idx=per_fold_incorrect_idx)
     plt.close(fig_dist)
     
     return {
