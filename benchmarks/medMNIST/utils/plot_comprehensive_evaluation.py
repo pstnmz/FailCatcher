@@ -77,7 +77,7 @@ def load_all_results(results_dir):
             }
     
     # Load corruption shift results (severity 3)
-    corruption_dir = os.path.join(results_dir, "corruption_shift")
+    corruption_dir = os.path.join(results_dir, "corruption_shifts")
     if os.path.exists(corruption_dir):
         json_files = glob.glob(os.path.join(corruption_dir, "*_severity3.json"))
         for json_file in json_files:
@@ -276,20 +276,20 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
         all_colors = []
         all_labels = []
         
-        # Fixed positions: always 6 divisions (2 models × 3 shift types)
-        # Each division has 4 setups
+        # New layout: group by shift type instead of by model
+        # For each shift: R18 setups, then VIT setups
         pos = 0
-        gap_between_setups = 0.5  # Even tighter boxes
-        gap_between_shifts = 0.6  # Reduced separation between shift types
-        gap_between_models = 0.6  # Reduced separation between models
+        gap_between_setups = 0.5  # Gap between individual setups
+        gap_between_models = 0.6  # Gap between R18 and VIT within same shift
+        gap_between_shifts = 0.8  # Larger gap between different shift types
         
-        for model_idx, model in enumerate(models):
-            if model_idx > 0:
-                pos += gap_between_models
+        for shift_idx, (shift_type, shift_label) in enumerate(zip(shift_types, shift_labels)):
+            if shift_idx > 0:
+                pos += gap_between_shifts
             
-            for shift_idx, (shift_type, shift_label) in enumerate(zip(shift_types, shift_labels)):
-                if shift_idx > 0:
-                    pos += gap_between_shifts
+            for model_idx, model in enumerate(models):
+                if model_idx > 0:
+                    pos += gap_between_models
                 
                 # Always create positions for all 4 setups, even if no data
                 for setup in setups:
@@ -298,17 +298,17 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
                         all_boxes_data.append(fold_values)
                         all_positions.append(pos)
                         
-                        # Color by shift type
-                        if shift_type == 'in_distribution':
-                            all_colors.append('lightgray')
-                        elif shift_type == 'corruption':
-                            all_colors.append('lightcoral')
-                        else:  # population
-                            all_colors.append('lightskyblue')
+                        # All boxes same gray color
+                        all_colors.append('lightgray')
                         
                         # Shorter labels
                         model_short = 'R18' if model == 'resnet18' else 'ViT'
-                        setup_short = setup[:2] if setup != 'standard' else 'Std'
+                        if setup == 'standard':
+                            setup_short = 'S'
+                        elif setup == 'DADO':
+                            setup_short = 'DADO'
+                        else:
+                            setup_short = setup
                         all_labels.append(f"{model_short}_{setup_short}{shift_label}")
                     else:
                         # Empty position for alignment
@@ -345,13 +345,13 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
         
         # Overlay ensemble points
         pos = 0
-        for model_idx, model in enumerate(models):
-            if model_idx > 0:
-                pos += gap_between_models
+        for shift_idx, shift_type in enumerate(shift_types):
+            if shift_idx > 0:
+                pos += gap_between_shifts
             
-            for shift_idx, shift_type in enumerate(shift_types):
-                if shift_idx > 0:
-                    pos += gap_between_shifts
+            for model_idx, model in enumerate(models):
+                if model_idx > 0:
+                    pos += gap_between_models
                 
                 # Always iterate through all setups for alignment
                 for setup in setups:
@@ -387,26 +387,13 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
             simplified_labels = []
             for i, label in enumerate(all_labels):
                 if label:  # Non-empty label
-                    # Extract setup from label (e.g., "R18_Std_C" -> "Std")
-                    if '_Std' in label:
-                        simplified_labels.append('S')
-                    elif '_DA' in label:
-                        simplified_labels.append('DA')
-                    elif '_DO' in label:
-                        simplified_labels.append('DO')
-                    elif '_DADO' in label:  # DADO contains DA
-                        simplified_labels.append('DADO')
+                    # Extract setup from label (e.g., "R18_S" -> "S", "ViT_DADO_C" -> "DADO")
+                    parts = label.split('_')
+                    if len(parts) >= 2:
+                        setup_part = parts[1].replace('_C', '').replace('_P', '')
+                        simplified_labels.append(setup_part)
                     else:
-                        # Fallback: try to extract setup from original logic
-                        parts = label.split('_')
-                        if len(parts) >= 2:
-                            setup_part = parts[1].replace('C', '').replace('P', '')
-                            if setup_part == 'Std':
-                                simplified_labels.append('S')
-                            else:
-                                simplified_labels.append(setup_part)
-                        else:
-                            simplified_labels.append('')
+                        simplified_labels.append('')
                 else:
                     simplified_labels.append('')
             
@@ -446,49 +433,32 @@ def create_all_datasets_detailed_boxplot(results, output_dir):
         col = idx % n_cols
         axes[row, col].axis('off')
     
-    # Add table-like header at the top for BOTH columns with 3 lines
-    # Each column has 6 divisions: ResNet18 (ID, Corruption, Population) + VIT (ID, Corruption, Population)
+    # Add table-like header at the top for BOTH columns
+    # New layout: Each column has ID (R18+VIT), CS (R18+VIT), PS (R18+VIT)
     # LEFT COLUMN (col=0): spans 0.05 to 0.50
-    # Line 1: RESNET 18 (over 3 divisions) and VIT_B_16 (over 3 divisions)
-    # fig.text(0.1500, 0.985, 'RESNET 18', ha='center', va='top', fontsize=20, fontweight='bold')
-    # fig.text(0.3875, 0.985, 'VIT_B_16', ha='center', va='top', fontsize=20, fontweight='bold')
-    # Line 2: ID / CORRUPTION / POPULATION for each model
-    fig.text(0.0725, 0.945, 'R18-ID', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.1500, 0.945, 'R18-CS', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.2300, 0.945, 'R18-PS', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.3050, 0.945, 'VIT-ID', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.3875, 0.945, 'VIT-CS', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.4625, 0.945, 'VIT-PS', ha='center', va='top', fontsize=22, fontweight='bold')
-    # Line 3: (blank) / SHIFTS / SHIFTS
-    # fig.text(0.1500, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    # fig.text(0.2300, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    # fig.text(0.3875, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    # fig.text(0.4625, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    fig.text(0.07, 0.945, 'R18-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.1452, 0.945, 'VIT-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    
+    fig.text(0.2250, 0.945, 'R18-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.3100, 0.945, 'VIT-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    
+    fig.text(0.3900, 0.945, 'R18-PS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.4621, 0.945, 'VIT-PS', ha='center', va='top', fontsize=22, fontweight='bold')
     
     # RIGHT COLUMN (col=1): spans 0.50 to 0.95
-    # fig.text(0.6375, 0.985, 'RESNET 18', ha='center', va='top', fontsize=20, fontweight='bold')
-    # fig.text(0.8775, 0.985, 'VIT_B_16', ha='center', va='top', fontsize=20, fontweight='bold')
-    # Line 2: ID / CORRUPTION / POPULATION
-    fig.text(0.5625, 0.945, 'R18-ID', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.6375, 0.945, 'R18-CS', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.7175, 0.945, 'R18-PS', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.7975, 0.945, 'VIT-ID', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.8775, 0.945, 'VIT-CS', ha='center', va='top', fontsize=22, fontweight='bold')
-    fig.text(0.9550, 0.945, 'VIT-PS', ha='center', va='top', fontsize=22, fontweight='bold')
-    # Line 3: (blank) / SHIFTS / SHIFTS
-    # fig.text(0.6375, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    # fig.text(0.7175, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    # fig.text(0.8775, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
-    # fig.text(0.9550, 0.945, 'SHIFTS', ha='center', va='top', fontsize=16, fontweight='bold')
+    fig.text(0.5630, 0.945, 'R18-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.6390, 0.945, 'VIT-ID', ha='center', va='top', fontsize=22, fontweight='bold')
+    
+    fig.text(0.7270, 0.945, 'R18-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.7900, 0.945, 'VIT-CS', ha='center', va='top', fontsize=22, fontweight='bold')
+    
+    fig.text(0.8800, 0.945, 'R18-PS', ha='center', va='top', fontsize=22, fontweight='bold')
+    fig.text(0.9600, 0.945, 'VIT-PS', ha='center', va='top', fontsize=22, fontweight='bold')
     
     # Create legend and place it inside Pathmnist plot (first plot, row=0, col=0)
     legend_elements = [
         mpatches.Patch(facecolor='lightgray', edgecolor='black', alpha=0.4, 
-                      label='ID fold variability'),
-        mpatches.Patch(facecolor='lightcoral', edgecolor='black', alpha=0.4, 
-                      label='CS fold variability'),
-        mpatches.Patch(facecolor='lightskyblue', edgecolor='black', alpha=0.4, 
-                      label='PS fold variability')
+                      label='Fold variability')
     ]
     for setup, style in SETUP_STYLES.items():
         legend_elements.append(
@@ -944,7 +914,7 @@ def create_ensemble_scatter_plot(results, output_dir):
     shift_styles = {
         'in_distribution': {'facecolor': 'full', 'alpha': 0.7, 'label': 'In-Distribution'},
         'corruption': {'facecolor': 'none', 'alpha': 1.0, 'label': 'Corruption Shift'},
-        'population': {'facecolor': 'left', 'alpha': 0.9, 'label': 'Population Shift'}
+        'population': {'facecolor': 'full', 'alpha': 0.5, 'label': 'Population Shift'}
     }
     
     # Collect data - all shift types
@@ -972,23 +942,17 @@ def create_ensemble_scatter_plot(results, output_dir):
                     
                     # Handle different fill styles for shift types
                     if shift_style['facecolor'] == 'full':
-                        # In-distribution: filled
+                        # In-distribution and population: filled (different alpha)
                         ax.scatter(fold_mean, ensemble_bacc, 
                                   marker=style['marker'], s=marker_size,
                                   color=style['color'], alpha=shift_style['alpha'],
                                   edgecolors='black', linewidths=edgewidth)
-                    elif shift_style['facecolor'] == 'none':
+                    else:  # 'none' - hollow for corruption
                         # Corruption: hollow
                         ax.scatter(fold_mean, ensemble_bacc, 
                                   marker=style['marker'], s=marker_size,
                                   facecolors='none', edgecolors=style['color'],
                                   alpha=shift_style['alpha'], linewidths=edgewidth+0.5)
-                    else:  # 'left' - half-filled for population
-                        ax.scatter(fold_mean, ensemble_bacc, 
-                                  marker=style['marker'], s=marker_size,
-                                  color=style['color'], alpha=shift_style['alpha'],
-                                  edgecolors='black', linewidths=edgewidth,
-                                  fillstyle=shift_style['facecolor'])
     
     # Diagonal line (y=x)
     lims = [
@@ -1040,7 +1004,7 @@ def create_ensemble_scatter_plot(results, output_dir):
         plt.Line2D([0], [0], marker='o', color='w',
                   markerfacecolor='gray', markeredgecolor='black',
                   markersize=11, markeredgewidth=1.5, label='  Population Shift',
-                  fillstyle='left')
+                  alpha=0.5)
     )
     
     # Separator
