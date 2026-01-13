@@ -772,24 +772,24 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
         
-        # Hyperparameter tuning on calibration set
-        k_grid = [1, 5, 10, 20, 50, 100, 200]
+        # Set k = 20% of training set size, capped at 1000
+        k = min(int(0.2 * len(study_dataset)), 1000)
+        print(f"  Using k={k} (20% of training set, capped at 1000)")
+        
         uncertainties, metrics = detector.run_knn_raw(
             test_loader=knn_test_loader,
             train_loaders=train_loaders,
             y_true=y_true,
             layer_name='avgpool',
-            k=None,  # Will be selected via grid search
+            k=k,
             per_fold_evaluation=per_fold_eval,
-            k_grid=k_grid,
+            k_grid=None,
             calib_loader=knn_calib_loader,
             y_true_calib=y_true_calib
         )
         results['KNN_Raw'] = metrics
         
-        # Print results with selected k
-        if 'k_selected' in metrics:
-            print(f"  Selected k={metrics['k_selected']}")
+        # Print results
         if 'auroc_f_mean' in metrics:
             print(f"  AUROC: {metrics['auroc_f_mean']:.4f}±{metrics['auroc_f_std']:.4f}, "
                   f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
