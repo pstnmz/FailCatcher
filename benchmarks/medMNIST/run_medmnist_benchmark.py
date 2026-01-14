@@ -772,9 +772,16 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
         
-        # Set k = 20% of training set size, capped at 1000
-        k = min(int(0.2 * len(study_dataset)), 1000)
-        print(f"  Using k={k} (20% of training set, capped at 1000)")
+        # For new_class_shift: use fixed k=1000 (no calibration set available)
+        # For other shifts: use grid search on calibration set
+        if new_class_shift:
+            k = 1000
+            k_grid = None
+            print(f"  New class shift detected: Using fixed k={k} (no calibration)")
+        else:
+            k = None
+            k_grid = [1, 5, 10, 20, 50, 100, 200]
+            print(f"  Using k grid search: {k_grid}")
         
         uncertainties, metrics = detector.run_knn_raw(
             test_loader=knn_test_loader,
@@ -783,7 +790,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             layer_name='avgpool',
             k=k,
             per_fold_evaluation=per_fold_eval,
-            k_grid=None,
+            k_grid=k_grid,
             calib_loader=knn_calib_loader,
             y_true_calib=y_true_calib
         )
