@@ -21,15 +21,17 @@ from benchmarks.medMNIST.utils.viz_benchmark_results.generate_radar_plots import
 from benchmarks.medMNIST.utils.viz_benchmark_results.plot_unified_results import load_and_parse_results
 
 
-def compute_ranks_from_results_augrc(results):
+def compute_ranks_from_results_augrc(results, epsilon=0.001):
     """
     Compute ranks for each method on each dataset based on AUGRC.
+    Methods with values within epsilon of each other receive the same rank.
     
     Args:
         results: Dict[model][dataset][method] = augrc_value
+        epsilon: Tolerance for considering methods as tied (default 0.001)
         
     Returns:
-        Dict[model][dataset][method] = rank (1 = best, higher = worse)
+        Dict[model][dataset][method] = rank (methods within epsilon get same average rank)
     """
     ranked_results = {}
     
@@ -47,19 +49,47 @@ def compute_ranks_from_results_augrc(results):
                 ranked_results[model][dataset] = method_values
                 continue
             
-            # Rank methods (lower AUGRC = better = lower rank number)
-            # Use 'min' method to handle ties (give them the minimum rank)
-            values = np.array(list(valid_methods.values()))
-            ranks = rankdata(values, method='min')  # Positive: lower values get rank 1
+            # Sort methods by value (ascending for AUGRC - lower is better)
+            sorted_methods = sorted(valid_methods.items(), key=lambda x: x[1])
             
-            # Reverse ranks so rank 1 is at edge (better = farther from center)
-            num_methods = len(valid_methods)
-            reversed_ranks = num_methods + 1 - ranks
+            # Group methods within epsilon and assign average ranks
+            num_methods = len(sorted_methods)
+            ranks_dict = {}
+            i = 0
             
-            # Create rank dictionary
+            while i < num_methods:
+                method_i, value_i = sorted_methods[i]
+                
+                # Find all methods within epsilon of current method
+                group = [(method_i, value_i)]
+                j = i + 1
+                while j < num_methods:
+                    method_j, value_j = sorted_methods[j]
+                    if abs(value_i - value_j) <= epsilon:
+                        group.append((method_j, value_j))
+                        j += 1
+                    else:
+                        break
+                
+                # Compute average rank for the group
+                # Ranks go from 1 to num_methods (1 is best)
+                start_rank = i + 1
+                end_rank = i + len(group)
+                avg_rank = (start_rank + end_rank) / 2.0
+                
+                # Assign average rank to all methods in group
+                for method, _ in group:
+                    ranks_dict[method] = avg_rank
+                
+                # Move to next unprocessed method
+                i = j
+            
+            # Reverse ranks so best methods get higher values (for visualization)
+            # This puts best at edge (higher radial value)
             ranked_results[model][dataset] = {}
-            for (method, _), rank in zip(valid_methods.items(), reversed_ranks):
-                ranked_results[model][dataset][method] = float(rank)
+            for method, rank in ranks_dict.items():
+                reversed_rank = num_methods + 1 - rank
+                ranked_results[model][dataset][method] = float(reversed_rank)
             
             # Add back NaN methods as NaN
             for method, value in method_values.items():
@@ -203,7 +233,8 @@ def create_rank_radar_plot_on_axis(ax, model_results, model_name, metric='rank',
     # Color map for methods
     colors = plt.cm.tab20(np.linspace(0, 1, len(all_methods)))
     
-    # Plot each method
+    # Collect all method values for collision detection
+    all_method_values = {}
     for method_idx, method_name in enumerate(all_methods):
         values = []
         for dataset_key in dataset_keys:
@@ -213,24 +244,71 @@ def create_rank_radar_plot_on_axis(ax, model_results, model_name, metric='rank',
             if setup in ['standard', 'DA']:
                 rank = rank + 1 if not np.isnan(rank) else np.nan
             values.append(rank)
+        all_method_values[method_name] = values
+    
+    # Detect collisions and assign angular offsets
+    angular_offsets = {}
+    collision_tolerance = 0.01  # Consider values within this range as colliding
+    angle_offset_step = 0.015  # Small angular offset in radians (~0.86 degrees)
+    
+    for method_name in all_methods:
+        angular_offsets[method_name] = []
         
-        # Complete the circle
-        values += values[:1]
+        for i in range(len(dataset_keys)):
+            offset = 0.0
+            my_value = all_method_values[method_name][i]
+            
+            if not np.isnan(my_value):
+                # Count how many methods have same/similar value at this dataset
+                colliding_methods = []
+                for other_method in all_methods:
+                    if other_method == method_name:
+                        continue
+                    other_value = all_method_values[other_method][i]
+                    if not np.isnan(other_value) and abs(my_value - other_value) < collision_tolerance:
+                        colliding_methods.append(other_method)
+                
+                # Apply offset if there are collisions
+                if colliding_methods:
+                    # Determine position in collision group (sorted alphabetically for consistency)
+                    group = sorted([method_name] + colliding_methods)
+                    my_position = group.index(method_name)
+                    group_size = len(group)
+                    
+                    # Center the group around zero offset
+                    offset = (my_position - (group_size - 1) / 2) * angle_offset_step
+            
+            angular_offsets[method_name].append(offset)
+    
+    # Plot each method with angular offsets for lines
+    for method_idx, method_name in enumerate(all_methods):
+        values = all_method_values[method_name]
+        offsets = angular_offsets[method_name]
+        
+        # Apply offsets to angles for line plots only
+        offset_angles = [a + o for a, o in zip(angles[:-1], offsets)]
+        offset_angles += [offset_angles[0]]  # Complete the circle
+        
+        # Complete the circle for values
+        values_circle = values + values[:1]
         
         # Plot based on method type
         if method_name == 'Mean_Aggregation':
-            ax.scatter(angles[:-1], values[:-1], s=270, marker='*', 
+            # Scatter plots stay at original angles (no offset)
+            ax.scatter(angles[:-1], values, s=270, marker='*', 
                        color='red', label=method_name, alpha=0.6, zorder=99,
                        edgecolors='black', linewidths=0.5)
         elif method_name == 'Mean_Aggregation_Ensemble':
-            ax.scatter(angles[:-1], values[:-1], s=300, marker='$\u26A1$', 
+            # Scatter plots stay at original angles (no offset)
+            ax.scatter(angles[:-1], values, s=300, marker='$\u26A1$', 
                        color=colors[method_idx], label='Mean Agg + Ens',
                        alpha=0.9, zorder=100, edgecolors='black', linewidths=0.5)
         else:
             display_name = method_name
             if method_name == "MSR_calibrated":
                 display_name = "MSR-S"
-            ax.plot(angles, values, 'o-', linewidth=2, label=display_name, 
+            # Use offset angles for lines
+            ax.plot(offset_angles, values_circle, 'o-', linewidth=2, label=display_name, 
                     color=colors[method_idx], markersize=8, markeredgewidth=2,
                     markeredgecolor='white', alpha=0.85)
     
