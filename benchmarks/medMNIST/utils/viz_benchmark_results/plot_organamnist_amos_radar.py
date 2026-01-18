@@ -22,7 +22,7 @@ def main():
     
     # Paths
     script_dir = Path(__file__).parent
-    workspace_root = script_dir.parent.parent.parent
+    workspace_root = script_dir.parent.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
     output_dir = script_dir / 'organamnist_amos_analysis'
     output_dir.mkdir(exist_ok=True)
@@ -32,7 +32,7 @@ def main():
     
     # Load data from all shift types using parse_results_directory
     print("\nLoading data from ID results...")
-    id_results = parse_results_directory(results_dir / 'id_results', metric='auroc_f')
+    id_results = parse_results_directory(results_dir / 'id_results' / 'log_results', metric='auroc_f')
     
     print("\nLoading data from corruption shifts...")
     cs_results = parse_results_directory(results_dir / 'corruption_shifts', metric='auroc_f')

@@ -459,7 +459,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
             else:
                 method_name = method_name
             # Plot lines with enhanced styling for better visibility
-            ax.plot(angles, values, 'o-', linewidth=2.5, label=method_name, 
+            ax.plot(angles, values, 'o-', linewidth=2, label=method_name, 
                     color=colors[method_idx], markersize=7, markeredgewidth=1,
                     markeredgecolor='white', alpha=0.85)
     
@@ -486,7 +486,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     
     # Set labels - setup names only (increased font size for readability)
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(dataset_labels, size=14, fontweight='medium', 
+    ax.set_xticklabels(dataset_labels, size=8, fontweight='medium', 
                        rotation=0, ha='center')
     
     # Ensure full circle is visible - CRITICAL for proper display
@@ -496,11 +496,11 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     
     # Set y-axis range based on metric
     if metric == 'auroc_f':
-        y_min, y_max = 0.5, 1.0
+        y_min, y_max = 0.4, 1.0
         tick_step = 0.1
         y_ticks = np.arange(y_min, y_max + 0.05, tick_step)
         ax.set_yticks(y_ticks)
-        ax.set_yticklabels([f'{y:g}' for y in y_ticks], size=16, fontweight='medium')
+        ax.set_yticklabels([f'{y:g}' for y in y_ticks], size=12, fontweight='medium')
     else:  # augrc - square transform for MORE space at edges (near 0), LESS at center (near max_display)
         # Original tick values (what we want to display) - from center (max_display) to edge (0)
         # Using square transform to give more visual space at edges (good performance)
@@ -511,8 +511,8 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
             original_ticks = np.array([0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.01, 0.0])
         else:
             augrc_max_display = 0.3
-            # Display 0.2 instead of 0.25, removed 0.02 and 0.20 for spacing
-            original_ticks = np.array([0.2, 0.15, 0.10, 0.05, 0.01, 0.0])
+            # Display up to 0.25 for ID and corruption shifts
+            original_ticks = np.array([0.25, 0.2, 0.15, 0.10, 0.05, 0.01, 0.0])
         # Transform using square (where they'll actually be positioned)
         transformed_ticks = augrc_log_transform(original_ticks, max_display=augrc_max_display, scale_factor=50.0)
         
@@ -527,7 +527,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
             else:
                 tick_labels.append(f'{y:g}')
         tick_labels.append('')  # Empty label for the final 0.0
-        ax.set_yticklabels(tick_labels, size=16, fontweight='medium')
+        ax.set_yticklabels(tick_labels, size=12, fontweight='medium')
     
     ax.set_ylim(y_min, y_max)
     ax.set_rlim(y_min, y_max)  # Also set radial limits explicitly
@@ -724,7 +724,13 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
     elif shift == 'population_shift':
         search_dir = results_dir / 'population_shifts'
     else:  # in_distribution
-        search_dir = results_dir / 'id_results'
+        # Try multiple directory structures
+        if (results_dir / 'id').exists():
+            search_dir = results_dir / 'id'
+        elif (results_dir / 'in_distribution').exists():
+            search_dir = results_dir / 'in_distribution'
+        else:
+            search_dir = results_dir / 'id_results' / 'log_results'
     
     # Find matching npz files
     all_npz_files = list(search_dir.glob(pattern))
@@ -1203,6 +1209,259 @@ def main(aggregation='mean', shift='corruption_shifts'):
     print("=" * 80)
 
 
+def create_rank_radar_plot_on_axis(ax, ranked_results, model_name, aggregation='mean', shift='in_distribution'):
+    """
+    Create radar plot showing method ranks on a given axis.
+    
+    Args:
+        ax: Matplotlib polar axis to plot on
+        ranked_results: Dict[dataset][method] = rank (1 = best at center, higher = worse)
+        model_name: Model name for display
+        aggregation: Aggregation strategy name
+        shift: Shift type name
+        
+    Returns:
+        tuple: (handles, labels) for legend
+    """
+    from collections import defaultdict
+    from scipy.stats import rankdata
+    
+    # Group datasets by family (base name without _standard, _DA, _DO, _DADO)
+    dataset_families = defaultdict(list)
+    for ds_key in ranked_results.keys():
+        # Extract base dataset name (before _setup)
+        base_name = ds_key.rsplit('_', 1)[0] if '_' in ds_key else ds_key
+        # If it ends with _standard, remove it to get true base name
+        if base_name.endswith('_standard'):
+            base_name = base_name.replace('_standard', '')
+        dataset_families[base_name].append(ds_key)
+    
+    # Sort setups within each family: standard first, then alphabetically
+    setup_order = {'standard': 0, 'DA': 1, 'DO': 2, 'DADO': 3}
+    for base_name in dataset_families:
+        dataset_families[base_name].sort(key=lambda k: (
+            setup_order.get(k.split('_')[-1], 99),
+            k
+        ))
+    
+    # Manual ordering by classification performance
+    preferred_order = [
+        'tissuemnist', 'dermamnist-e', 'breastmnist', 'pneumoniamnist', 
+        'octmnist', 'pathmnist', 'organamnist', 'bloodmnist',
+        'dermamnist-e-id', 'dermamnist-e-external', 'amos2022', 'new_class_amos2022'
+    ]
+    
+    # Build dataset list following the preferred order
+    dataset_keys = []
+    for base_name in preferred_order:
+        if base_name in dataset_families:
+            dataset_keys.extend(dataset_families[base_name])
+    
+    # Add any remaining datasets not in the preferred order
+    for base_name in sorted(dataset_families.keys()):
+        if base_name not in preferred_order:
+            dataset_keys.extend(dataset_families[base_name])
+    
+    num_datasets = len(dataset_keys)
+    
+    if num_datasets == 0:
+        print(f"  No datasets found for {model_name}")
+        return None, None
+    
+    # Get all unique methods
+    all_methods = set()
+    for dataset_data in ranked_results.values():
+        all_methods.update(dataset_data.keys())
+    all_methods = sorted(all_methods)
+    
+    print(f"  Plotting {len(all_methods)} methods across {num_datasets} datasets (ranks)")
+    
+    # Calculate angles for datasets (with grouped spacing)
+    angles = []
+    dataset_labels = []
+    family_angles = []
+    family_names = []
+    
+    # Process datasets sequentially, grouping by family on the fly
+    processed_families = set()
+    current_family_idx = 0
+    num_families_total = len(dataset_families)
+    angle_per_family = 2 * np.pi / num_families_total
+    within_family_factor = 0.6
+    
+    i = 0
+    while i < len(dataset_keys):
+        dataset_key = dataset_keys[i]
+        # Extract base family name
+        base_name = dataset_key.rsplit('_', 1)[0] if '_' in dataset_key else dataset_key
+        if base_name.endswith('_standard'):
+            base_name = base_name.replace('_standard', '')
+        
+        if base_name not in processed_families:
+            processed_families.add(base_name)
+            family_datasets = dataset_families[base_name]
+            
+            family_center = current_family_idx * angle_per_family
+            family_size = len(family_datasets)
+            
+            # Store family info for outer labels
+            family_angles.append(family_center)
+            family_names.append(base_name)
+            
+            if family_size == 1:
+                angles.append(family_center)
+                setup_name = family_datasets[0].split('_')[-1]
+                if setup_name == 'standard':
+                    setup_name = 'S'
+                dataset_labels.append(setup_name)
+            else:
+                # Distribute setups within family's allocated space
+                family_span = angle_per_family * within_family_factor
+                for j, ds_key in enumerate(family_datasets):
+                    offset = (j - (family_size - 1) / 2) * (family_span / family_size)
+                    angle = (family_center + offset) % (2 * np.pi)
+                    angles.append(angle)
+                    setup_name = ds_key.split('_')[-1]
+                    if setup_name == 'standard':
+                        setup_name = 'S'
+                    dataset_labels.append(setup_name)
+            
+            current_family_idx += 1
+            i += len(family_datasets)
+        else:
+            i += 1
+    
+    # Rotate dataset positions for population/new_class shifts
+    if shift in ['population_shift', 'new_class_shift']:
+        rotation_offset = -np.pi / 6
+        angles = [(a + rotation_offset) % (2 * np.pi) for a in angles]
+        family_angles = [(a + rotation_offset) % (2 * np.pi) for a in family_angles]
+    
+    # Complete the circle
+    angles = angles + [angles[0]]
+    
+    # Color map for methods
+    colors = plt.cm.tab20(np.linspace(0, 1, len(all_methods)))
+    
+    # Plot each method
+    for method_idx, method_name in enumerate(all_methods):
+        values = []
+        for dataset_key in dataset_keys:
+            rank = ranked_results[dataset_key].get(method_name, np.nan)
+            # Add +1 offset for standard and DA setups (7 methods) to align with DO/DADO (8 methods)
+            setup = dataset_key.split('_')[-1]
+            if setup in ['standard', 'DA']:
+                rank = rank + 1 if not np.isnan(rank) else np.nan
+            values.append(rank)
+        
+        # Complete the circle
+        values += values[:1]
+        
+        # Plot based on method type
+        if method_name == 'Mean_Aggregation':
+            ax.scatter(angles[:-1], values[:-1], s=270, marker='*', 
+                       color='red', label=method_name, alpha=0.6, zorder=99,
+                       edgecolors='black', linewidths=0.5)
+        elif method_name == 'Mean_Aggregation_Ensemble':
+            ax.scatter(angles[:-1], values[:-1], s=300, marker='$\u26A1$', 
+                       color=colors[method_idx], label='Mean Agg + Ens',
+                       alpha=0.9, zorder=100, edgecolors='black', linewidths=0.5)
+        else:
+            display_name = method_name
+            if method_name == "MSR_calibrated":
+                display_name = "MSR-S"
+            ax.plot(angles, values, 'o-', linewidth=2, label=display_name, 
+                    color=colors[method_idx], markersize=8, markeredgewidth=2,
+                    markeredgecolor='white', alpha=0.85)
+    
+    # Set labels
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(dataset_labels, size=9, fontweight='medium', 
+                       rotation=0, ha='center')
+    
+    # Set up circular display
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_thetalim(0, 2 * np.pi)
+    
+    # Set y-axis range for ranks (inverted: worst at center, best at edge)
+    y_min, y_max = 0, 11
+    y_ticks = np.arange(1, 11, 1)
+    ax.set_yticks(y_ticks)
+    # Show radial position (1 at center, 10 at edge)
+    ax.set_yticklabels([f'{int(y)}' for y in y_ticks], size=11, fontweight='medium')
+    
+    ax.set_ylim(y_min, y_max)
+    ax.set_rlim(y_min, y_max)
+    
+    # Set radial axis label position based on shift type
+    if shift in ['population_shift', 'new_class_shift']:
+        ax.set_rlabel_position(200)
+    else:
+        ax.set_rlabel_position(240)
+    
+    # Add dataset family names
+    label_position = 12.5
+    
+    print(f"  DEBUG: Adding {len(family_names)} family labels at radius {label_position}")
+    for angle, name in zip(family_angles, family_names):
+        # Add subtle background box for family names
+        angle_positive = angle % (2 * np.pi)  # Ensure positive angle
+        # Remove 'mnist' suffix for cleaner display
+        display_name = name.replace('mnist', '')
+        
+        print(f"    Family: {name} -> {display_name}, angle: {np.degrees(angle_positive):.1f}°")
+        
+        # Custom angular adjustment for specific datasets to avoid overlap
+        custom_angle = angle_positive
+        if name == 'bloodmnist':
+            # Shift blood label slightly around the circle to avoid overlap with pneumonia
+            custom_angle = angle_positive - 0.27  # Rotate slightly clockwise
+                
+        elif name == 'new_class_amos2022':
+            display_name = 'new class\namos2022'
+            custom_angle = angle_positive - 0.16
+        elif name == 'dermamnist-e-external':
+            display_name = 'derma-e\n-external'
+            custom_angle = angle_positive - 0.1
+        elif name == 'dermamnist-e-id':
+            #display_name = 'derma-e\n-id'
+            custom_angle = angle_positive + 0.18
+        elif name == 'pneumoniamnist':
+            custom_angle = angle_positive + 0.25
+        elif name == 'amos2022':
+            custom_angle = angle_positive - 0.25
+        elif name == 'organamnist':
+            custom_angle = angle_positive + 0.1
+        elif name == 'breastmnist':
+            custom_angle = angle_positive + 0.07
+        elif name == 'octmnist':
+            custom_angle = angle_positive - 0.05
+        elif name == 'pathmnist':
+            custom_angle = angle_positive - 0.25
+        
+        print(f"      -> Adjusted angle: {np.degrees(custom_angle):.1f}°")
+            
+        # For ranks, use consistent label_position for all datasets
+        ax.text(custom_angle, label_position, display_name, 
+                horizontalalignment='center', verticalalignment='center',
+                size=12, fontweight='bold', transform=ax.transData,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                        edgecolor='gray', alpha=0.8))
+    
+    # Set axis label
+    ax.set_ylabel('Rank', fontsize=12, fontweight='bold', labelpad=25)
+    
+    # Grid
+    ax.grid(True, linewidth=1.0, alpha=0.5, linestyle='--')
+    ax.set_axisbelow(True)
+    
+    # Get legend handles and labels to return
+    handles, labels = ax.get_legend_handles_labels()
+    
+    return handles, labels
+
+
 if __name__ == '__main__':
     import sys
     
@@ -1217,3 +1476,4 @@ if __name__ == '__main__':
     
     # Generate radar plots with specified aggregation
     main(aggregation=aggregation, shift=shift)
+

@@ -8,19 +8,16 @@ Creates 3 figures:
 """
 
 import json
-import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
-from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
 # Import functions from existing scripts
 from benchmarks.medMNIST.utils.viz_benchmark_results.generate_radar_plots import create_radar_plot_on_axis, parse_results_directory, compute_mean_aggregation_metric
-from plot_ensemble_vs_mean_heatmap import compute_differences, prepare_heatmap_data
+
 
 
 def load_and_parse_results(results_dirs, metric='auroc_f'):
@@ -73,42 +70,6 @@ def load_and_parse_results(results_dirs, metric='auroc_f'):
     return parsed
 
 
-def load_heatmap_data(results_dirs):
-    """
-    Load and prepare heatmap data from all shift directories.
-    
-    Returns:
-        Dict with keys 'id', 'corruption', 'population' containing matrices and metadata
-    """
-    heatmap_data = {}
-    
-    # Process ID and corruption shifts normally
-    for shift_type in ['id', 'corruption']:
-        dir_path = results_dirs.get(shift_type)
-        if dir_path is None or not dir_path.exists():
-            continue
-            
-        all_data = _load_json_files(dir_path)
-        if all_data:
-            heatmap_data[shift_type] = _process_heatmap_data(all_data)
-    
-    # Merge population and new_class shifts
-    all_data_merged = {}
-    
-    # Load population shift data
-    if results_dirs.get('population') is not None and results_dirs['population'].exists():
-        all_data_merged.update(_load_json_files(results_dirs['population']))
-    
-    # Load new class shift data (they will have same keys, just merged)
-    if results_dirs.get('new_class') is not None and results_dirs['new_class'].exists():
-        all_data_merged.update(_load_json_files(results_dirs['new_class']))
-    
-    if all_data_merged:
-        heatmap_data['population'] = _process_heatmap_data(all_data_merged)
-    
-    return heatmap_data
-
-
 def _load_json_files(dir_path):
     """Load all JSON files from a directory."""
     json_files = list(dir_path.glob('uq_benchmark_*.json'))
@@ -133,59 +94,6 @@ def _load_json_files(dir_path):
                     all_data[key] = data
     
     return all_data
-
-
-def _process_heatmap_data(all_data):
-    """Process loaded JSON data into heatmap matrices."""
-    # Compute differences
-    auroc_diffs, augrc_diffs = compute_differences(all_data)
-    
-    # Prepare matrices
-    auroc_matrix, methods, display_names = prepare_heatmap_data(auroc_diffs)
-    augrc_matrix, _, _ = prepare_heatmap_data(augrc_diffs)
-    
-    # Sort columns
-    setup_order = {'standard': 0, 'DA': 1, 'DO': 2, 'DADO': 3}
-    
-    def get_sort_key(name):
-        clean_name = name.replace('_corrupt_severity3_test', '').replace('_test', '').replace('_external', '')
-        setup = 'standard'
-        for setup_name in ['DADO', 'DO', 'DA']:
-            if setup_name in clean_name:
-                setup = setup_name
-                clean_name = clean_name.replace('_' + setup_name, '')
-                break
-        
-        model = 'unknown'
-        if '_vit_b_16' in clean_name:
-            model = 'vit_b_16'
-            clean_name = clean_name.replace('_vit_b_16', '')
-        elif '_resnet18' in clean_name:
-            model = 'resnet18'
-            clean_name = clean_name.replace('_resnet18', '')
-        
-        dataset = clean_name
-        return (dataset, model, setup_order.get(setup, 99))
-    
-    sorted_indices = sorted(range(len(display_names)), key=lambda i: get_sort_key(display_names[i]))
-    display_names = [display_names[i] for i in sorted_indices]
-    auroc_matrix = auroc_matrix[:, sorted_indices]
-    augrc_matrix = augrc_matrix[:, sorted_indices]
-    
-    # Rename methods
-    methods_display = [m.replace('MSR_calibrated', 'MSR-S')
-                        .replace('KNN_Raw', 'KNN')
-                        .replace('Ensembling', 'DE')
-                        .replace('MCDropout', 'MCD') 
-                       for m in methods]
-    
-    return {
-        'auroc_matrix': auroc_matrix,
-        'augrc_matrix': augrc_matrix,
-        'methods': methods_display,
-        'display_names': display_names
-    }
-
 
 def create_radar_figure(results_auroc, results_augrc, metric='auroc_f', aggregation='mean', 
                         results_dir=None, comp_eval_dirs=None):
@@ -737,12 +645,12 @@ def main(aggregation='mean'):
     
     # Get paths
     script_dir = Path(__file__).parent
-    workspace_root = script_dir.parent.parent.parent
+    workspace_root = script_dir.parent.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
     
     # Define all results directories
     results_dirs = {
-        'id': results_dir / 'id_results',
+        'id': results_dir / 'id',
         'corruption': results_dir / 'corruption_shifts',
         'population': results_dir / 'population_shifts',
         'new_class': results_dir / 'new_class_shifts'
@@ -792,19 +700,7 @@ def main(aggregation='mean'):
                     merged[model].update(new_res[model])
             
             metric_results['population'] = merged
-    
-    # Load heatmap data
-    heatmap_data = load_heatmap_data(results_dirs)
-    
-    # Merge population and new_class heatmap data
-    if 'population' in heatmap_data and 'new_class' in heatmap_data:
-        pop_data = heatmap_data['population']
-        new_data = heatmap_data['new_class']
-        
-        # Concatenate matrices and names
-        pop_data['auroc_matrix'] = np.hstack([pop_data['auroc_matrix'], new_data['auroc_matrix']])
-        pop_data['augrc_matrix'] = np.hstack([pop_data['augrc_matrix'], new_data['augrc_matrix']])
-        pop_data['display_names'] = pop_data['display_names'] + new_data['display_names']
+
     
     # ==========================================
     # 2. Create AUROC_f radar figure
