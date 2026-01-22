@@ -250,18 +250,17 @@ def augrc_log_transform(value, max_display=0.30, scale_factor=50.0):
     return scale_factor * (max_display - np.array(value)) ** 1.5
 
 
-def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, runs_dir=None, metric='auroc_f', aggregation='mean', shift='corruption_shifts'):
+def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metric='auroc_f', aggregation='mean', shift='corruption_shifts'):
     """
     Create a radar plot on a given axis for a single model showing all dataset-setup combinations.
     
     Args:
         ax: Matplotlib polar axis to plot on
-        model_results: dict mapping dataset_key -> method -> metric_value
+        model_results: dict mapping dataset_key -> method -> metric_value (includes pre-computed Mean_Aggregation)
         model_name: Name of the model (e.g., 'resnet18', 'vit_b_16')
-        results_dir: Path to results directory (for computing aggregation)
         runs_dir: Path to runs directory (for ensemble balanced accuracy)
         metric: Metric to plot - 'auroc_f' or 'augrc'
-        aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote'
+        aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote' (for display labeling)
         shift: Shift type - 'corruption_shifts' or 'in_distribution'
     """
     # Group datasets by family (base dataset name)
@@ -306,30 +305,9 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
         print(f"No data for {model_name}, skipping radar plot")
         return
     
-    # Add aggregation method for each dataset (per-fold)
-    # Skip if results_dir is None (caller has already computed aggregation)
-    metric_name = metric.upper().replace('_', ' ')
-    agg_display = aggregation.capitalize()
-    if results_dir is not None:
-        print(f"  Computing {agg_display} aggregation {metric_name} for each dataset...")
-        mean_agg_count = 0
-        for dataset_key in dataset_keys:
-            mean_agg_value = compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric=metric, aggregation=aggregation, shift=shift, use_ensemble=False)
-            if not np.isnan(mean_agg_value):
-                model_results[dataset_key]['Mean_Aggregation'] = mean_agg_value
-                mean_agg_count += 1
-        print(f"  Successfully computed Mean_Aggregation for {mean_agg_count}/{len(dataset_keys)} datasets")
-        
-        # Add ensemble version of Mean Aggregation
-        mean_agg_ens_count = 0
-        for dataset_key in dataset_keys:
-            mean_agg_ens_value = compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric=metric, aggregation=aggregation, shift=shift, use_ensemble=True)
-            if not np.isnan(mean_agg_ens_value):
-                model_results[dataset_key]['Mean_Aggregation_Ensemble'] = mean_agg_ens_value
-                mean_agg_ens_count += 1
-        print(f"  Successfully computed Mean_Aggregation_Ensemble for {mean_agg_ens_count}/{len(dataset_keys)} datasets")
-    else:
-        print(f"  Skipping {agg_display} aggregation computation (using pre-computed values)")
+    # Mean_Aggregation and Mean_Aggregation_Ensemble are now loaded from JSON files
+    # (pre-computed by precompute_mean_aggregation.py)
+    print(f"  Using pre-computed Mean_Aggregation values from JSON files")
     
     # Get all unique methods across datasets
     all_methods = set()
@@ -357,7 +335,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     current_family_idx = 0
     num_families_total = len(dataset_families)
     angle_per_family = 2 * np.pi / num_families_total
-    within_family_factor = 0.6  # Tighter clustering within family
+    within_family_factor = 0.85  # Wider spacing within family for better visibility
     
     i = 0
     while i < len(dataset_keys):
@@ -643,7 +621,70 @@ def create_radar_plot_on_axis(ax, model_results, model_name, results_dir=None, r
     # Get legend handles and labels to return
     handles, labels = ax.get_legend_handles_labels()
     
-    return handles, labels
+    # Compute surface areas for each method (return for histogram generation)
+    from plot_unified_results import compute_polygon_area_polar
+    
+    method_surfaces = {}
+    method_angles = {}  # Store valid angles for each method
+    
+    for method_idx, method_name in enumerate(all_methods):
+        values = []
+        for dataset_key in dataset_keys:
+            val = model_results[dataset_key].get(method_name, np.nan)
+            values.append(val)
+        
+        # Filter out NaN values and their corresponding angles
+        valid_indices = [i for i, v in enumerate(values) if not np.isnan(v)]
+        
+        if len(valid_indices) < 3:  # Need at least 3 points for a polygon
+            method_surfaces[method_name] = 0.0
+            method_angles[method_name] = []
+            continue
+        
+        # Get filtered values and angles
+        filtered_values = [values[i] for i in valid_indices]
+        filtered_angles = [angles[i] for i in valid_indices]
+        
+        # Transform values same as plotting
+        if metric == 'augrc':
+            if shift in ['population_shift', 'new_class_shift']:
+                max_display = 0.45
+            else:
+                max_display = 0.30
+            values_transformed = augrc_log_transform(filtered_values, max_display=max_display)
+        else:
+            values_transformed = filtered_values
+        
+        # Add closing point
+        values_closed = values_transformed + [values_transformed[0]]
+        angles_closed = filtered_angles + [filtered_angles[0]]
+        
+        # Compute area
+        try:
+            area = compute_polygon_area_polar(angles_closed, values_closed)
+            method_surfaces[method_name] = area
+            method_angles[method_name] = filtered_angles  # Store without closing point
+        except:
+            method_surfaces[method_name] = 0.0
+            method_angles[method_name] = []
+    
+    # Compute oracle surface (perfect method with value 1.0 everywhere) for normalization
+    # Use the same angles as the datasets (most methods have all angles)
+    oracle_values = [1.0] * len(angles)
+    oracle_values_closed = oracle_values + [oracle_values[0]]
+    angles_closed_oracle = angles + [angles[0]]
+    
+    try:
+        oracle_surface = compute_polygon_area_polar(angles_closed_oracle, oracle_values_closed)
+        # Normalize all surfaces by oracle
+        if oracle_surface > 0:
+            for method_name in method_surfaces:
+                if method_surfaces[method_name] > 0:
+                    method_surfaces[method_name] = method_surfaces[method_name] / oracle_surface
+    except:
+        pass  # If oracle computation fails, keep unnormalized surfaces
+    
+    return handles, labels, method_surfaces, method_angles
 
 
 def generate_summary_table(results, output_path):
@@ -790,11 +831,11 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
         
         if use_ensemble:
             # ENSEMBLE MODE: Use ensemble scores with ensemble correct/incorrect indices
-            # Include Ensembling since it represents fold-to-fold variability
+            # Use _ensemble suffix methods which represent logit averaging (average logits first, then softmax)
+            # Include Ensembling_ensemble since it represents fold-to-fold variability
             method_keys = [k for k in data.keys() 
-                          if not k.endswith('_per_fold') 
-                          and not k.endswith('_ensemble') 
-                          and k not in ['TTA']]  # Only exclude TTA (GPS is already included)
+                          if k.endswith('_ensemble')
+                          and k not in ['TTA_ensemble']]  # Only exclude TTA
             
             if not method_keys:
                 return np.nan
@@ -1092,15 +1133,15 @@ def main(aggregation='mean', shift='corruption_shifts'):
     print(f"Aggregation: {aggregation.upper()}")
     print("=" * 80)
     
-    # Get the workspace root (3 levels up from script: utils -> medMNIST -> benchmarks -> UQ_Toolbox)
+    # Get the workspace root (5 levels up from script: utils -> viz_benchmark_results -> utils -> medMNIST -> benchmarks -> UQ_Toolbox)
     script_dir = Path(__file__).parent
-    workspace_root = script_dir.parent.parent.parent
+    workspace_root = script_dir.parent.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
     if shift == 'corruption_shifts':
         id_results_dir = results_dir / 'corruption_shifts'
         comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'corruption_shifts'
     else:
-        id_results_dir = results_dir / 'id_results'
+        id_results_dir = results_dir / 'id'
         comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
     
     print(f"Workspace root: {workspace_root}")
@@ -1155,11 +1196,11 @@ def main(aggregation='mean', shift='corruption_shifts'):
             print(f"Generating {metric.upper()} plot for {model_name}...")
             print(f"{'='*80}")
             
-            # Generate plot on this axis (modified create_radar_plot to return handles/labels)
-            handles, labels = create_radar_plot_on_axis(
+            # Generate plot on this axis
+            handles, labels, method_surfaces, method_angles = create_radar_plot_on_axis(
                 ax, model_results, model_name, 
-                results_dir=results_dir, runs_dir=comp_eval_dir, 
-                metric=metric, aggregation=aggregation
+                runs_dir=comp_eval_dir, 
+                metric=metric, aggregation=aggregation, shift=shift
             )
             
             # Collect legend info from first subplot only
@@ -1287,7 +1328,7 @@ def create_rank_radar_plot_on_axis(ax, ranked_results, model_name, aggregation='
     current_family_idx = 0
     num_families_total = len(dataset_families)
     angle_per_family = 2 * np.pi / num_families_total
-    within_family_factor = 0.6
+    within_family_factor = 0.85  # Portion of angle_per_family used for setups within family
     
     i = 0
     while i < len(dataset_keys):

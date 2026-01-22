@@ -15,9 +15,288 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
-# Import functions from existing scripts
-from benchmarks.medMNIST.utils.viz_benchmark_results.generate_radar_plots import create_radar_plot_on_axis, parse_results_directory, compute_mean_aggregation_metric
+# Add project root to path
+project_root = Path(__file__).resolve().parents[4]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
+# Import functions from existing scripts
+from benchmarks.medMNIST.utils.viz_benchmark_results.generate_radar_plots import create_radar_plot_on_axis, parse_results_directory
+
+
+def compute_polygon_area_polar(angles, radii):
+    """
+    Compute the area of a polygon in polar coordinates.
+    
+    For a polygon with vertices at (θ_i, r_i), the area is:
+    A = 0.5 * Σ(r_i * r_{i+1} * sin(θ_{i+1} - θ_i))
+    
+    Args:
+        angles: List of angles in radians (should form a closed loop)
+        radii: List of radii at each angle
+    
+    Returns:
+        float: Area of the polygon
+    """
+    if len(angles) != len(radii):
+        raise ValueError("Angles and radii must have the same length")
+    
+    # Ensure the polygon is closed
+    if angles[-1] != angles[0]:
+        angles = list(angles) + [angles[0]]
+        radii = list(radii) + [radii[0]]
+    
+    area = 0.0
+    n = len(angles) - 1  # Exclude the duplicate closing point
+    
+    for i in range(n):
+        theta_diff = angles[i+1] - angles[i]
+        # Handle wraparound at 2π
+        if theta_diff < -np.pi:
+            theta_diff += 2 * np.pi
+        elif theta_diff > np.pi:
+            theta_diff -= 2 * np.pi
+        
+        # Area contribution from this segment
+        area += 0.5 * radii[i] * radii[i+1] * np.sin(theta_diff)
+    
+    return abs(area)
+
+
+def normalize_radar_surface(area, angles, y_min, y_max, metric='auroc_f'):
+    """
+    Normalize radar surface area to [0, 1] where 1 is perfect performance.
+    
+    Args:
+        area: Computed polygon area
+        angles: List of angles (without closing point) - only valid angles for this method
+        y_min: Minimum y-axis value on radar
+        y_max: Maximum y-axis value on radar  
+        metric: 'auroc_f' or 'augrc'
+    
+    Returns:
+        float: Normalized area (1.0 = perfect, 0.0 = worst)
+    """
+    # For perfect performance:
+    # - AUROC_f: r = y_max (1.0) for all points
+    # - AUGRC: r = y_max (edge) for all points
+    
+    if len(angles) < 3:  # Need at least 3 points
+        return 0.0
+    
+    if metric == 'auroc_f':
+        perfect_radius = y_max
+    else:  # augrc
+        # For AUGRC, best performance is at the edge (maximum transformed value)
+        perfect_radius = y_max
+    
+    # Compute perfect area using only the valid angles for this method
+    perfect_radii = [perfect_radius] * len(angles)
+    perfect_area = compute_polygon_area_polar(angles + [angles[0]], 
+                                             perfect_radii + [perfect_radii[0]])
+    
+    # Normalize
+    if perfect_area == 0:
+        return 0.0
+    
+    normalized = area / perfect_area
+    
+    # Clip to [0, 1] range
+    return np.clip(normalized, 0.0, 1.0)
+
+
+def create_surface_histogram_figure(all_surfaces, aggregation='mean'):
+    """
+    Create histogram figure showing normalized radar surfaces for all methods.
+    
+    Layout: 3 rows × 1 column (one per shift, both models per row)
+    ResNet18 reversed on right y-axis, ViT normal on left y-axis.
+    
+    Args:
+        all_surfaces: Dict structure:
+            {
+                'id': {
+                    'resnet18': {
+                        'auroc_f': {'MSR': 0.85, 'GPS': 0.90, ...},
+                        'augrc': {'MSR': 0.82, 'GPS': 0.88, ...}
+                    },
+                    'vit_b_16': {...}
+                },
+                'corruption': {...},
+                'population': {...}
+            }
+        aggregation: Aggregation strategy
+    
+    Returns:
+        fig: matplotlib figure
+    """
+    # Create figure with 3 rows and 1 column (one per shift)
+    fig, axes = plt.subplots(3, 1, figsize=(6, 12), gridspec_kw={'hspace': 0.25})
+    
+    # Define shift types
+    shift_configs = [
+        ('id', 'In Distribution', 0),
+        ('corruption', 'Corruption Shifts', 1),
+        ('population', 'Population / New Class Shifts', 2)
+    ]
+    
+    model_names = ['resnet18', 'vit_b_16']
+    model_display_names = {
+        'resnet18': 'ResNet18',
+        'vit_b_16': 'ViT-B/16'
+    }
+    
+    # Define method order for histogram display
+    method_display_order = {
+        'MSR': 0,
+        'MSR_calibrated': 1,
+        'MLS': 2,
+        'TTA': 3,
+        'GPS': 4,
+        'MCDropout': 5,
+        'KNN_Raw': 6,
+        'Ensembling': 7,
+        'Mean_Aggregation': 8,
+        'Mean_Aggregation_Ensemble': 9
+    }
+    
+    # Get all methods across all shifts
+    all_methods_set = set()
+    for shift_data in all_surfaces.values():
+        for model_data in shift_data.values():
+            for metric_data in model_data.values():
+                all_methods_set.update(metric_data.keys())
+    
+    # Sort methods ALPHABETICALLY for consistent color mapping (same as radar plots)
+    all_methods_sorted_for_colors = sorted(all_methods_set)
+    
+    # Create color mapping matching radar plots (tab20 colormap) - ALPHABETICAL ORDER
+    colors_tab20 = plt.cm.tab20(np.linspace(0, 1, len(all_methods_sorted_for_colors)))
+    method_colors = {method: colors_tab20[i] for i, method in enumerate(all_methods_sorted_for_colors)}
+    
+    # Override Mean_Aggregation to red
+    method_colors['Mean_Aggregation'] = 'red'
+    
+    print("\nGenerating surface histogram figure...")
+    
+    for shift_idx, (shift_key, shift_label, shift_num) in enumerate(shift_configs):
+        shift_data = all_surfaces.get(shift_key, {})
+        
+        if not shift_data:
+            print(f"  ⚠ No surface data for {shift_key}")
+            continue
+        
+        ax = axes[shift_idx]
+        
+        # Get data for both models
+        resnet_data = shift_data.get('resnet18', {})
+        vit_data = shift_data.get('vit_b_16', {})
+        
+        if not resnet_data and not vit_data:
+            print(f"  ⚠ No model data for {shift_key}")
+            ax.text(0.5, 0.5, 'No Data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
+        
+        # Get AUROC surfaces for both models
+        resnet_auroc = resnet_data.get('auroc_f', {})
+        vit_auroc = vit_data.get('auroc_f', {})
+        
+        # Get all methods (union of both models)
+        all_methods = sorted(set(list(resnet_auroc.keys()) + list(vit_auroc.keys())), 
+                           key=lambda m: method_display_order.get(m, 999))
+        
+        if not all_methods:
+            print(f"  ⚠ No methods for {shift_key}")
+            continue
+        
+        # Prepare data for both models
+        resnet_values = [resnet_auroc.get(m, 0.0) for m in all_methods]
+        vit_values = [vit_auroc.get(m, 0.0) for m in all_methods]
+        
+        # Get colors for each method
+        bar_colors = [method_colors.get(m, 'gray') for m in all_methods]
+        
+        # Create offset bar positions with reduced spacing
+        x = np.arange(len(all_methods)) * 0.7  # Multiply by 0.7 to reduce spacing between bars
+        bar_width = 0.35  # Narrower to fit both
+        offset = bar_width * 0#0.75  # Larger offset to prevent bars from touching
+        
+        # Plot ViT on primary (left) y-axis
+        bars_vit = ax.bar(x - offset, vit_values, width=bar_width, color=bar_colors, 
+                         alpha=0.8, edgecolor='black', linewidth=1, label='ViT')
+        
+        # Create secondary (right) y-axis for ResNet
+        ax2 = ax.twinx()
+        bars_resnet = ax2.bar(x + offset, resnet_values, width=bar_width, color=bar_colors,
+                             alpha=0.8, edgecolor='black', linewidth=1, label='ResNet18')
+        
+        # Surfaces are now normalized by oracle (perfect method = 1.0)
+        # Set y-axis limits with gap to separate visually
+        
+        # Format left y-axis (ViT - normal, 0 at bottom)
+        ax.set_ylim(0, 1.6)
+        ax.set_ylabel('ViT', fontsize=12, fontweight='bold', y=0.25)
+        
+        # Custom y-ticks for ViT: 0 to 0.8, then blank gap, then nothing (ResNet uses right axis)
+        vit_ticks = [0, 0.2, 0.4, 0.6, 0.8]
+        vit_labels = ['0.0', '0.2', '0.4', '0.6', '0.8']
+        ax.set_yticks(vit_ticks)
+        ax.set_yticklabels(vit_labels, fontsize=9)
+        
+        # Format right y-axis (ResNet - reversed, 0 at top)
+        ax2.set_ylim(1.6, 0)  # Reversed
+        ax2.set_ylabel('ResNet18', fontsize=12, fontweight='bold', y=0.75, rotation=-90, labelpad=13)
+        
+        # Custom y-ticks for ResNet: skip 0.8-1.6 range, show 0 to 0.8
+        # Since axis is reversed (1.6 to 0), ticks at physical positions 0 to 0.8 correspond to values 1.6 to 0.8
+        resnet_ticks = [0, 0.2, 0.4, 0.6, 0.8]  # Physical positions on the reversed axis
+        resnet_labels = ['0.0', '0.2', '0.4', '0.6', '0.8']
+        ax2.set_yticks(resnet_ticks)
+        ax2.set_yticklabels(resnet_labels, fontsize=9)
+        
+        # Add a visual separator line at 0.8
+        ax.axhline(y=0.8, color='lightgray', linewidth=1.5, linestyle='--', alpha=0.7, zorder=1)
+        
+        # Remove x-tick labels
+        ax.set_xticks(x)
+        ax.set_xticklabels([])
+        
+        # Grid on primary axis only
+        ax.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+        ax.set_axisbelow(True)
+        # Grid on primary axis only
+        ax2.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+        ax2.set_axisbelow(True)
+        
+        # Hide ALL spines from both axes (we'll draw custom ones)
+        for spine in ax.spines.values():
+            if spine.spine_type in ['top', 'right', 'left']:
+                spine.set_visible(False)
+        for spine in ax2.spines.values():
+            if spine.spine_type in ['bottom', 'right', 'left']:
+                spine.set_visible(False)
+        
+        # Draw custom left spine segment only from 0 to 0.8
+        # Use axis transform: x=0 (left edge) in axis coords, y in data coords
+        ax.plot([0, 0], [0, 0.8], 
+                color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                transform=ax.get_yaxis_transform())
+        ax2.plot([1, 1], [0, 0.8], 
+                color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                transform=ax2.get_yaxis_transform())
+        
+        # Add subtitle for each shift
+        ax.set_title(shift_label, fontsize=12, fontweight='bold', pad=10)
+    
+    # Add main title
+    fig.suptitle('Normalized Surface',
+                fontsize=16, fontweight='bold', y=0.995)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+    
+    return fig
 
 
 def load_and_parse_results(results_dirs, metric='auroc_f'):
@@ -173,10 +452,10 @@ def create_radar_figure(results_auroc, results_augrc, metric='auroc_f', aggregat
             
             model_results = results[model_name]
             
-            # Generate radar plot
-            handles, labels = create_radar_plot_on_axis(
+            # Generate radar plot (uses pre-computed Mean_Aggregation from JSON)
+            handles, labels, method_surfaces, method_angles = create_radar_plot_on_axis(
                 ax, model_results, model_name,
-                results_dir=results_dir, runs_dir=comp_eval_dir,
+                runs_dir=comp_eval_dir,
                 metric=metric, aggregation=aggregation, shift=shift_name
             )
             
@@ -234,9 +513,19 @@ def create_radar_figure_alt_layout(results_auroc, results_augrc, metric='auroc_f
         comp_eval_dirs: Dict of comprehensive evaluation directories
         
     Returns:
-        fig: matplotlib figure
+        tuple: (fig, surfaces_dict) where surfaces_dict has structure:
+            {
+                'shift_key': {
+                    'model_name': {
+                        method_name: surface_area
+                    }
+                }
+            }
     """
     results_map = results_auroc if metric == 'auroc_f' else results_augrc
+    
+    # Dictionary to store all surface areas
+    all_surfaces = {}
     
     # Create figure with 2 rows and 3 columns - wider to accommodate 3 columns
     fig = plt.figure(figsize=(20, 11))
@@ -310,12 +599,18 @@ def create_radar_figure_alt_layout(results_auroc, results_augrc, metric='auroc_f
             
             model_results = results[model_name]
             
-            # Generate radar plot
-            handles, labels = create_radar_plot_on_axis(
+            # Generate radar plot (uses pre-computed Mean_Aggregation from JSON)
+            handles, labels, method_surfaces, method_angles = create_radar_plot_on_axis(
                 ax, model_results, model_name,
-                results_dir=results_dir, runs_dir=comp_eval_dir,
+                runs_dir=comp_eval_dir,
                 metric=metric, aggregation=aggregation, shift=shift_name
             )
+            
+            # Store method surfaces for histogram generation
+            if shift_key not in all_surfaces:
+                all_surfaces[shift_key] = {}
+            if model_name not in all_surfaces[shift_key]:
+                all_surfaces[shift_key][model_name] = method_surfaces
             
             # Collect legend info from first subplot
             if ax_idx == 0 and handles and labels:
@@ -356,6 +651,266 @@ def create_radar_figure_alt_layout(results_auroc, results_augrc, metric='auroc_f
         fig.legend(all_handles, all_labels, loc='lower center', ncol=5,
                   fontsize=11, frameon=True, bbox_to_anchor=(0.54, -0.02))
     
+    return fig, all_surfaces
+
+
+def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_surfaces, 
+                                           aggregation='mean', results_dir=None, comp_eval_dirs=None):
+    """
+    Create combined radar + histogram figure for AUROC_f.
+    
+    Layout: 3 rows × 3 columns
+    - Row 0: ResNet18 radars (ID, CS, PS/NCS)
+    - Row 1: Histograms (ID, CS, PS/NCS)
+    - Row 2: ViT radars (ID, CS, PS/NCS)
+    
+    Args:
+        results_auroc: Dict with keys 'id', 'corruption', 'population'
+        results_augrc: Dict with keys 'id', 'corruption', 'population' (for radar plotting)
+        all_surfaces: Surface areas dict from radar computation
+        aggregation: Aggregation strategy
+        results_dir: Main results directory
+        comp_eval_dirs: Dict of comprehensive evaluation directories
+        
+    Returns:
+        fig: matplotlib figure
+    """
+    metric = 'auroc_f'
+    results_map = results_auroc
+    
+    # Create figure with 3 rows and 3 columns
+    fig = plt.figure(figsize=(20, 14))
+    # Adjust spacing to have more room between rows
+    gs = fig.add_gridspec(3, 3, hspace=0.20, wspace=0.2,
+                         left=0.10, right=0.94, top=0.94, bottom=0.06)
+    
+    # Create radar axes for rows 0 and 2
+    radar_axes = {}
+    for row in [0, 2]:
+        for col in range(3):
+            ax = fig.add_subplot(gs[row, col], projection='polar')
+            radar_axes[(row, col)] = ax
+    
+    # Define shift types and their settings
+    shift_configs = [
+        ('id', 'in_distribution', 'ID', 0),
+        ('corruption', 'corruption_shifts', 'CS', 1),
+        ('population', 'population_shift', 'PS/NCS', 2)
+    ]
+    
+    model_names = ['resnet18', 'vit_b_16']
+    model_display_names = {
+        'resnet18': 'RESNET18',
+        'vit_b_16': 'ViT-B/16'
+    }
+    
+    all_handles = []
+    all_labels = []
+    
+    print(f"\nGenerating combined radar + histogram figure (AUROC_f)...")
+    
+    # Add column titles (shift types) at the top
+    for shift_key, shift_name, shift_label, col in shift_configs:
+        if col == 0:
+            x_pos = 0.15
+        elif col == 1:
+            x_pos = 0.45
+        else:
+            x_pos = 0.75
+        fig.text(x_pos, 0.96, shift_label, ha='center', va='center', 
+                fontsize=16, fontweight='bold')
+    
+    # Add row labels (model names) on the left
+    metric_display = 'AUROC_f'
+    for row_idx, (row, model_name) in enumerate([(0, 'resnet18'), (2, 'vit_b_16')]):
+        y_pos = 0.08 + (2 - row) * (0.88 / 3)  # Evenly spaced across 3 rows
+        model_display = model_display_names[model_name]
+        fig.text(0.373, y_pos, f'{model_display}\n{metric_display}', 
+                ha='center', va='center', fontsize=14, fontweight='bold')#, rotation=90)
+    
+    # Plot radars for both models
+    for model_idx, (radar_row, model_name) in enumerate([(0, 'resnet18'), (2, 'vit_b_16')]):
+        for shift_key, shift_name, shift_label, col in shift_configs:
+            results = results_map.get(shift_key, {})
+            
+            if not results or model_name not in results:
+                continue
+            
+            # Get comprehensive evaluation directory
+            comp_eval_dir = comp_eval_dirs.get(shift_key) if comp_eval_dirs else None
+            
+            ax = radar_axes[(radar_row, col)]
+            
+            # Call create_radar_plot_on_axis (from generate_radar_plots.py)
+            # Uses pre-computed Mean_Aggregation from JSON
+            handles, labels, method_surfaces, method_angles = create_radar_plot_on_axis(
+                ax=ax,
+                model_results=results[model_name],
+                model_name=model_name,
+                runs_dir=comp_eval_dir,
+                metric=metric,
+                aggregation=aggregation,
+                shift=shift_name
+            )
+            
+            # Collect handles and labels for legend
+            if handles and labels:
+                for h, l in zip(handles, labels):
+                    if l not in all_labels:
+                        all_handles.append(h)
+                        all_labels.append(l)
+    
+    # Plot histograms in row 1
+    # Get method order and colors (same as radar plots)
+    method_display_order = {
+        'MSR': 0,
+        'MSR_calibrated': 1,
+        'MLS': 2,
+        'TTA': 3,
+        'GPS': 4,
+        'MCDropout': 5,
+        'KNN_Raw': 6,
+        'Ensembling': 7,
+        'Mean_Aggregation': 8,
+        'Mean_Aggregation_Ensemble': 9
+    }
+    
+    # Get all methods across all shifts for color mapping
+    all_methods_set = set()
+    for shift_data in all_surfaces.values():
+        for model_data in shift_data.values():
+            all_methods_set.update(model_data.get('auroc_f', {}).keys())
+    
+    # Sort methods ALPHABETICALLY for consistent color mapping
+    all_methods_sorted_for_colors = sorted(all_methods_set)
+    
+    # Create color mapping matching radar plots
+    colors_tab20 = plt.cm.tab20(np.linspace(0, 1, len(all_methods_sorted_for_colors)))
+    method_colors = {method: colors_tab20[i] for i, method in enumerate(all_methods_sorted_for_colors)}
+    
+    # Override Mean_Aggregation to red (keep Mean_Aggregation_Ensemble with default yellow from tab20)
+    method_colors['Mean_Aggregation'] = 'red'
+    
+    # Create histogram for each shift (in middle row)
+    for shift_idx, (shift_key, shift_name, shift_label, col) in enumerate(shift_configs):
+        shift_data = all_surfaces.get(shift_key, {})
+        
+        if not shift_data:
+            continue
+        
+        # Create regular (non-polar) subplot for histogram
+        ax = fig.add_subplot(gs[1, col])
+        
+        # Get data for both models
+        resnet_data = shift_data.get('resnet18', {})
+        vit_data = shift_data.get('vit_b_16', {})
+        
+        # Get AUROC surfaces for both models
+        resnet_auroc = resnet_data.get('auroc_f', {})
+        vit_auroc = vit_data.get('auroc_f', {})
+        
+        # Get all methods (union of both models)
+        all_methods = sorted(set(list(resnet_auroc.keys()) + list(vit_auroc.keys())), 
+                           key=lambda m: method_display_order.get(m, 999))
+        
+        if not all_methods:
+            continue
+        
+        # Prepare data for both models
+        resnet_values = [resnet_auroc.get(m, 0.0) for m in all_methods]
+        vit_values = [vit_auroc.get(m, 0.0) for m in all_methods]
+        
+        # Get colors for each method
+        bar_colors = [method_colors.get(m, 'gray') for m in all_methods]
+        
+        # Create offset bar positions with reduced spacing
+        x = np.arange(len(all_methods)) * 0.6  # Multiply by 0.7 to reduce spacing between bars
+        bar_width = 0.2
+        offset = bar_width * 0
+        
+        # Plot ViT on primary (left) y-axis
+        bars_vit = ax.bar(x - offset, vit_values, width=bar_width, color=bar_colors, 
+                         alpha=0.8, edgecolor='black', linewidth=1, label='ViT')
+        
+        # Create secondary (right) y-axis for ResNet
+        ax2 = ax.twinx()
+        bars_resnet = ax2.bar(x - offset, resnet_values, width=bar_width, color=bar_colors,
+                             alpha=0.8, edgecolor='black', linewidth=1, label='ResNet18')
+        
+        # Format left y-axis (ViT - normal, 0 at bottom)
+        ax.set_ylim(0.3, 1.3)
+        ax.set_ylabel('ViT', fontsize=12, fontweight='bold', y=0.25)
+        
+        # Custom y-ticks for ViT: 0 to 0.8, then blank gap, then nothing (ResNet uses right axis)
+        vit_ticks = [0.4, 0.5, 0.6, 0.7, 0.8]
+        vit_labels = ['0.4', '0.5', '0.6', '0.7', '0.8']
+        ax.set_yticks(vit_ticks)
+        ax.set_yticklabels(vit_labels, fontsize=9)
+        
+        # Format right y-axis (ResNet - reversed, 0 at top)
+        ax2.set_ylim(1.3, 0.3)  # Reversed
+        ax2.set_ylabel('ResNet18', fontsize=12, fontweight='bold', y=0.75, labelpad=13, rotation=-90)
+        
+        # Custom y-ticks for ResNet: skip 0.8-1.6 range, show 0 to 0.8
+        resnet_ticks = [0.4, 0.5, 0.6, 0.7, 0.8]  # Physical positions on the reversed axis
+        resnet_labels = ['0.4', '0.5', '0.6', '0.7', '0.8']
+        ax2.set_yticks(resnet_ticks)
+        ax2.set_yticklabels(resnet_labels, fontsize=9)
+        
+        # Add a visual separator line at 0.8
+        ax.axhline(y=0.8, color='lightgray', linewidth=1.5, linestyle='--', alpha=0.7, zorder=1)
+        
+        # Remove x-tick labels
+        ax.set_xticks(x)
+        ax.set_xticklabels([])
+        
+        # Grid on primary axis only
+        ax.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+        ax.set_axisbelow(True)
+        ax2.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+        ax2.set_axisbelow(True)
+        
+        # Hide ALL spines from both axes (we'll draw custom ones)
+        for spine in ax.spines.values():
+            if spine.spine_type in ['top', 'right', 'left']:
+                spine.set_visible(False)
+        for spine in ax2.spines.values():
+            if spine.spine_type in ['bottom', 'right', 'left']:
+                spine.set_visible(False)
+        
+        # Draw custom left spine segment only from 0 to 0.8
+        ax.plot([0, 0], [0.3, 0.8], 
+                color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                transform=ax.get_yaxis_transform())
+        ax2.plot([1, 1], [0.3, 0.8], 
+                color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                transform=ax2.get_yaxis_transform())
+        
+        # Add subtitle for histogram (centered above middle plot only)
+        ax.set_title('Normalized Surface', fontsize=12, fontweight='bold', pad=8)
+    
+    # Add legend at the bottom
+    if all_handles and all_labels:
+        # Move special methods to end
+        special_methods = ['Mean_Aggregation', 'Mean_Aggregation_Ensemble']
+        for special in special_methods:
+            if special in all_labels:
+                idx = all_labels.index(special)
+                all_labels.append(all_labels.pop(idx))
+                all_handles.append(all_handles.pop(idx))
+        
+        # Rename method labels
+        all_labels = [label.replace('KNN_Raw', 'KNN')
+                           .replace('Ensembling', 'DE')
+                           .replace('MCDropout', 'MCD')
+                           .replace('MSR_calibrated', 'MSR-S')
+                           .replace('Mean_Aggregation_Ensemble', 'Mean Agg + Ens')
+                           .replace('Mean_Aggregation', 'Mean Agg')
+                      for label in all_labels]
+        
+        fig.legend(all_handles, all_labels, loc='lower center', ncol=4,
+                  fontsize=11, frameon=True, bbox_to_anchor=(0.52, 0.48), framealpha=1)
+    
     return fig
 
 
@@ -379,8 +934,64 @@ def create_heatmap_figure(heatmap_data, results_dir, aggregation='mean'):
     import numpy as np
     import matplotlib.pyplot as plt
     import seaborn as sns
+    import json
+    import os
     
     print("\nGenerating heatmaps...")
+    
+    # Load pre-computed results from JSON files for Mean_Aggregation
+    results = {}
+    shift_dirs = ['id', 'corruption_shifts', 'population_shifts', 'new_class_shifts']
+    
+    for shift_dir in shift_dirs:
+        shift_path = os.path.join(results_dir, shift_dir)
+        if not os.path.exists(shift_path):
+            continue
+            
+        for json_file in os.listdir(shift_path):
+            if not json_file.endswith('.json'):
+                continue
+                
+            json_path = os.path.join(shift_path, json_file)
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+                
+            # Parse model, dataset, setup from filename
+            # Format: {dataset}_{model}_{setup}_results.json or {dataset}_{model}_results.json
+            parts = json_file.replace('_results.json', '').split('_')
+            
+            if 'vit_b_16' in json_file:
+                model = 'vit_b_16'
+                dataset_parts = json_file.replace('_vit_b_16', '').replace('_results.json', '').split('_')
+            elif 'resnet18' in json_file:
+                model = 'resnet18'
+                dataset_parts = json_file.replace('_resnet18', '').replace('_results.json', '').split('_')
+            else:
+                continue
+            
+            # Check for setup (DADO, DO, DA)
+            setup = 'standard'
+            for setup_name in ['DADO', 'DO', 'DA']:
+                if setup_name in dataset_parts:
+                    setup = setup_name
+                    dataset_parts = [p for p in dataset_parts if p != setup_name]
+                    break
+            
+            dataset = '_'.join(dataset_parts)
+            dataset_key = dataset if setup == 'standard' else f"{dataset}_{setup}"
+            
+            # Initialize nested dicts
+            if model not in results:
+                results[model] = {}
+            if dataset_key not in results[model]:
+                results[model][dataset_key] = {}
+            
+            # Store method results
+            for method_name, method_data in data.items():
+                if isinstance(method_data, dict) and 'auroc_f' in method_data:
+                    results[model][dataset_key][method_name] = method_data
+    
+    print(f"  Loaded results for {len(results)} model types")
     
     # Define shift configurations
     shift_configs = [
@@ -414,7 +1025,7 @@ def create_heatmap_figure(heatmap_data, results_dir, aggregation='mean'):
         
         # Add Mean_Aggregation row
         auroc_agg_row = compute_mean_agg_row(
-            results_dir, display_names, shift_name, 'auroc_f', aggregation
+            results, display_names, shift_name, 'auroc_f', aggregation
         )
         
         auroc_matrix_with_agg = np.vstack([auroc_matrix, auroc_agg_row])
@@ -458,7 +1069,7 @@ def create_heatmap_figure(heatmap_data, results_dir, aggregation='mean'):
         
         # Add Mean_Aggregation row
         augrc_agg_row = compute_mean_agg_row(
-            results_dir, display_names, shift_name, 'augrc', aggregation
+            results, display_names, shift_name, 'augrc', aggregation
         )
         
         augrc_matrix_with_agg = np.vstack([augrc_matrix, augrc_agg_row])
@@ -512,12 +1123,25 @@ def create_heatmap_figure(heatmap_data, results_dir, aggregation='mean'):
     
     return fig
 
-def compute_mean_agg_row(results_dir, display_names, shift_name, metric, aggregation):
-    """Compute Mean_Aggregation row for heatmap."""
+def compute_mean_agg_row(results, display_names, shift_name, metric, aggregation):
+    """
+    Compute Mean_Aggregation row for heatmap using pre-computed values from JSON.
+    
+    Args:
+        results: Dict with pre-loaded results [model][dataset][method] structure
+        display_names: List of display names matching heatmap columns
+        shift_name: Shift type name
+        metric: 'auroc_f' or 'augrc'
+        aggregation: Aggregation strategy name
+    
+    Returns:
+        np.array: Row of differences (ensemble - per-fold)
+    """
     agg_row_list = []
+    metric_key = f'{metric}_mean' if metric == 'augrc' else metric
     
     for display_name in display_names:
-        # Parse display_name
+        # Parse display_name to extract model and dataset
         clean_name = display_name.replace('_corrupt_severity3_test', '').replace('_test', '').replace('_external', '')
         
         setup = 'standard'
@@ -538,19 +1162,18 @@ def compute_mean_agg_row(results_dir, display_names, shift_name, metric, aggrega
         dataset = clean_name
         dataset_key = dataset if setup == 'standard' else f"{dataset}_{setup}"
         
-        # Compute differences
-        ensemble_val = compute_mean_aggregation_metric(
-            results_dir, dataset_key, model, 
-            metric=metric, aggregation=aggregation, 
-            shift=shift_name, use_ensemble=True
-        )
-        perfold_val = compute_mean_aggregation_metric(
-            results_dir, dataset_key, model, 
-            metric=metric, aggregation=aggregation, 
-            shift=shift_name, use_ensemble=False
-        )
+        # Load pre-computed values from results dict
+        try:
+            dataset_results = results.get(model, {}).get(dataset_key, {})
+            
+            # Get Mean_Aggregation_Ensemble and Mean_Aggregation values
+            ensemble_val = dataset_results.get('Mean_Aggregation_Ensemble', {}).get(metric_key, np.nan)
+            perfold_val = dataset_results.get('Mean_Aggregation', {}).get(metric_key, np.nan)
+            
+            diff = ensemble_val - perfold_val if not np.isnan(ensemble_val) and not np.isnan(perfold_val) else np.nan
+        except:
+            diff = np.nan
         
-        diff = ensemble_val - perfold_val if not np.isnan(ensemble_val) and not np.isnan(perfold_val) else np.nan
         agg_row_list.append(diff)
     
     return np.array(agg_row_list).reshape(1, -1)
@@ -745,7 +1368,7 @@ def main(aggregation='mean'):
     print("Creating AUROC_f radar figure (alternate layout)...")
     print("=" * 80)
     
-    fig_auroc_alt = create_radar_figure_alt_layout(
+    fig_auroc_alt, surfaces_auroc = create_radar_figure_alt_layout(
         results_auroc, results_augrc, 
         metric='auroc_f', aggregation=aggregation,
         results_dir=results_dir, comp_eval_dirs=comp_eval_dirs
@@ -763,7 +1386,7 @@ def main(aggregation='mean'):
     print("Creating AUGRC radar figure (alternate layout)...")
     print("=" * 80)
     
-    fig_augrc_alt = create_radar_figure_alt_layout(
+    fig_augrc_alt, surfaces_augrc = create_radar_figure_alt_layout(
         results_auroc, results_augrc,
         metric='augrc', aggregation=aggregation,
         results_dir=results_dir, comp_eval_dirs=comp_eval_dirs
@@ -773,6 +1396,56 @@ def main(aggregation='mean'):
     fig_augrc_alt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n✓ Saved to {output_path}")
     plt.close(fig_augrc_alt)
+    
+    # ==========================================
+    # 4. Merge AUROC_f and AUGRC surfaces
+    # ==========================================
+    print("\n" + "=" * 80)
+    print("Merging surface data...")
+    print("=" * 80)
+    
+    # Merge surfaces from both metrics
+    all_surfaces = {}
+    for shift_key in ['id', 'corruption', 'population']:
+        all_surfaces[shift_key] = {}
+        for model_name in ['resnet18', 'vit_b_16']:
+            all_surfaces[shift_key][model_name] = {
+                'auroc_f': surfaces_auroc.get(shift_key, {}).get(model_name, {}),
+                'augrc': surfaces_augrc.get(shift_key, {}).get(model_name, {})
+            }
+    
+    # ==========================================
+    # 5. Create surface histogram figure
+    # ==========================================
+    print("\n" + "=" * 80)
+    print("Creating surface histogram figure...")
+    print("=" * 80)
+    
+    fig_surfaces = create_surface_histogram_figure(all_surfaces, aggregation=aggregation)
+    
+    output_path = output_dir / f'unified_radar_surfaces_{aggregation}.png'
+    fig_surfaces.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n✓ Saved to {output_path}")
+    plt.close(fig_surfaces)
+
+    # ==========================================
+    # 6. Create combined radar + histogram figure (AUROC_f only)
+    # ==========================================
+    print("\n" + "=" * 80)
+    print("Creating combined radar + histogram figure (AUROC_f)...")
+    print("=" * 80)
+    
+    fig_combined = create_combined_radar_histogram_figure(
+        results_auroc, results_augrc, all_surfaces,
+        aggregation=aggregation,
+        results_dir=results_dir,
+        comp_eval_dirs=comp_eval_dirs
+    )
+    
+    output_path = output_dir / f'unified_auroc_f_radars_with_histograms_{aggregation}.png'
+    fig_combined.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n✓ Saved to {output_path}")
+    plt.close(fig_combined)
 
     # ==========================================
     # 4. Create heatmap figure
