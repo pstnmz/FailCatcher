@@ -17,6 +17,45 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def compute_polygon_area_polar(angles, radii):
+    """
+    Compute the area of a polygon in polar coordinates.
+    
+    For a polygon with vertices at (θ_i, r_i), the area is:
+    A = 0.5 * Σ(r_i * r_{i+1} * sin(θ_{i+1} - θ_i))
+    
+    Args:
+        angles: List of angles in radians (should form a closed loop)
+        radii: List of radii at each angle
+    
+    Returns:
+        float: Area of the polygon
+    """
+    if len(angles) != len(radii):
+        raise ValueError("Angles and radii must have the same length")
+    
+    # Ensure the polygon is closed
+    if angles[-1] != angles[0]:
+        angles = list(angles) + [angles[0]]
+        radii = list(radii) + [radii[0]]
+    
+    area = 0.0
+    n = len(angles) - 1  # Exclude the duplicate closing point
+    
+    for i in range(n):
+        theta_diff = angles[i+1] - angles[i]
+        # Handle wraparound at 2π
+        if theta_diff < -np.pi:
+            theta_diff += 2 * np.pi
+        elif theta_diff > np.pi:
+            theta_diff -= 2 * np.pi
+        
+        # Area contribution from this segment
+        area += 0.5 * radii[i] * radii[i+1] * np.sin(theta_diff)
+    
+    return abs(area)
+
+
 def parse_results_directory(results_dir='./', metric='auroc_f'):
     """
     Parse all JSON result files in the directory.
@@ -437,7 +476,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
             else:
                 method_name = method_name
             # Plot lines with enhanced styling for better visibility
-            ax.plot(angles, values, 'o-', linewidth=2, label=method_name, 
+            ax.plot(angles, values, 'o-', linewidth=1.5, label=method_name, 
                     color=colors[method_idx], markersize=7, markeredgewidth=1,
                     markeredgecolor='white', alpha=0.85)
     
@@ -622,16 +661,25 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
     handles, labels = ax.get_legend_handles_labels()
     
     # Compute surface areas for each method (return for histogram generation)
-    from plot_unified_results import compute_polygon_area_polar
+    # compute_polygon_area_polar is defined at the top of this file
     
     method_surfaces = {}
     method_angles = {}  # Store valid angles for each method
+    
+    # Debug: Check if we're computing surfaces for AUGRC
+    if metric == 'augrc':
+        print(f"  DEBUG AUGRC: Starting surface computation for {len(all_methods)} methods, metric={metric}")
     
     for method_idx, method_name in enumerate(all_methods):
         values = []
         for dataset_key in dataset_keys:
             val = model_results[dataset_key].get(method_name, np.nan)
             values.append(val)
+        
+        # Debug for AUGRC
+        if metric == 'augrc' and method_name == 'Ensembling':
+            print(f"  DEBUG AUGRC {method_name}: Got {len(values)} values, NaN count: {sum(1 for v in values if np.isnan(v))}")
+            print(f"    Sample values: {values[:3]}")
         
         # Filter out NaN values and their corresponding angles
         valid_indices = [i for i, v in enumerate(values) if not np.isnan(v)]
@@ -645,6 +693,10 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         filtered_values = [values[i] for i in valid_indices]
         filtered_angles = [angles[i] for i in valid_indices]
         
+        # Debug for AUGRC
+        if metric == 'augrc' and method_name == 'Ensembling':
+            print(f"  DEBUG AUGRC {method_name}: filtered to {len(filtered_values)} values")
+        
         # Transform values same as plotting
         if metric == 'augrc':
             if shift in ['population_shift', 'new_class_shift']:
@@ -652,6 +704,13 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
             else:
                 max_display = 0.30
             values_transformed = augrc_log_transform(filtered_values, max_display=max_display)
+            # Convert to list if it's a numpy array
+            if hasattr(values_transformed, 'tolist'):
+                values_transformed = values_transformed.tolist()
+            
+            # Debug
+            if method_name == 'Ensembling':
+                print(f"  DEBUG AUGRC {method_name}: transformed values, max_display={max_display}, transformed_range=[{min(values_transformed):.3f}, {max(values_transformed):.3f}]")
         else:
             values_transformed = filtered_values
         
@@ -659,30 +718,78 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         values_closed = values_transformed + [values_transformed[0]]
         angles_closed = filtered_angles + [filtered_angles[0]]
         
+        # Debug before area computation
+        if metric == 'augrc' and method_name == 'Ensembling':
+            print(f"  DEBUG AUGRC: About to compute area for {method_name}")
+            print(f"    n_values_closed={len(values_closed)}, n_angles_closed={len(angles_closed)}")
+        
         # Compute area
         try:
             area = compute_polygon_area_polar(angles_closed, values_closed)
             method_surfaces[method_name] = area
             method_angles[method_name] = filtered_angles  # Store without closing point
-        except:
+            
+            # Debug first method for AUGRC
+            if metric == 'augrc' and method_name == 'Ensembling':
+                print(f"  DEBUG AUGRC surface BEFORE normalization for {method_name}: area={area:.6f}, n_points={len(filtered_angles)}")
+                print(f"    value_range=[{min(values_transformed):.3f}, {max(values_transformed):.3f}]")
+                print(f"    angles_range=[{min(filtered_angles):.3f}, {max(filtered_angles):.3f}]")
+        except Exception as e:
+            print(f"  ERROR computing area for {method_name}, metric={metric}: {e}")
+            import traceback
+            traceback.print_exc()
             method_surfaces[method_name] = 0.0
             method_angles[method_name] = []
     
-    # Compute oracle surface (perfect method with value 1.0 everywhere) for normalization
-    # Use the same angles as the datasets (most methods have all angles)
-    oracle_values = [1.0] * len(angles)
-    oracle_values_closed = oracle_values + [oracle_values[0]]
-    angles_closed_oracle = angles + [angles[0]]
-    
-    try:
-        oracle_surface = compute_polygon_area_polar(angles_closed_oracle, oracle_values_closed)
-        # Normalize all surfaces by oracle
-        if oracle_surface > 0:
-            for method_name in method_surfaces:
-                if method_surfaces[method_name] > 0:
+    # Normalize each method by its own oracle (perfect method with value 1.0 for its available datasets)
+    # CRITICAL: Each method must be normalized by an oracle computed with ONLY its available angles
+    # For example, MCDropout (only DO/DADO) should have a different oracle than TTA (all setups)
+    for method_name in method_surfaces:
+        if method_surfaces[method_name] > 0 and len(method_angles[method_name]) > 0:
+            try:
+                # Get this method's angles
+                method_specific_angles = method_angles[method_name]
+                
+                # Compute oracle for THIS method (perfect performance on its available datasets)
+                # For AUROC_f: perfect = 1.0 (no transformation needed)
+                # For AUGRC: perfect = 0.0, but needs to be transformed to edge
+                if metric == 'augrc':
+                    # Perfect AUGRC is 0, which transforms to max edge value
+                    if shift in ['population_shift', 'new_class_shift']:
+                        max_display = 0.45
+                    else:
+                        max_display = 0.30
+                    # Perfect AUGRC (0.0) transforms to scale_factor * max_display^1.5
+                    oracle_perfect_values = [0.0] * len(method_specific_angles)
+                    oracle_transformed = augrc_log_transform(oracle_perfect_values, max_display=max_display)
+                    oracle_values = oracle_transformed.tolist() if hasattr(oracle_transformed, 'tolist') else list(oracle_transformed)
+                    
+                    # Debug for first method
+                    if method_name == list(method_surfaces.keys())[0]:
+                        print(f"  DEBUG AUGRC oracle: max_display={max_display}, n_points={len(oracle_values)}, oracle_values[0]={oracle_values[0]:.3f}")
+                else:
+                    # For AUROC_f, perfect is 1.0 (already at edge)
+                    oracle_values = [1.0] * len(method_specific_angles)
+                
+                oracle_values_closed = oracle_values + [oracle_values[0]]
+                angles_closed_oracle = list(method_specific_angles) + [method_specific_angles[0]]
+                
+                oracle_surface = compute_polygon_area_polar(angles_closed_oracle, oracle_values_closed)
+                
+                # Debug for first method
+                if method_name == list(method_surfaces.keys())[0]:
+                    print(f"  DEBUG {metric} oracle for {method_name}: surface_before={method_surfaces[method_name]:.6f}, oracle_surface={oracle_surface:.6f}")
+                
+                # Normalize this method's surface by its own oracle
+                if oracle_surface > 0:
                     method_surfaces[method_name] = method_surfaces[method_name] / oracle_surface
-    except:
-        pass  # If oracle computation fails, keep unnormalized surfaces
+                    
+                    # Debug for first method
+                    if method_name == list(method_surfaces.keys())[0]:
+                        print(f"  DEBUG normalized surface: {method_surfaces[method_name]:.6f}")
+            except Exception as e:
+                print(f"  ⚠ Oracle normalization failed for {method_name}: {e}")
+                pass  # Keep unnormalized surface if computation fails
     
     return handles, labels, method_surfaces, method_angles
 

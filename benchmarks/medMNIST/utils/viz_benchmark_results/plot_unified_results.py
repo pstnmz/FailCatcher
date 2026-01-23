@@ -105,7 +105,7 @@ def normalize_radar_surface(area, angles, y_min, y_max, metric='auroc_f'):
     return np.clip(normalized, 0.0, 1.0)
 
 
-def create_surface_histogram_figure(all_surfaces, aggregation='mean'):
+def create_surface_histogram_figure(all_surfaces, metric='auroc_f', aggregation='mean'):
     """
     Create histogram figure showing normalized radar surfaces for all methods.
     
@@ -125,6 +125,7 @@ def create_surface_histogram_figure(all_surfaces, aggregation='mean'):
                 'corruption': {...},
                 'population': {...}
             }
+        metric: 'auroc_f' or 'augrc'
         aggregation: Aggregation strategy
     
     Returns:
@@ -199,12 +200,19 @@ def create_surface_histogram_figure(all_surfaces, aggregation='mean'):
             ax.set_yticks([])
             continue
         
-        # Get AUROC surfaces for both models
-        resnet_auroc = resnet_data.get('auroc_f', {})
-        vit_auroc = vit_data.get('auroc_f', {})
+        # Get surfaces for both models (use specified metric)
+        resnet_metric = resnet_data.get(metric, {})
+        vit_metric = vit_data.get(metric, {})
+        
+        # Debug: Check if we have data
+        print(f"  {shift_key} - {metric}: resnet methods: {len(resnet_metric)}, vit methods: {len(vit_metric)}")
+        if resnet_metric:
+            print(f"    ResNet sample values: {list(resnet_metric.items())[:3]}")
+        if vit_metric:
+            print(f"    ViT sample values: {list(vit_metric.items())[:3]}")
         
         # Get all methods (union of both models)
-        all_methods = sorted(set(list(resnet_auroc.keys()) + list(vit_auroc.keys())), 
+        all_methods = sorted(set(list(resnet_metric.keys()) + list(vit_metric.keys())), 
                            key=lambda m: method_display_order.get(m, 999))
         
         if not all_methods:
@@ -212,8 +220,10 @@ def create_surface_histogram_figure(all_surfaces, aggregation='mean'):
             continue
         
         # Prepare data for both models
-        resnet_values = [resnet_auroc.get(m, 0.0) for m in all_methods]
-        vit_values = [vit_auroc.get(m, 0.0) for m in all_methods]
+        resnet_values = [resnet_metric.get(m, 0.0) for m in all_methods]
+        vit_values = [vit_metric.get(m, 0.0) for m in all_methods]
+        
+        print(f"    Bars: {len(all_methods)} methods, resnet range: {min(resnet_values):.3f}-{max(resnet_values):.3f}, vit range: {min(vit_values):.3f}-{max(vit_values):.3f}")
         
         # Get colors for each method
         bar_colors = [method_colors.get(m, 'gray') for m in all_methods]
@@ -291,7 +301,8 @@ def create_surface_histogram_figure(all_surfaces, aggregation='mean'):
         ax.set_title(shift_label, fontsize=12, fontweight='bold', pad=10)
     
     # Add main title
-    fig.suptitle('Normalized Surface',
+    metric_display = 'AUROC_f' if metric == 'auroc_f' else 'AUGRC'
+    fig.suptitle(f'Normalized Surface ({metric_display})',
                 fontsize=16, fontweight='bold', y=0.995)
     
     plt.tight_layout(rect=[0, 0, 1, 0.99])
@@ -606,11 +617,21 @@ def create_radar_figure_alt_layout(results_auroc, results_augrc, metric='auroc_f
                 metric=metric, aggregation=aggregation, shift=shift_name
             )
             
-            # Store method surfaces for histogram generation
+            # Debug: Check what surfaces we got
+            if metric == 'augrc' and model_name == 'resnet18' and shift_key == 'id':
+                print(f"  DEBUG create_radar_figure: After create_radar_plot_on_axis for {metric}/{shift_key}/{model_name}")
+                print(f"    method_surfaces has {len(method_surfaces)} entries:")
+                sample = list(method_surfaces.items())[:3]
+                print(f"    Sample: {sample}")
+            
+            # Store method surfaces for histogram generation (store under metric key to avoid overwriting)
             if shift_key not in all_surfaces:
                 all_surfaces[shift_key] = {}
             if model_name not in all_surfaces[shift_key]:
-                all_surfaces[shift_key][model_name] = method_surfaces
+                all_surfaces[shift_key][model_name] = {}
+            
+            # Store this metric's surfaces (don't overwrite other metrics!)
+            all_surfaces[shift_key][model_name][metric] = method_surfaces
             
             # Collect legend info from first subplot
             if ax_idx == 0 and handles and labels:
@@ -655,9 +676,9 @@ def create_radar_figure_alt_layout(results_auroc, results_augrc, metric='auroc_f
 
 
 def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_surfaces, 
-                                           aggregation='mean', results_dir=None, comp_eval_dirs=None):
+                                           aggregation='mean', results_dir=None, comp_eval_dirs=None, metric='auroc_f'):
     """
-    Create combined radar + histogram figure for AUROC_f.
+    Create combined radar + histogram figure for specified metric.
     
     Layout: 3 rows × 3 columns
     - Row 0: ResNet18 radars (ID, CS, PS/NCS)
@@ -671,17 +692,21 @@ def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_sur
         aggregation: Aggregation strategy
         results_dir: Main results directory
         comp_eval_dirs: Dict of comprehensive evaluation directories
+        metric: 'auroc_f' or 'augrc'
         
     Returns:
         fig: matplotlib figure
     """
-    metric = 'auroc_f'
-    results_map = results_auroc
+    results_map = results_auroc if metric == 'auroc_f' else results_augrc
     
     # Create figure with 3 rows and 3 columns
     fig = plt.figure(figsize=(20, 14))
     # Adjust spacing to have more room between rows
-    gs = fig.add_gridspec(3, 3, hspace=0.20, wspace=0.2,
+    # Use height_ratios to make histogram row (row 1) shorter than radar rows
+    # Use width_ratios to make histogram columns narrower (60% width of radar columns)
+    gs = fig.add_gridspec(3, 3, hspace=0.20, wspace=0.25,
+                         height_ratios=[1, 0.6, 1],  # Middle row 60% height of radar rows
+                         width_ratios=[1, 1, 1],  # Equal width columns (histogram will have tight xlim)
                          left=0.10, right=0.94, top=0.94, bottom=0.06)
     
     # Create radar axes for rows 0 and 2
@@ -721,7 +746,7 @@ def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_sur
                 fontsize=16, fontweight='bold')
     
     # Add row labels (model names) on the left
-    metric_display = 'AUROC_f'
+    metric_display = 'AUROC_f' if metric == 'auroc_f' else 'AUGRC'
     for row_idx, (row, model_name) in enumerate([(0, 'resnet18'), (2, 'vit_b_16')]):
         y_pos = 0.08 + (2 - row) * (0.88 / 3)  # Evenly spaced across 3 rows
         model_display = model_display_names[model_name]
@@ -779,7 +804,7 @@ def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_sur
     all_methods_set = set()
     for shift_data in all_surfaces.values():
         for model_data in shift_data.values():
-            all_methods_set.update(model_data.get('auroc_f', {}).keys())
+            all_methods_set.update(model_data.get(metric, {}).keys())
     
     # Sort methods ALPHABETICALLY for consistent color mapping
     all_methods_sorted_for_colors = sorted(all_methods_set)
@@ -798,76 +823,121 @@ def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_sur
         if not shift_data:
             continue
         
-        # Create regular (non-polar) subplot for histogram
-        ax = fig.add_subplot(gs[1, col])
+        # Create regular (non-polar) subplot for histogram with custom narrower width
+        # Get the position of the gridspec cell
+        gs_cell = gs[1, col]
+        cell_bbox = gs_cell.get_position(fig)
+        
+        # Make histogram 60% of the gridspec cell width, centered
+        width_reduction = 0.8
+        new_width = cell_bbox.width * width_reduction
+        left_margin = (cell_bbox.width - new_width) / 2
+        
+        # Create axis with custom position [left, bottom, width, height]
+        ax = fig.add_axes([
+            cell_bbox.x0 + left_margin,
+            cell_bbox.y0,
+            new_width,
+            cell_bbox.height
+        ])
         
         # Get data for both models
         resnet_data = shift_data.get('resnet18', {})
         vit_data = shift_data.get('vit_b_16', {})
         
-        # Get AUROC surfaces for both models
-        resnet_auroc = resnet_data.get('auroc_f', {})
-        vit_auroc = vit_data.get('auroc_f', {})
+        # Get surfaces for the specified metric for both models
+        resnet_metric = resnet_data.get(metric, {})
+        vit_metric = vit_data.get(metric, {})
         
         # Get all methods (union of both models)
-        all_methods = sorted(set(list(resnet_auroc.keys()) + list(vit_auroc.keys())), 
+        all_methods = sorted(set(list(resnet_metric.keys()) + list(vit_metric.keys())), 
                            key=lambda m: method_display_order.get(m, 999))
         
         if not all_methods:
             continue
         
         # Prepare data for both models
-        resnet_values = [resnet_auroc.get(m, 0.0) for m in all_methods]
-        vit_values = [vit_auroc.get(m, 0.0) for m in all_methods]
+        resnet_values = [resnet_metric.get(m, 0.0) for m in all_methods]
+        vit_values = [vit_metric.get(m, 0.0) for m in all_methods]
         
         # Get colors for each method
         bar_colors = [method_colors.get(m, 'gray') for m in all_methods]
         
         # Create offset bar positions with reduced spacing
-        x = np.arange(len(all_methods)) * 0.6  # Multiply by 0.7 to reduce spacing between bars
-        bar_width = 0.2
+        x = np.arange(len(all_methods)) * 0.07  # Very tight spacing between bars
+        bar_width = 0.04  # Narrower bars
         offset = bar_width * 0
         
         # Plot ViT on primary (left) y-axis
         bars_vit = ax.bar(x - offset, vit_values, width=bar_width, color=bar_colors, 
-                         alpha=0.8, edgecolor='black', linewidth=1, label='ViT')
+                         alpha=0.8, edgecolor='black', linewidth=0.5, label='ViT')
         
         # Create secondary (right) y-axis for ResNet
         ax2 = ax.twinx()
         bars_resnet = ax2.bar(x - offset, resnet_values, width=bar_width, color=bar_colors,
-                             alpha=0.8, edgecolor='black', linewidth=1, label='ResNet18')
+                             alpha=0.8, edgecolor='black', linewidth=0.5, label='ResNet18')
         
-        # Format left y-axis (ViT - normal, 0 at bottom)
-        ax.set_ylim(0.3, 1.3)
-        ax.set_ylabel('ViT', fontsize=12, fontweight='bold', y=0.25)
+        # Format y-axes based on metric
+        if metric == 'augrc':
+            # AUGRC: Different limits and ticks
+            ax.set_ylim(0.2, 1.4)
+            ax.set_ylabel('ViT', fontsize=12, fontweight='bold', y=0.25)
+            
+            vit_ticks = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+            vit_labels = ['0.2', '0.3', '0.4', '0.5', '0.6', '0.7', '0.8']
+            ax.set_yticks(vit_ticks)
+            ax.set_yticklabels(vit_labels, fontsize=9)
+            
+            # Format right y-axis (ResNet - reversed)
+            ax2.set_ylim(1.4, 0.2)  # Reversed
+            ax2.set_ylabel('ResNet18', fontsize=12, fontweight='bold', y=0.85, labelpad=13, rotation=-90)
+            
+            resnet_ticks = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+            resnet_labels = ['0.2', '0.3', '0.4', '0.5', '0.6', '0.7', '0.8']
+            ax2.set_yticks(resnet_ticks)
+            ax2.set_yticklabels(resnet_labels, fontsize=9)
+            
+            # Separator line at 0.8
+            separator_y = 0.8
+        else:
+            # AUROC_f: Original limits and ticks
+            ax.set_ylim(0.35, 1.25)
+            ax.set_ylabel('ViT', fontsize=12, fontweight='bold', y=0.25)
+            
+            vit_ticks = [0.4, 0.5, 0.6, 0.7, 0.8]
+            vit_labels = ['0.4', '0.5', '0.6', '0.7', '0.8']
+            ax.set_yticks(vit_ticks)
+            ax.set_yticklabels(vit_labels, fontsize=9)
+            
+            # Format right y-axis (ResNet - reversed)
+            ax2.set_ylim(1.25, 0.35)  # Reversed
+            ax2.set_ylabel('ResNet18', fontsize=12, fontweight='bold', y=0.85, labelpad=13, rotation=-90)
+            
+            resnet_ticks = [0.4, 0.5, 0.6, 0.7, 0.8]
+            resnet_labels = ['0.4', '0.5', '0.6', '0.7', '0.8']
+            ax2.set_yticks(resnet_ticks)
+            ax2.set_yticklabels(resnet_labels, fontsize=9)
+            
+            # Separator line at 0.8
+            separator_y = 0.8
         
-        # Custom y-ticks for ViT: 0 to 0.8, then blank gap, then nothing (ResNet uses right axis)
-        vit_ticks = [0.4, 0.5, 0.6, 0.7, 0.8]
-        vit_labels = ['0.4', '0.5', '0.6', '0.7', '0.8']
-        ax.set_yticks(vit_ticks)
-        ax.set_yticklabels(vit_labels, fontsize=9)
+        # Add visual separator line
+        ax.axhline(y=separator_y, color='lightgray', linewidth=1.5, linestyle='--', alpha=0.7, zorder=1)
         
-        # Format right y-axis (ResNet - reversed, 0 at top)
-        ax2.set_ylim(1.3, 0.3)  # Reversed
-        ax2.set_ylabel('ResNet18', fontsize=12, fontweight='bold', y=0.75, labelpad=13, rotation=-90)
-        
-        # Custom y-ticks for ResNet: skip 0.8-1.6 range, show 0 to 0.8
-        resnet_ticks = [0.4, 0.5, 0.6, 0.7, 0.8]  # Physical positions on the reversed axis
-        resnet_labels = ['0.4', '0.5', '0.6', '0.7', '0.8']
-        ax2.set_yticks(resnet_ticks)
-        ax2.set_yticklabels(resnet_labels, fontsize=9)
-        
-        # Add a visual separator line at 0.8
-        ax.axhline(y=0.8, color='lightgray', linewidth=1.5, linestyle='--', alpha=0.7, zorder=1)
-        
-        # Remove x-tick labels
+        # Remove x-tick labels and set tight x-axis limits
         ax.set_xticks(x)
         ax.set_xticklabels([])
         
+        # Set x-axis limits to fit bars tightly with small margins
+        if len(x) > 0:
+            margin = bar_width * 3.5
+            ax.set_xlim(x[0] - margin, x[-1] + margin)
+            ax2.set_xlim(x[0] - margin, x[-1] + margin)
+        
         # Grid on primary axis only
-        ax.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+        ax.grid(axis='y', alpha=0.5, linestyle='--', zorder=0)
         ax.set_axisbelow(True)
-        ax2.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+        ax2.grid(axis='y', alpha=0.5, linestyle='--', zorder=0)
         ax2.set_axisbelow(True)
         
         # Hide ALL spines from both axes (we'll draw custom ones)
@@ -878,16 +948,26 @@ def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_sur
             if spine.spine_type in ['bottom', 'right', 'left']:
                 spine.set_visible(False)
         
-        # Draw custom left spine segment only from 0 to 0.8
-        ax.plot([0, 0], [0.3, 0.8], 
-                color='black', linewidth=0.8, clip_on=False, zorder=100, 
-                transform=ax.get_yaxis_transform())
-        ax2.plot([1, 1], [0.3, 0.8], 
-                color='black', linewidth=0.8, clip_on=False, zorder=100, 
-                transform=ax2.get_yaxis_transform())
+        # Draw custom spine segments based on metric
+        if metric == 'augrc':
+            # AUGRC: spine from 0.2 to 0.8
+            ax.plot([0, 0], [0.2, 0.8], 
+                    color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                    transform=ax.get_yaxis_transform())
+            ax2.plot([1, 1], [0.2, 0.8], 
+                    color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                    transform=ax2.get_yaxis_transform())
+        else:
+            # AUROC_f: spine from 0.35 to 0.8
+            ax.plot([0, 0], [0.35, 0.8], 
+                    color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                    transform=ax.get_yaxis_transform())
+            ax2.plot([1, 1], [0.35, 0.8], 
+                    color='black', linewidth=0.8, clip_on=False, zorder=100, 
+                    transform=ax2.get_yaxis_transform())
         
         # Add subtitle for histogram (centered above middle plot only)
-        ax.set_title('Normalized Surface', fontsize=12, fontweight='bold', pad=8)
+        ax.set_title('Normalized Radar Surface', fontsize=12, fontweight='bold', pad=8)
     
     # Add legend at the bottom
     if all_handles and all_labels:
@@ -908,8 +988,8 @@ def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_sur
                            .replace('Mean_Aggregation', 'Mean Agg')
                       for label in all_labels]
         
-        fig.legend(all_handles, all_labels, loc='lower center', ncol=4,
-                  fontsize=11, frameon=True, bbox_to_anchor=(0.52, 0.48), framealpha=1)
+        fig.legend(all_handles, all_labels, loc='lower center', ncol=5,
+                  fontsize=11, frameon=True, bbox_to_anchor=(0.52, 0.485), framealpha=1)
     
     return fig
 
@@ -1404,38 +1484,78 @@ def main(aggregation='mean'):
     print("Merging surface data...")
     print("=" * 80)
     
-    # Merge surfaces from both metrics
+    # Debug: Check what structure we got
+    print(f"  surfaces_auroc keys: {list(surfaces_auroc.keys())}")
+    if 'id' in surfaces_auroc and 'resnet18' in surfaces_auroc['id']:
+        print(f"    surfaces_auroc['id']['resnet18'] keys: {list(surfaces_auroc['id']['resnet18'].keys())}")
+        if 'auroc_f' in surfaces_auroc['id']['resnet18']:
+            print(f"      Has 'auroc_f' with {len(surfaces_auroc['id']['resnet18']['auroc_f'])} methods")
+    
+    print(f"  surfaces_augrc keys: {list(surfaces_augrc.keys())}")
+    if 'id' in surfaces_augrc and 'resnet18' in surfaces_augrc['id']:
+        print(f"    surfaces_augrc['id']['resnet18'] keys: {list(surfaces_augrc['id']['resnet18'].keys())}")
+        if 'augrc' in surfaces_augrc['id']['resnet18']:
+            print(f"      Has 'augrc' with {len(surfaces_augrc['id']['resnet18']['augrc'])} methods")
+            sample = list(surfaces_augrc['id']['resnet18']['augrc'].items())[:3]
+            print(f"      Sample values: {sample}")
+    
+    # Both surfaces_auroc and surfaces_augrc have structure: [shift][model][metric][method]
+    # Merge them by combining the metric subdicts
     all_surfaces = {}
     for shift_key in ['id', 'corruption', 'population']:
         all_surfaces[shift_key] = {}
         for model_name in ['resnet18', 'vit_b_16']:
-            all_surfaces[shift_key][model_name] = {
-                'auroc_f': surfaces_auroc.get(shift_key, {}).get(model_name, {}),
-                'augrc': surfaces_augrc.get(shift_key, {}).get(model_name, {})
-            }
+            all_surfaces[shift_key][model_name] = {}
+            
+            # Get AUROC_f surfaces from surfaces_auroc
+            auroc_data = surfaces_auroc.get(shift_key, {}).get(model_name, {})
+            if 'auroc_f' in auroc_data:
+                all_surfaces[shift_key][model_name]['auroc_f'] = auroc_data['auroc_f']
+            else:
+                # Old structure: it's a flat dict of methods
+                all_surfaces[shift_key][model_name]['auroc_f'] = auroc_data
+            
+            # Get AUGRC surfaces from surfaces_augrc
+            augrc_data = surfaces_augrc.get(shift_key, {}).get(model_name, {})
+            if 'augrc' in augrc_data:
+                all_surfaces[shift_key][model_name]['augrc'] = augrc_data['augrc']
+            else:
+                # Old structure: it's a flat dict of methods
+                all_surfaces[shift_key][model_name]['augrc'] = augrc_data
     
     # ==========================================
-    # 5. Create surface histogram figure
+    # 5. Create surface histogram figures (AUROC_f and AUGRC)
     # ==========================================
     print("\n" + "=" * 80)
-    print("Creating surface histogram figure...")
+    print("Creating AUROC_f surface histogram figure...")
     print("=" * 80)
     
-    fig_surfaces = create_surface_histogram_figure(all_surfaces, aggregation=aggregation)
+    fig_surfaces_auroc = create_surface_histogram_figure(all_surfaces, metric='auroc_f', aggregation=aggregation)
     
-    output_path = output_dir / f'unified_radar_surfaces_{aggregation}.png'
-    fig_surfaces.savefig(output_path, dpi=300, bbox_inches='tight')
+    output_path = output_dir / f'unified_radar_surfaces_auroc_f_{aggregation}.png'
+    fig_surfaces_auroc.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n✓ Saved to {output_path}")
-    plt.close(fig_surfaces)
+    plt.close(fig_surfaces_auroc)
+    
+    print("\n" + "=" * 80)
+    print("Creating AUGRC surface histogram figure...")
+    print("=" * 80)
+    
+    fig_surfaces_augrc = create_surface_histogram_figure(all_surfaces, metric='augrc', aggregation=aggregation)
+    
+    output_path = output_dir / f'unified_radar_surfaces_augrc_{aggregation}.png'
+    fig_surfaces_augrc.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n✓ Saved to {output_path}")
+    plt.close(fig_surfaces_augrc)
 
     # ==========================================
-    # 6. Create combined radar + histogram figure (AUROC_f only)
+    # 6. Create combined radar + histogram figure (AUROC_f)
     # ==========================================
     print("\n" + "=" * 80)
     print("Creating combined radar + histogram figure (AUROC_f)...")
     print("=" * 80)
     
-    fig_combined = create_combined_radar_histogram_figure(
+    fig_combined_auroc = create_combined_radar_histogram_figure(
         results_auroc, results_augrc, all_surfaces,
         aggregation=aggregation,
         results_dir=results_dir,
@@ -1443,9 +1563,28 @@ def main(aggregation='mean'):
     )
     
     output_path = output_dir / f'unified_auroc_f_radars_with_histograms_{aggregation}.png'
-    fig_combined.savefig(output_path, dpi=300, bbox_inches='tight')
+    fig_combined_auroc.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n✓ Saved to {output_path}")
-    plt.close(fig_combined)
+    plt.close(fig_combined_auroc)
+    
+    # 7. Create combined radar + histogram figure (AUGRC)
+    # ==========================================
+    print("\n" + "=" * 80)
+    print("Creating combined radar + histogram figure (AUGRC)...")
+    print("=" * 80)
+    
+    fig_combined_augrc = create_combined_radar_histogram_figure(
+        results_auroc, results_augrc, all_surfaces,
+        aggregation=aggregation,
+        results_dir=results_dir,
+        comp_eval_dirs=comp_eval_dirs,
+        metric='augrc'  # Use AUGRC metric
+    )
+    
+    output_path = output_dir / f'unified_augrc_radars_with_histograms_{aggregation}.png'
+    fig_combined_augrc.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n✓ Saved to {output_path}")
+    plt.close(fig_combined_augrc)
 
     # ==========================================
     # 4. Create heatmap figure
