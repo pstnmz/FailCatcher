@@ -99,6 +99,12 @@ def find_cache_file(cache_dir, dataset, model, config, shift_name):
             patterns = [f"{dataset}_{model}_corrupt3_test_test_results.npz", f"{dataset}_{model}_corrupt3_test_results.npz"]
         else:
             patterns = [f"{dataset}_{model}_{config}_corrupt3_test_test_results.npz", f"{dataset}_{model}_{config}_corrupt3_test_results.npz"]
+    elif shift_name == 'new_class_shift':
+        # New class shift has special cache naming with _new_class_shift suffix
+        if config == 'standard':
+            patterns = [f"{dataset}_{model}_new_class_shift_test_results.npz"]
+        else:
+            patterns = [f"{dataset}_{model}_{config}_new_class_shift_test_results.npz"]
     else:  # population
         if config == 'standard':
             patterns = [f"{dataset}_{model}_test_test_results.npz", f"{dataset}_{model}_test_results.npz"]
@@ -116,11 +122,13 @@ def load_cache_data(cache_file):
     """Load y_true, y_pred, and per_fold_predictions from cache file."""
     try:
         data = np.load(cache_file, allow_pickle=True)
-        return {
+        result = {
             'y_true': data['y_true'],
             'y_pred': data.get('y_pred', None),
-            'per_fold_predictions': data.get('per_fold_predictions', None)
+            'per_fold_predictions': data.get('per_fold_predictions', None),
+            'binary_gt': data.get('binary_gt', None)  # For new_class_shift
         }
+        return result
     except:
         return None
 
@@ -407,13 +415,7 @@ def collect_all_data_points(workspace_root):
                                 'config': config,
                                 'shift': shift_name
                             })
-    
-    print(f"\n{'='*80}")
-    print(f"Data collection complete:")
-    print(f"  Per-fold points: {len(per_fold_data)}")
-    print(f"  Ensemble points: {len(ensemble_data)}")
-    print(f"  Total points: {len(per_fold_data) + len(ensemble_data)}")
-    print(f"{'='*80}")
+
     
     return {'per_fold': per_fold_data, 'ensemble': ensemble_data}
 
@@ -905,7 +907,7 @@ def create_method_correlation_pairplots(data, output_dir):
         g = sns.pairplot(
             df[method_cols],
             diag_kind='kde',
-            plot_kws={'alpha': 0.6, 's': 20, 'edgecolor': 'none'},
+            plot_kws={'alpha': 0.2, 's': 20, 'edgecolor': 'none'},
             diag_kws={'linewidth': 2},
             corner=False
         )
@@ -945,7 +947,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
     # Define ensemble methods to exclude
     ensemble_methods = ['DE', 'Mean_Aggregation_Ensemble']
     
-    # Process each shift type
+    # Process each shift type (excluding new_class_shifts - handled separately)
     shift_info = [
         ('in_distribution', 'In-Distribution'),
         ('corruption_shifts', 'Corruption Shifts'),
@@ -1014,11 +1016,41 @@ def create_sample_level_pairplots(workspace_root, output_dir):
                     
                     n_folds = len(cache_data['per_fold_predictions'])
                     n_samples = len(cache_data['y_true'])
+                    y_true = cache_data['y_true']
+                    
+                    # For new_class_shift: use binary_gt for correctness labels
+                    binary_gt = cache_data.get('binary_gt', None)
+                    
+
                     
                     # Process each method in NPZ file
                     for method_name in npz_data.keys():
-                        # Only keep _per_fold variants
-                        if not method_name.endswith('_per_fold'):
+                        # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
+                        if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
+                            continue
+                        
+                        # Remove _per_fold suffix for display name
+                        base_method_name = method_name.replace('_per_fold', '')
+                        
+                        if base_method_name in ['Mean_Aggregation_Ensemble', 'DE']:  # Skip ensemble
+                            continue
+                        
+                        display_name = name_mapping.get(base_method_name, base_method_name)
+                        if display_name in ensemble_methods:
+                            continue
+                        
+                        scores = npz_data[method_name]
+                        
+                        # Handle shape mismatch for all methods
+                        if scores.ndim == 2 and scores.shape[1] != n_samples:
+                            scores = scores[:, :n_samples]
+                        elif scores.ndim == 1 and len(scores) != n_samples:
+                            scores = scores[:n_samples]
+                        
+                        # Check shape
+                    for method_name in npz_data.keys():
+                        # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
+                        if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
                             continue
                         
                         # Remove _per_fold suffix for display name
@@ -1037,14 +1069,34 @@ def create_sample_level_pairplots(workspace_root, output_dir):
                         if scores.ndim == 2:  # (n_folds, n_samples)
                             for fold_idx in range(n_folds):
                                 fold_scores = scores[fold_idx]
-                                for sample_idx in range(len(fold_scores)):
-                                    key = (dataset, config, fold_idx, sample_idx)
+                                y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
+                                # Use minimum length to avoid index errors
+                                n_samples_safe = min(len(fold_scores), len(y_pred_fold), len(y_true))
+                                for sample_idx in range(n_samples_safe):
+                                    key = (dataset, model, config, fold_idx, sample_idx)
                                     sample_scores[key][display_name] = fold_scores[sample_idx]
+                                    # Add correctness label if not already present
+                                    if 'correct' not in sample_scores[key]:
+                                        # For new_class_shift: use binary_gt (0=correct, 1=failure)
+                                        if binary_gt is not None:
+                                            sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
+                                        else:
+                                            sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
                         elif scores.ndim == 1:  # (n_samples,) - method that doesn't use folds
                             for fold_idx in range(n_folds):
-                                for sample_idx in range(len(scores)):
-                                    key = (dataset, config, fold_idx, sample_idx)
+                                y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
+                                # Use minimum length to avoid index errors
+                                n_samples_safe = min(len(scores), len(y_pred_fold), len(y_true))
+                                for sample_idx in range(n_samples_safe):
+                                    key = (dataset, model, config, fold_idx, sample_idx)
                                     sample_scores[key][display_name] = scores[sample_idx]
+                                    # Add correctness label if not already present
+                                    if 'correct' not in sample_scores[key]:
+                                        # For new_class_shift: use binary_gt (0=correct, 1=failure)
+                                        if binary_gt is not None:
+                                            sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
+                                        else:
+                                            sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
                 
                 except Exception as e:
                     print(f"  Warning: Failed to process {npz_file.name}: {e}")
@@ -1056,8 +1108,8 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         
         # Convert to DataFrame
         rows = []
-        for (dataset, config, fold, sample_idx), method_dict in sample_scores.items():
-            row = {'dataset': dataset, 'config': config, 'fold': fold, 'sample_idx': sample_idx}
+        for (dataset, model, config, fold, sample_idx), method_dict in sample_scores.items():
+            row = {'dataset': dataset, 'model': model, 'config': config, 'fold': fold, 'sample_idx': sample_idx}
             row.update(method_dict)
             rows.append(row)
         
@@ -1065,16 +1117,35 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         
         # Get method columns
         method_cols = [col for col in df.columns 
-                      if col not in ['dataset', 'config', 'fold', 'sample_idx']]
+                      if col not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct']]
         
         # Only keep methods with sufficient data
         method_cols = [col for col in method_cols if df[col].notna().sum() > 100]
         
-        # Sort alphabetically
+        # Sort alphabetically, but put Mean Agg at the end
         method_cols = sorted(method_cols)
+        if 'Mean Agg' in method_cols:
+            method_cols.remove('Mean Agg')
+            method_cols.append('Mean Agg')
         
         # Remove samples with missing values in any method
-        df_complete = df[method_cols].dropna()
+        # Keep 'correct', 'dataset', 'config' columns for hue parameter and stratification
+        df_complete = df[method_cols + ['correct', 'dataset', 'config', 'fold']].dropna()
+        
+        # Z-score normalization per fold and per method to handle scale differences
+        for method in method_cols:
+            for fold in df_complete['fold'].unique():
+                mask = df_complete['fold'] == fold
+                scores = df_complete.loc[mask, method]
+                mean = scores.mean()
+                std = scores.std()
+                if std > 0:
+                    df_complete.loc[mask, method] = (scores - mean) / std
+                else:
+                    df_complete.loc[mask, method] = 0.0
+        
+        # Convert correct boolean to string labels for better legend
+        df_complete['Prediction'] = df_complete['correct'].map({True: 'Correct', False: 'Incorrect'})
         
         print(f"  Found {len(df_complete)} complete samples across {len(method_cols)} methods")
         
@@ -1084,17 +1155,57 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         
         # Subsample if too many points (for visualization performance)
         if len(df_complete) > 5000:
-            print(f"  Subsampling {len(df_complete)} -> 5000 samples for visualization")
-            df_complete = df_complete.sample(n=5000, random_state=42)
+            # Get unique datasets
+            datasets = df_complete['dataset'].unique()
+            n_datasets = len(datasets)
+            samples_per_dataset = 5000 // n_datasets
+            
+            # Target: 50/50 balance between correct and incorrect for clear visualization
+            target_incorrect_ratio = 0.5
+            
+            sampled_dfs = []
+            for dataset in datasets:
+                df_dataset = df_complete[df_complete['dataset'] == dataset]
+                
+                # Count correct and incorrect for this dataset
+                n_correct = df_dataset['correct'].sum()
+                n_incorrect = (~df_dataset['correct']).sum()
+                
+                # If dataset has fewer samples than target, take all
+                if len(df_dataset) <= samples_per_dataset:
+                    sampled_dfs.append(df_dataset)
+                else:
+                    target_incorrect = int(samples_per_dataset * target_incorrect_ratio)
+                    
+                    # Take all incorrect if less than target, otherwise sample
+                    if n_incorrect <= target_incorrect:
+                        df_incorrect = df_dataset[~df_dataset['correct']]
+                        n_correct_needed = samples_per_dataset - len(df_incorrect)
+                        df_correct_sample = df_dataset[df_dataset['correct']].sample(n=min(n_correct_needed, n_correct), random_state=42)
+                    else:
+                        df_incorrect = df_dataset[~df_dataset['correct']].sample(n=target_incorrect, random_state=42)
+                        df_correct_sample = df_dataset[df_dataset['correct']].sample(n=samples_per_dataset-target_incorrect, random_state=42)
+                    
+                    sampled_dfs.append(pd.concat([df_correct_sample, df_incorrect]))
+            
+            df_complete = pd.concat(sampled_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
         
         # Create pairplot
         sns.set_style("whitegrid")
         
-        print(f"  Creating pairplot...")
+        # Explicitly shuffle the dataframe to ensure random mixing of red/green points
+        df_complete = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        # Define custom color palette (green for correct, red for incorrect)
+        palette = {'Correct': 'green', 'Incorrect': 'red'}
+        
         g = sns.pairplot(
             df_complete,
+            vars=method_cols,
+            hue='Prediction',
+            palette=palette,
             diag_kind='kde',
-            plot_kws={'alpha': 0.3, 's': 5, 'edgecolor': 'none'},
+            plot_kws={'alpha': 0.2, 's': 20, 'edgecolor': 'none'},
             diag_kws={'linewidth': 2},
             corner=False
         )
@@ -1112,6 +1223,304 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         print(f"  ✓ Sample-level pairplot saved to {output_path}")
         
         plt.close()
+
+
+def create_amos2022_newclass_pairplot(workspace_root, output_dir):
+    """
+    Create a dedicated pairplot for amos2022 data from new_class_shifts.
+    Colors samples by correct/incorrect predictions (green/red).
+    
+    Args:
+        workspace_root: path to workspace root
+        output_dir: directory to save plot
+    """
+    print("\n" + "="*80)
+    print("Creating dedicated AMOS2022 New Class Shift sample-level pairplot")
+    print("="*80)
+    
+    # Rename methods for display
+    name_mapping = {
+        'MSR_calibrated': 'MSR-S',
+        'KNN_Raw': 'KNN',
+        'MCDropout': 'MCD',
+        'Mean_Aggregation': 'Mean Agg'
+    }
+    
+    # Define ensemble methods to exclude
+    ensemble_methods = ['DE', 'Mean_Aggregation_Ensemble']
+    
+    uq_shift_dir = workspace_root / 'uq_benchmark_results' / 'new_class_shifts'
+    
+    if not uq_shift_dir.exists():
+        print(f"  Directory not found: {uq_shift_dir}")
+        return
+    
+    # Collect sample-level scores for amos2022 only
+    sample_scores = defaultdict(dict)
+    
+    # Find all NPZ files for amos2022
+    npz_files = list(uq_shift_dir.glob('all_metrics_amos2022*.npz'))
+    
+    print(f"Found {len(npz_files)} NPZ files for amos2022")
+    
+    for npz_file in npz_files:
+        # Parse filename to get model and config
+        filename = npz_file.name
+        if filename.startswith('all_metrics_'):
+            name = filename.replace('all_metrics_', '').replace('.json', '').replace('.npz', '')
+            
+            # Remove timestamp
+            import re
+            name = re.sub(r'_\d{8}_\d{6}$', '', name)
+            name = name.replace('_new_class_shift', '')
+            
+            parts = name.split('_')
+            
+            # Find model
+            if 'resnet18' in parts:
+                model_idx = parts.index('resnet18')
+                model = 'resnet18'
+            elif 'vit' in parts and 'b' in parts and '16' in parts:
+                model_idx = parts.index('vit')
+                model = 'vit_b_16'
+            else:
+                continue
+            
+            dataset = '_'.join(parts[:model_idx])
+            if dataset != 'amos2022':
+                continue
+            
+            config_parts = parts[model_idx+1:] if model == 'resnet18' else parts[model_idx+3:]
+            config = config_parts[0] if config_parts and config_parts[0] in ['DA', 'DO', 'DADO'] else 'standard'
+            
+            print(f"  Processing: {dataset} / {model} / {config}")
+            
+            # Load NPZ data
+            try:
+                npz_data = np.load(npz_file, allow_pickle=True)
+                
+                # Get cache file for y_true
+                cache_dir = uq_shift_dir.parent / 'cache'
+                cache_file = find_cache_file(cache_dir, dataset, model, config, 'new_class_shift')
+                
+                if not cache_file or not cache_file.exists():
+                    print(f"    Cache file not found")
+                    continue
+                
+                cache_data = load_cache_data(cache_file)
+                if cache_data is None or cache_data['per_fold_predictions'] is None:
+                    print(f"    Failed to load cache data")
+                    continue
+                
+                n_folds = len(cache_data['per_fold_predictions'])
+                n_samples = len(cache_data['y_true'])
+                y_true = cache_data['y_true']
+                
+                # For new_class_shift: use binary_gt for correctness labels
+                if cache_data['binary_gt'] is not None:
+                    binary_gt = cache_data['binary_gt']
+                else:
+                    binary_gt = None
+                
+                # Process each method in NPZ file
+                for method_name in npz_data.keys():
+                    # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
+                    if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
+                        continue
+                    
+                    # Remove _per_fold suffix for display name
+                    base_method_name = method_name.replace('_per_fold', '')
+                    
+                    if base_method_name in ['Mean_Aggregation_Ensemble', 'DE']:  # Skip ensemble
+                        continue
+                    
+                    display_name = name_mapping.get(base_method_name, base_method_name)
+                    if display_name in ensemble_methods:
+                        continue
+                    
+                    scores = npz_data[method_name]
+                    
+                    # Handle shape mismatch
+                    if scores.ndim == 2 and scores.shape[1] != n_samples:
+                        scores = scores[:, :n_samples]
+                    
+                    # Check shape
+                for method_name in npz_data.keys():
+                    # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
+                    if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
+                        continue
+                    
+                    # Remove _per_fold suffix for display name
+                    base_method_name = method_name.replace('_per_fold', '')
+                    
+                    if base_method_name in ['Mean_Aggregation_Ensemble', 'DE']:  # Skip ensemble
+                        continue
+                    
+                    display_name = name_mapping.get(base_method_name, base_method_name)
+                    if display_name in ensemble_methods:
+                        continue
+                    
+                    scores = npz_data[method_name]
+                    
+                    # Check shape
+                    if scores.ndim == 2:  # (n_folds, n_samples)
+                        for fold_idx in range(n_folds):
+                            fold_scores = scores[fold_idx]
+                            y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
+                            # Use minimum length to avoid index errors
+                            n_samples_safe = min(len(fold_scores), len(y_pred_fold), len(y_true))
+                            for sample_idx in range(n_samples_safe):
+                                key = (dataset, model, config, fold_idx, sample_idx)
+                                sample_scores[key][display_name] = fold_scores[sample_idx]
+                                # Add correctness label if not already present
+                                if 'correct' not in sample_scores[key]:
+                                    # For new_class_shift: use binary_gt (0=correct, 1=failure)
+                                    if binary_gt is not None:
+                                        sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
+                                    else:
+                                        sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
+                    elif scores.ndim == 1:  # (n_samples,) - method that doesn't use folds
+                        for fold_idx in range(n_folds):
+                            y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
+                            # Use minimum length to avoid index errors
+                            n_samples_safe = min(len(scores), len(y_pred_fold), len(y_true))
+                            for sample_idx in range(n_samples_safe):
+                                key = (dataset, model, config, fold_idx, sample_idx)
+                                sample_scores[key][display_name] = scores[sample_idx]
+                                # Add correctness label if not already present
+                                if 'correct' not in sample_scores[key]:
+                                    # For new_class_shift: use binary_gt (0=correct, 1=failure)
+                                    if binary_gt is not None:
+                                        sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
+                                    else:
+                                        sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
+            
+            except Exception as e:
+                print(f"    Warning: Failed to process {npz_file.name}: {e}")
+                continue
+    
+    if not sample_scores:
+        print(f"  No sample scores found for amos2022")
+        return
+    
+    # Convert to DataFrame
+    rows = []
+    for (dataset, model, config, fold, sample_idx), method_dict in sample_scores.items():
+        row = {'dataset': dataset, 'model': model, 'config': config, 'fold': fold, 'sample_idx': sample_idx}
+        row.update(method_dict)
+        rows.append(row)
+    
+    df = pd.DataFrame(rows)
+    
+    # Get method columns
+    method_cols = [col for col in df.columns 
+                  if col not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct']]
+    
+    # Only keep methods with sufficient data
+    method_cols = [col for col in method_cols if df[col].notna().sum() > 100]
+    
+    # Sort alphabetically, but put Mean Agg at the end
+    method_cols = sorted(method_cols)
+    if 'Mean Agg' in method_cols:
+        method_cols.remove('Mean Agg')
+        method_cols.append('Mean Agg')
+    
+    # Remove samples with missing values in any method
+    # Keep 'correct', 'config', 'dataset', 'model' columns for hue parameter and stratification
+    df_complete = df[method_cols + ['correct', 'config', 'dataset', 'model', 'fold']].dropna()
+    
+    # Z-score normalization per fold and per method to handle scale differences
+    for method in method_cols:
+        for fold in df_complete['fold'].unique():
+            mask = df_complete['fold'] == fold
+            scores = df_complete.loc[mask, method]
+            mean = scores.mean()
+            std = scores.std()
+            if std > 0:
+                df_complete.loc[mask, method] = (scores - mean) / std
+            else:
+                df_complete.loc[mask, method] = 0.0
+    
+    # Convert correct boolean to string labels for better legend
+    df_complete['Prediction'] = df_complete['correct'].map({True: 'Correct', False: 'Incorrect'})
+    
+    print(f"\n  Total samples: {len(df_complete)}")
+    print(f"  Methods: {len(method_cols)}")
+    
+    if len(method_cols) < 2 or len(df_complete) < 10:
+        print(f"  Skipping - insufficient data")
+        return
+    
+    # Subsample if too many points (for visualization performance)
+    if len(df_complete) > 5000:
+        # Get unique configurations (all are amos2022, so stratify by config)
+        configs = df_complete['config'].unique()
+        n_configs = len(configs)
+        samples_per_config = 5000 // n_configs
+        
+        # Target: 50/50 balance between correct and incorrect for clear visualization
+        target_incorrect_ratio = 0.5
+        
+        sampled_dfs = []
+        for config in configs:
+            df_config = df_complete[df_complete['config'] == config]
+            
+            # Count correct and incorrect for this config
+            n_correct = df_config['correct'].sum()
+            n_incorrect = (~df_config['correct']).sum()
+            
+            # If config has fewer samples than target, take all
+            if len(df_config) <= samples_per_config:
+                sampled_dfs.append(df_config)
+            else:
+                target_incorrect = int(samples_per_config * target_incorrect_ratio)
+                
+                # Take all incorrect if less than target, otherwise sample
+                if n_incorrect <= target_incorrect:
+                    df_incorrect = df_config[~df_config['correct']]
+                    n_correct_needed = samples_per_config - len(df_incorrect)
+                    df_correct_sample = df_config[df_config['correct']].sample(n=min(n_correct_needed, n_correct), random_state=42)
+                else:
+                    df_incorrect = df_config[~df_config['correct']].sample(n=target_incorrect, random_state=42)
+                    df_correct_sample = df_config[df_config['correct']].sample(n=samples_per_config-target_incorrect, random_state=42)
+                
+                sampled_dfs.append(pd.concat([df_correct_sample, df_incorrect]))
+        
+        df_complete = pd.concat(sampled_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
+    
+    # Create pairplot
+    sns.set_style("whitegrid")
+    
+    # Explicitly shuffle the dataframe to ensure random mixing of red/green points
+    df_complete = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
+    
+    # Define custom color palette (green for correct, red for incorrect)
+    palette = {'Correct': 'green', 'Incorrect': 'red'}
+    
+    g = sns.pairplot(
+        df_complete,
+        vars=method_cols,
+        hue='Prediction',
+        palette=palette,
+        diag_kind='kde',
+        plot_kws={'alpha': 0.2, 's': 20, 'edgecolor': 'none'},
+        diag_kws={'linewidth': 2},
+        corner=False
+    )
+
+    # Add title
+    g.fig.suptitle(f'AMOS2022 New Class Shift: Sample-Level Method Score Correlations\n({len(df_complete)} samples, Green=Correct, Red=Incorrect)', 
+                  fontsize=16, fontweight='bold', y=1.0)
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save figure
+    output_path = output_dir / 'sample_level_pairplot_amos2022_newclass.png'
+    g.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n  ✓ AMOS2022 new class shift pairplot saved to {output_path}")
+    
+    plt.close()
 
 
 def main():
@@ -1144,6 +1553,9 @@ def main():
     
     # Create sample-level pairplots
     create_sample_level_pairplots(workspace_root, output_dir)
+    
+    # Create dedicated amos2022 new class shift pairplot
+    create_amos2022_newclass_pairplot(workspace_root, output_dir)
     
     print("\n" + "=" * 80)
     print("✓ All plots generated successfully!")
