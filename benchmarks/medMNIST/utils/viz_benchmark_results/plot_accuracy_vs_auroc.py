@@ -935,6 +935,9 @@ def create_sample_level_pairplots(workspace_root, output_dir):
     Args:
         workspace_root: path to workspace root
         output_dir: directory to save plots
+        
+    Returns:
+        shift_dataframes: dict mapping shift names to their complete dataframes
     """
     # Rename methods for display
     name_mapping = {
@@ -946,6 +949,15 @@ def create_sample_level_pairplots(workspace_root, output_dir):
     
     # Define ensemble methods to exclude
     ensemble_methods = ['DE', 'Mean_Aggregation_Ensemble']
+    
+    # Dictionary to store complete dataframes for paired limit computation
+    # Keys: shift_dir_name, Values: df_complete
+    shift_dataframes = {}
+    
+    # Dictionary to store axis limits for paired shifts
+    # Keys: ('id_cs', method) or ('ps_ncs', method)
+    # Values: {'xlim': (min, max), 'ylim': (min, max)}
+    paired_axis_limits = {}
     
     # Process each shift type (excluding new_class_shifts - handled separately)
     shift_info = [
@@ -1190,6 +1202,9 @@ def create_sample_level_pairplots(workspace_root, output_dir):
             
             df_complete = pd.concat(sampled_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
         
+        # Store dataframe for paired limit computation
+        shift_dataframes[shift_dir_name] = df_complete.copy()
+        
         # Create pairplot
         sns.set_style("whitegrid")
         
@@ -1211,8 +1226,8 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         )
         
         # Add title
-        g.fig.suptitle(f'{shift_title}: Sample-Level Method Score Correlations\n({len(df_complete)} samples)', 
-                      fontsize=16, fontweight='bold', y=1.0)
+        # g.fig.suptitle(f'{shift_title}: Sample-Level Method Score Correlations\n({len(df_complete)} samples)', 
+        #               fontsize=16, fontweight='bold', y=1.0)
         
         # Adjust layout
         plt.tight_layout()
@@ -1223,9 +1238,279 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         print(f"  ✓ Sample-level pairplot saved to {output_path}")
         
         plt.close()
+    
+    # === STEP 2: Compute paired axis limits from both shifts ===
+    print("\n" + "="*80)
+    print("Computing paired axis limits for corner plots...")
+    print("="*80)
+    
+    paired_axis_limits = {}
+    
+    # Pair 1: ID + CS
+    if 'in_distribution' in shift_dataframes and 'corruption_shifts' in shift_dataframes:
+        df_id = shift_dataframes['in_distribution']
+        df_cs = shift_dataframes['corruption_shifts']
+        
+        # Get common methods
+        id_methods = [c for c in df_id.columns if c not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct', 'Prediction']]
+        cs_methods = [c for c in df_cs.columns if c not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct', 'Prediction']]
+        common_methods = list(set(id_methods) & set(cs_methods))
+        
+        for method in common_methods:
+            min_val = min(df_id[method].min(), df_cs[method].min())
+            max_val = max(df_id[method].max(), df_cs[method].max())
+            range_val = max_val - min_val
+            xlim = (min_val - 0.05 * range_val, max_val + 0.05 * range_val)
+            paired_axis_limits[('id_cs', method)] = {'xlim': xlim, 'ylim': xlim}
+            print(f"  ID+CS {method}: [{xlim[0]:.3f}, {xlim[1]:.3f}]")
+    
+    # Pair 2: PS + NCS (will be completed in amos2022 function)
+    if 'population_shifts' in shift_dataframes:
+        df_ps = shift_dataframes['population_shifts']
+        ps_methods = [c for c in df_ps.columns if c not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct', 'Prediction']]
+        
+        # Store for later pairing with amos2022
+        for method in ps_methods:
+            min_val = df_ps[method].min()
+            max_val = df_ps[method].max()
+            range_val = max_val - min_val
+            xlim = (min_val - 0.05 * range_val, max_val + 0.05 * range_val)
+            # Temporary limits, will be updated when amos2022 is processed
+            paired_axis_limits[('ps_ncs', method)] = {'xlim': xlim, 'ylim': xlim}
+    
+    # === STEP 3: Create corner plots with paired limits ===
+    print("\n" + "="*80)
+    print("Creating corner plots with paired limits...")
+    print("="*80)
+    
+    for shift_dir_name in shift_dataframes.keys():
+        if shift_dir_name not in ['in_distribution', 'corruption_shifts', 'population_shifts']:
+            continue
+            
+        df_complete = shift_dataframes[shift_dir_name]
+        method_cols = [c for c in df_complete.columns if c not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct', 'Prediction']]
+        
+        # Define custom color palette
+        palette = {'Correct': 'green', 'Incorrect': 'red'}
+        
+        # Create corner version - lower-left for ID/population, upper-right for CS/newclass
+        if shift_dir_name in ['in_distribution', 'population_shifts']:
+            # Lower-left triangle (standard corner=True)
+            print(f"  Creating LOWER-LEFT corner pairplot (same samples)...")
+            
+            # Use PairGrid for consistency with lower-right plots
+            df_plot = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
+
+            g_corner = sns.PairGrid(
+                df_plot,
+                vars=method_cols,
+                diag_sharey=False
+            )
+
+            # --- LOWER: scatter tout-en-un (mélangé)
+            def scatter_shuffled(x, y, **kwargs):
+                ax = plt.gca()
+                idx = x.index  # indices disponibles pour CETTE paire (en pratique = df_plot.index)
+                colors = df_plot.loc[idx, "Prediction"].map(palette).values
+
+                ax.scatter(
+                    x.values,
+                    y.values,
+                    c=colors,
+                    alpha=0.2,
+                    s=20,
+                    edgecolors="none",
+                    rasterized=True
+                )
+
+            g_corner.map_lower(scatter_shuffled)
+
+            # --- DIAG: 2 KDE (ou +) explicitement par classe
+            def diag_kde_by_class(x, **kwargs):
+                ax = plt.gca()
+                pred = df_plot.loc[x.index, "Prediction"]
+
+                levels = pred.dropna().unique()
+                # optionnel: ordre stable si bool ou 0/1
+                try:
+                    levels = np.sort(levels)
+                except Exception:
+                    pass
+
+                for lvl in levels:
+                    xs = x[pred == lvl]
+                    if xs.size < 2:
+                        continue
+                    sns.kdeplot(
+                        x=xs,
+                        ax=ax,
+                        fill=True,
+                        linewidth=2,
+                        color=palette.get(lvl, None),
+                        alpha=0.35,
+                        common_norm=False
+                    )
+
+            g_corner.map_diag(diag_kde_by_class)
+
+            
+            # Remove unused upper triangle axes (they might already be None with corner=True)
+            for i in range(len(method_cols)):
+                for j in range(len(method_cols)):
+                    if j > i and g_corner.axes[i, j] is not None:  # Upper triangle
+                        g_corner.axes[i, j].set_visible(False)
+            
+            # Apply paired axis limits
+            pair_key = 'id_cs' if shift_dir_name == 'in_distribution' else 'ps_ncs'
+            print(f"  Applying paired limits for {pair_key}...")
+            
+            for i, method_i in enumerate(method_cols):
+                for j, method_j in enumerate(method_cols):
+                    if j <= i:  # Lower triangle and diagonal
+                        ax = g_corner.axes[i, j]
+                        if i == j:  # Diagonal
+                            xlim = paired_axis_limits.get((pair_key, method_i), {}).get('xlim')
+                            if xlim:
+                                ax.set_xlim(xlim)
+                        else:  # Off-diagonal
+                            xlim = paired_axis_limits.get((pair_key, method_j), {}).get('xlim')
+                            ylim = paired_axis_limits.get((pair_key, method_i), {}).get('ylim')
+                            if xlim:
+                                ax.set_xlim(xlim)
+                            if ylim:
+                                ax.set_ylim(ylim)
+            
+            plt.tight_layout()
+            output_path_corner = output_dir / f'sample_level_pairplot_{shift_dir_name}_corner_lowerleft.png'
+            g_corner.savefig(output_path_corner, dpi=300, bbox_inches='tight')
+            print(f"  ✓ Lower-left corner pairplot saved to {output_path_corner}")
+            plt.close()
+            
+        elif shift_dir_name in ['corruption_shifts', 'new_class_shifts']:
+            # Upper-right triangle (custom PairGrid)
+            print(f"  Creating UPPER-RIGHT corner pairplot (same samples)...")
+            
+            # Shuffle again to ensure proper z-order mixing
+            # Use PairGrid for consistency with lower-right plots
+            df_plot = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
+
+            g_corner = sns.PairGrid(
+                df_plot,
+                vars=method_cols,
+                diag_sharey=False
+            )
+
+            # --- UPPER: scatter tout-en-un (mélangé)
+            def scatter_shuffled(x, y, **kwargs):
+                ax = plt.gca()
+                idx = x.index  # indices disponibles pour CETTE paire (en pratique = df_plot.index)
+                colors = df_plot.loc[idx, "Prediction"].map(palette).values
+
+                ax.scatter(
+                    x.values,
+                    y.values,
+                    c=colors,
+                    alpha=0.2,
+                    s=20,
+                    edgecolors="none",
+                    rasterized=True
+                )
+
+            g_corner.map_upper(scatter_shuffled)
+
+            # --- DIAG: 2 KDE (ou +) explicitement par classe
+            def diag_kde_by_class(x, **kwargs):
+                ax = plt.gca()
+                pred = df_plot.loc[x.index, "Prediction"]
+
+                levels = pred.dropna().unique()
+                # optionnel: ordre stable si bool ou 0/1
+                try:
+                    levels = np.sort(levels)
+                except Exception:
+                    pass
+
+                for lvl in levels:
+                    xs = x[pred == lvl]
+                    if xs.size < 2:
+                        continue
+                    sns.kdeplot(
+                        x=xs,
+                        ax=ax,
+                        fill=True,
+                        linewidth=2,
+                        color=palette.get(lvl, None),
+                        alpha=0.35,
+                        common_norm=False
+                    )
+
+            g_corner.map_diag(diag_kde_by_class)
+            
+            # Remove unused lower triangle axes
+            for i in range(len(method_cols)):
+                for j in range(len(method_cols)):
+                    if j < i and g_corner.axes[i, j] is not None:  # Lower triangle
+                        g_corner.axes[i, j].set_visible(False)
+            
+            # Apply matching axis limits from paired shift
+            pair_key = 'id_cs' if shift_dir_name == 'corruption_shifts' else 'ps_ncs'
+            for i, method_i in enumerate(method_cols):
+                for j, method_j in enumerate(method_cols):
+                    if j > i:  # Upper triangle only
+                        ax = g_corner.axes[i, j]
+                        # Get stored limits
+                        xlim_i = paired_axis_limits.get((pair_key, method_j), {}).get('xlim')
+                        ylim_i = paired_axis_limits.get((pair_key, method_i), {}).get('ylim')
+                        if xlim_i:
+                            ax.set_xlim(xlim_i)
+                        if ylim_i:
+                            ax.set_ylim(ylim_i)
+            
+            # Apply limits to diagonal plots
+            for i, method in enumerate(method_cols):
+                ax_diag = g_corner.axes[i, i]
+                xlim = paired_axis_limits.get((pair_key, method), {}).get('xlim')
+                if xlim:
+                    ax_diag.set_xlim(xlim)
+            
+            # Add x-ticks on top for first row (all columns)
+            for j in range(len(method_cols)):
+                if g_corner.axes[0, j] is not None:
+                    ax = g_corner.axes[0, j]
+                    ax.xaxis.tick_top()
+                    ax.xaxis.set_label_position('top')
+                    ax.tick_params(axis='x', which='both', top=True, labeltop=True)
+            
+            # Add y-ticks on right for last column (all rows)
+            for i in range(len(method_cols)):
+                if g_corner.axes[i, -1] is not None:
+                    ax = g_corner.axes[i, -1]
+                    ax.yaxis.tick_right()
+                    ax.yaxis.set_label_position('right')
+                    ax.tick_params(axis='y', which='both', left=False, labelleft=False, right=True, labelright=True)
+            
+            # Add method labels on top of columns and right side of rows
+            for i, method in enumerate(method_cols):
+                # Top labels for each column
+                ax_top = g_corner.axes[0, i]
+                ax_top.set_title(method, fontsize=10)
+                
+                # Right labels for each row using the rightmost plot in that row
+                ax_right = g_corner.axes[i, -1]  # Rightmost column
+                ax_twin = ax_right.twinx()  # Create secondary y-axis on the right
+                ax_twin.set_ylabel(method, fontsize=10, rotation=270, labelpad=15)
+                ax_twin.set_yticks([])  # Hide ticks on the twin axis
+            
+            plt.tight_layout()
+            output_path_corner = output_dir / f'sample_level_pairplot_{shift_dir_name}_corner_upperright.png'
+            g_corner.savefig(output_path_corner, dpi=300, bbox_inches='tight')
+            print(f"  ✓ Upper-right corner pairplot saved to {output_path_corner}")
+            plt.close()
+
+    return shift_dataframes
 
 
-def create_amos2022_newclass_pairplot(workspace_root, output_dir):
+def create_amos2022_newclass_pairplot(workspace_root, output_dir, shift_dataframes=None):
     """
     Create a dedicated pairplot for amos2022 data from new_class_shifts.
     Colors samples by correct/incorrect predictions (green/red).
@@ -1233,6 +1518,7 @@ def create_amos2022_newclass_pairplot(workspace_root, output_dir):
     Args:
         workspace_root: path to workspace root
         output_dir: directory to save plot
+        shift_dataframes: dict of shift dataframes for paired limit computation
     """
     print("\n" + "="*80)
     print("Creating dedicated AMOS2022 New Class Shift sample-level pairplot")
@@ -1509,8 +1795,8 @@ def create_amos2022_newclass_pairplot(workspace_root, output_dir):
     )
 
     # Add title
-    g.fig.suptitle(f'AMOS2022 New Class Shift: Sample-Level Method Score Correlations\n({len(df_complete)} samples, Green=Correct, Red=Incorrect)', 
-                  fontsize=16, fontweight='bold', y=1.0)
+    # g.fig.suptitle(f'AMOS2022 New Class Shift: Sample-Level Method Score Correlations\n({len(df_complete)} samples, Green=Correct, Red=Incorrect)', 
+    #               fontsize=16, fontweight='bold', y=1.0)
     
     # Adjust layout
     plt.tight_layout()
@@ -1519,6 +1805,106 @@ def create_amos2022_newclass_pairplot(workspace_root, output_dir):
     output_path = output_dir / 'sample_level_pairplot_amos2022_newclass.png'
     g.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n  ✓ AMOS2022 new class shift pairplot saved to {output_path}")
+    
+    plt.close()
+    
+    # Create UPPER-RIGHT corner version for new_class_shift (to pair with population_shifts lower-left)
+    print(f"  Creating UPPER-RIGHT corner pairplot (same samples)...")
+    
+    # Shuffle again to ensure proper z-order mixing
+    # Use PairGrid for consistency with lower-right plots
+    df_plot = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    g_corner = sns.PairGrid(
+        df_plot,
+        vars=method_cols,
+        diag_sharey=False
+    )
+
+    # --- LOWER: scatter tout-en-un (mélangé)
+    def scatter_shuffled(x, y, **kwargs):
+        ax = plt.gca()
+        idx = x.index  # indices disponibles pour CETTE paire (en pratique = df_plot.index)
+        colors = df_plot.loc[idx, "Prediction"].map(palette).values
+
+        ax.scatter(
+            x.values,
+            y.values,
+            c=colors,
+            alpha=0.2,
+            s=20,
+            edgecolors="none",
+            rasterized=True
+        )
+
+    g_corner.map_upper(scatter_shuffled)
+
+    # --- DIAG: 2 KDE (ou +) explicitement par classe
+    def diag_kde_by_class(x, **kwargs):
+        ax = plt.gca()
+        pred = df_plot.loc[x.index, "Prediction"]
+
+        levels = pred.dropna().unique()
+        # optionnel: ordre stable si bool ou 0/1
+        try:
+            levels = np.sort(levels)
+        except Exception:
+            pass
+
+        for lvl in levels:
+            xs = x[pred == lvl]
+            if xs.size < 2:
+                continue
+            sns.kdeplot(
+                x=xs,
+                ax=ax,
+                fill=True,
+                linewidth=2,
+                color=palette.get(lvl, None),
+                alpha=0.35,
+                common_norm=False
+            )
+
+    g_corner.map_diag(diag_kde_by_class)
+    
+    # Remove unused lower triangle axes
+    for i in range(len(method_cols)):
+        for j in range(len(method_cols)):
+            if j < i and g_corner.axes[i, j] is not None:  # Lower triangle
+                g_corner.axes[i, j].set_visible(False)
+    
+    # Add x-ticks on top for first row (all columns)
+    for j in range(len(method_cols)):
+        if g_corner.axes[0, j] is not None:
+            ax = g_corner.axes[0, j]
+            ax.xaxis.tick_top()
+            ax.xaxis.set_label_position('top')
+            ax.tick_params(axis='x', which='both', top=True, labeltop=True)
+    
+    # Add y-ticks on right for last column (all rows)
+    for i in range(len(method_cols)):
+        if g_corner.axes[i, -1] is not None:
+            ax = g_corner.axes[i, -1]
+            ax.yaxis.tick_right()
+            ax.yaxis.set_label_position('right')
+            ax.tick_params(axis='y', which='both', left=False, labelleft=False, right=True, labelright=True)
+    
+    # Add method labels on top of columns and right side of rows
+    for i, method in enumerate(method_cols):
+        # Top labels for each column
+        ax_top = g_corner.axes[0, i]
+        ax_top.set_title(method, fontsize=10)
+        
+        # Right labels for each row using the rightmost plot in that row
+        ax_right = g_corner.axes[i, -1]  # Rightmost column
+        ax_twin = ax_right.twinx()  # Create secondary y-axis on the right
+        ax_twin.set_ylabel(method, fontsize=10, rotation=270, labelpad=15)
+        ax_twin.set_yticks([])  # Hide ticks on the twin axis
+    
+    plt.tight_layout()
+    output_path_corner = output_dir / 'sample_level_pairplot_amos2022_newclass_corner_upperright.png'
+    g_corner.savefig(output_path_corner, dpi=300, bbox_inches='tight')
+    print(f"  ✓ Upper-right corner pairplot saved to {output_path_corner}")
     
     plt.close()
 
@@ -1552,10 +1938,10 @@ def main():
     create_method_correlation_pairplots(data, output_dir)
     
     # Create sample-level pairplots
-    create_sample_level_pairplots(workspace_root, output_dir)
+    shift_dataframes = create_sample_level_pairplots(workspace_root, output_dir)
     
     # Create dedicated amos2022 new class shift pairplot
-    create_amos2022_newclass_pairplot(workspace_root, output_dir)
+    create_amos2022_newclass_pairplot(workspace_root, output_dir, shift_dataframes)
     
     print("\n" + "=" * 80)
     print("✓ All plots generated successfully!")
