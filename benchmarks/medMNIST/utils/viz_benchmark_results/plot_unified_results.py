@@ -967,7 +967,7 @@ def create_combined_radar_histogram_figure(results_auroc, results_augrc, all_sur
                     transform=ax2.get_yaxis_transform())
         
         # Add subtitle for histogram (centered above middle plot only)
-        ax.set_title('Normalized Radar Surface', fontsize=12, fontweight='bold', pad=8)
+        ax.set_title('Radar Surface Coverage', fontsize=12, fontweight='bold', pad=8)
     
     # Add legend at the bottom
     if all_handles and all_labels:
@@ -1353,7 +1353,7 @@ def main(aggregation='mean'):
     
     # Define all results directories
     results_dirs = {
-        'id': results_dir / 'id',
+        'id': results_dir / 'in_distribution',
         'corruption': results_dir / 'corruption_shifts',
         'population': results_dir / 'population_shifts',
         'new_class': results_dir / 'new_class_shifts'
