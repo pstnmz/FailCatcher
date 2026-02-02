@@ -48,6 +48,7 @@ DATASETS_ID = [
     'pneumoniamnist', 
     'dermamnist-e-id', 
     'octmnist',  
+    'pathmnist',
     'bloodmnist', 
     'tissuemnist', 
     'breastmnist'
@@ -56,12 +57,13 @@ DATASETS_ID = [
 DATASETS_EXTERNAL = [
     'amos2022',  # OrganaMNIST → AMOS-2022 external test
     'dermamnist-e-external',  # DermaMNIST-E external centers,
-    'pathmnist',  # PathMNIST external test set
+    
 ]
 
 # Datasets supporting new class shift evaluation
 DATASETS_NEW_CLASS_SHIFT = [
     'amos2022',  # Only AMOS has new/unseen classes (9 unmapped organs)
+    'midog'  # MIDOG++ external test set
 ]
 
 # Model backbones
@@ -103,6 +105,7 @@ DATASET_CONFIG = {
     'dermamnist-e-id': {'batch_size': 4000, 'gps_subsample': 5000},
     'dermamnist-e-external': {'batch_size': 3500, 'gps_subsample': 5000},
     'amos2022': {'batch_size': 3500, 'gps_subsample': 5000},
+    'midog': {'batch_size': 128, 'gps_subsample': 5000},
 }
 
 
@@ -155,7 +158,7 @@ def generate_command(
         gpu: GPU device ID
         per_fold_eval: Use per-fold evaluation
         output_dir: Output directory for results
-        new_class_shift: Enable new class shift evaluation (only for amos2022)
+        new_class_shift: Enable new class shift evaluation (only for amos2022 and midog)
         **kwargs: Additional arguments (batch_size, gps_subsample, etc.)
     
     Returns:
@@ -205,7 +208,7 @@ def generate_command(
         if kwargs.get('corrupt_calib', False):
             cmd_parts.append("--corrupt-calib")
     
-    # New class shift evaluation (only for amos2022)
+    # New class shift evaluation (only for amos2022 and midog)
     if new_class_shift and dataset in DATASETS_NEW_CLASS_SHIFT:
         cmd_parts.append("--new-class-shift")
     
@@ -438,7 +441,7 @@ def main():
     # New class shift evaluation
     parser.add_argument(
         '--new-class-shift', action='store_true', default=False,
-        help='Enable new class shift evaluation (only for amos2022: evaluates on unseen organ classes)'
+        help='Enable new class shift evaluation (only for amos2022 and midog: evaluates on unseen organ classes)'
     )
     
     # Control flags

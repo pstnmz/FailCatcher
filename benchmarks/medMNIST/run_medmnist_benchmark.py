@@ -916,8 +916,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--flag', type=str, required=True,
         choices=['breastmnist', 'organamnist', 'pneumoniamnist', 'dermamnist', 'dermamnist-e',
-                'dermamnist-e-id', 'dermamnist-e-external',
-                'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'amos2022'],
+                'dermamnist-e-id', 'dermamnist-e-external', 'octmnist', 'pathmnist', 'bloodmnist', 'tissuemnist', 'amos2022', 'midog'],
         help='MedMNIST dataset to benchmark. For dermamnist-e, use -id for ID centers or -external for OOD center'
     )
     
@@ -986,7 +985,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--new-class-shift', action='store_true', default=False,
-        help='Evaluate new class shift (AMOS only): Create artificial test set with new classes (failures) + unanimous correct predictions (known classes)'
+        help='Evaluate new class shift (AMOS and MIDOG only): Create artificial test sets with new classes (failures) + unanimous correct predictions (known classes)'
     )
     
     args = parser.parse_args()

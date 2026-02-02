@@ -57,6 +57,45 @@ class AMOSDataset(torch.utils.data.Dataset):
             img_tensor = img_tensor.repeat(3, 1, 1)
         
         return img_tensor, torch.tensor(label, dtype=torch.long)
+    
+class MIDOGPatchDataset(Dataset):
+    """Dataset wrapper for MIDOG++ patches from .npz file."""
+    
+    def __init__(self, npz_path, transform=None):
+        """
+        Args:
+            npz_path: Path to .npz file containing images, labels, ids
+            transform: Optional transform to apply to images
+        """
+        data = np.load(npz_path, allow_pickle=True)
+        
+        self.images = data['images']  # (N, 224, 224, 3) uint8
+        self.labels = data['labels']  # (N,) int32
+        self.ids = data['ids']        # (N,) object (strings)
+        self.tumor_types = list(data['tumor_types'])  # List of tumor type names
+        
+        self.transform = transform
+        
+        print(f"Loaded MIDOG++ dataset:")
+        print(f"  Images: {self.images.shape}")
+        print(f"  Labels: {self.labels.shape}")
+        print(f"  Tumor types: {self.tumor_types}")
+        
+    def __len__(self):
+        return len(self.images)
+    
+    def __getitem__(self, idx):
+        image = self.images[idx]  # (224, 224, 3) uint8
+        label = self.labels[idx]
+        
+        if self.transform:
+            # Transform expects PIL Image or needs ToTensor
+            image = self.transform(image)
+        else:
+            # Default: convert to tensor and normalize to [0, 1]
+            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        
+        return image, label
 
 
 def get_transforms(color, image_size=224):
