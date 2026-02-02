@@ -105,7 +105,13 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         test_subset = 'external'
     
     # AMOS uses organamnist models and calibration → use organamnist GPS cache
-    gps_cache_flag = 'organamnist' if flag in ['amos2022', 'amos_external', 'amos22'] else base_flag
+    # MIDOG uses pathmnist models and calibration → use pathmnist GPS cache
+    if flag in ['amos2022', 'amos_external', 'amos22']:
+        gps_cache_flag = 'organamnist'
+    elif flag == 'midog':
+        gps_cache_flag = 'pathmnist'
+    else:
+        gps_cache_flag = base_flag
     
     color = base_flag in ['dermamnist', 'dermamnist-e', 'pathmnist', 'bloodmnist']
     calib_method = 'platt' if base_flag in ['breastmnist', 'pneumoniamnist'] else 'temperature'
@@ -120,7 +126,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     # Transforms
     transform, transform_tta = dataset_utils.get_transforms(color, image_size)
     
-    if base_flag != 'amos2022':
+    if base_flag not in ['amos2022', 'midog']:
         # Load datasets and models
         models = tr.load_models(base_flag, device=device, size=image_size, 
                                model_backbone=model_backbone, setup=setup)
@@ -169,7 +175,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                     calib_dataset, batch_size=batch_size, shuffle=False, 
                     num_workers=4, pin_memory=True
                 )
-    else:
+    elif base_flag == 'amos2022':
         # Load datasets and models of organamnist and amos2022 as test set
         models = tr.load_models('organamnist', device=device, size=image_size,
                                model_backbone=model_backbone, setup=setup)
@@ -210,7 +216,32 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             test_loader = torch.utils.data.DataLoader(
                 test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
             )
-    
+    elif base_flag == 'midog':
+        # Load PathMNIST models and calibration data, use MIDOG as OOD test set
+        models = tr.load_models('pathmnist', device=device, size=image_size, 
+                               model_backbone=model_backbone, setup=setup)
+        
+        # PathMNIST is a color dataset - need color transforms
+        pathmnist_transform, pathmnist_transform_tta = dataset_utils.get_transforms(True, image_size)
+        
+        [study_dataset, calib_dataset, pathmnist_test_dataset], \
+        [_, calib_loader, _], info = \
+            tr.load_datasets('pathmnist', True, image_size, pathmnist_transform, batch_size)  # color=True for PathMNIST
+        
+        # Load calibration dataset with TTA transform (for GPS augmentation caching)
+        [_, calib_dataset_tta, _], \
+        [_, _, _], _ = \
+            tr.load_datasets('pathmnist', True, image_size, pathmnist_transform_tta, batch_size)
+        
+        # Load MIDOG as OOD test set (new class shift paradigm)
+        if new_class_shift:
+            test_dataset, test_loader, test_dataset_tta = dataset_utils.load_midog_for_new_class_shift(
+                pathmnist_transform, pathmnist_transform_tta, models, device, 
+                pathmnist_test_dataset,
+                batch_size, workspace_root=Path(__file__).resolve().parent.parent.parent
+            )
+        else:
+            raise ValueError("MIDOG dataset only supports new_class_shift mode. Use --new-class-shift flag.")
     print(f"  Models: {len(models)} folds")
     # For organamnist: study=train (medMNIST), calib=val (medMNIST)
     # For others: study=80% of (train+val), calib=20% of (train+val)

@@ -353,6 +353,203 @@ def load_amos_for_new_class_shift(transform, transform_tta, models, device, batc
     return test_dataset, test_loader, test_dataset_tta
 
 
+def load_midog_for_new_class_shift(transform, transform_tta, models, device, 
+                                    pathmnist_test_dataset,
+                                    batch_size=256, workspace_root=None):
+    """
+    Load MIDOG++ canine patches dataset for new class shift evaluation.
+    Creates artificial test set with:
+    - New domain (MIDOG++ canine tumors): All patches (these are failures by definition - out-of-distribution)
+    - Known domain (PathMNIST): Only samples correctly predicted by ALL 5 folds (unanimous agreement)
+    
+    This paradigm tests UQ methods' ability to detect out-of-distribution samples (domain shift)
+    while avoiding confounding effects from samples that are simply hard to classify.
+    
+    Args:
+        transform: Transform for normalized data
+        transform_tta: Transform for unnormalized data (TTA)
+        models: List of 5 trained PathMNIST models (CV folds)
+        device: torch device
+        pathmnist_test_dataset: PathMNIST test dataset (pre-loaded)
+        batch_size: Batch size for DataLoader
+        workspace_root: Path to workspace root (optional, auto-detected if None)
+    
+    Returns:
+        tuple: (test_dataset, test_loader, test_dataset_tta)
+            All use artificial labels: 0 = correctly predicted PathMNIST, 1 = MIDOG (failure/OOD)
+    """
+    from pathlib import Path as PathLib
+    
+    if workspace_root is None:
+        workspace_root = PathLib(__file__).resolve().parent.parent.parent.parent
+    
+    print("  Loading MIDOG++ for new class shift evaluation...")
+    
+    # Load MIDOG++ canine patches
+    midog_path = workspace_root / 'benchmarks' / 'medMNIST' / 'Data' / 'MIDOG++' / 'midog_canine_patches.npz'
+    
+    if not midog_path.exists():
+        raise FileNotFoundError(
+            f"\n❌ MIDOG++ patches file not found at {midog_path}\n"
+            f"   Please run create_midog_patch_dataset.py first to generate the patches."
+        )
+    
+    try:
+        midog_data = np.load(str(midog_path), allow_pickle=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"\n❌ Failed to load MIDOG++ patches from {midog_path}\n"
+            f"   Error: {e}"
+        ) from e
+    
+    midog_images = midog_data['images']  # (N_midog, 224, 224, 3) uint8 RGB
+    midog_labels = midog_data['labels']  # (N_midog,) - original tumor type labels
+    
+    print(f"  MIDOG++ patches: {len(midog_images)} samples (canine tumors - OOD for PathMNIST)")
+    
+    # Use pre-loaded PathMNIST test set to find unanimous correct predictions
+    print("  Using PathMNIST test set for in-distribution samples...")
+    print(f"  PathMNIST test: {len(pathmnist_test_dataset)} samples")
+    
+    # Create loader for PathMNIST test set
+    pathmnist_loader = DataLoader(pathmnist_test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    
+    # Evaluate models on PathMNIST test set to find unanimous correct predictions
+    print("  Evaluating PathMNIST models to find unanimous correct predictions...")
+    
+    # Get ground truth labels from test set
+    pathmnist_labels = []
+    for idx in range(len(pathmnist_test_dataset)):
+        _, label = pathmnist_test_dataset[idx]
+        # Handle labels that might be arrays or scalars
+        if isinstance(label, np.ndarray):
+            label = label.flatten()[0] if label.size > 0 else label
+        pathmnist_labels.append(label)
+    pathmnist_labels = np.array(pathmnist_labels).flatten()
+    
+    # Get predictions from all 5 folds
+    all_fold_predictions = []  # [K, N_pathmnist]
+    for fold_idx, model in enumerate(models):
+        model.eval()
+        fold_preds = []
+        with torch.no_grad():
+            for batch_data in pathmnist_loader:
+                # Handle different batch formats
+                if isinstance(batch_data, dict):
+                    images = batch_data["image"].to(device)
+                elif isinstance(batch_data, (tuple, list)):
+                    images = batch_data[0].to(device)
+                else:
+                    images = batch_data.to(device)
+                
+                outputs = model(images)
+                preds = torch.argmax(outputs, dim=1).cpu().numpy()
+                fold_preds.append(preds)
+        
+        all_fold_predictions.append(np.concatenate(fold_preds))
+        fold_acc = np.mean(all_fold_predictions[-1] == pathmnist_labels)
+        print(f"    Fold {fold_idx}: {fold_acc:.4f} accuracy on PathMNIST")
+        
+        # Debug: Check first few predictions vs labels
+        if fold_idx == 0:
+            print(f"    First 20 predictions: {all_fold_predictions[-1][:20]}")
+            print(f"    First 20 labels:      {pathmnist_labels[:20]}")
+            print(f"    Label distribution - predictions: {np.bincount(all_fold_predictions[-1], minlength=9)}")
+            print(f"    Label distribution - ground truth: {np.bincount(pathmnist_labels, minlength=9)}")
+    
+    all_fold_predictions = np.stack(all_fold_predictions, axis=0)  # [K, N_pathmnist]
+    
+    # Find unanimous correct predictions (all 5 folds agree and are correct)
+    unanimous_correct_mask = np.all(all_fold_predictions == pathmnist_labels[None, :], axis=0)
+    unanimous_correct_idx = np.where(unanimous_correct_mask)[0]
+    
+    print(f"  Unanimous correct: {len(unanimous_correct_idx)}/{len(pathmnist_test_dataset)} "
+          f"({100*len(unanimous_correct_idx)/len(pathmnist_test_dataset):.1f}%)")
+    
+    # Extract unanimous correct PathMNIST samples
+    pathmnist_correct_images = []
+    pathmnist_correct_labels = []
+    for idx in unanimous_correct_idx:
+        img, label = pathmnist_test_dataset[idx]
+        # Convert tensor back to numpy for consistency with MIDOG format
+        if isinstance(img, torch.Tensor):
+            # Denormalize from [-1, 1] to [0, 1] then to [0, 255]
+            img_np = ((img * 0.5 + 0.5) * 255).clamp(0, 255).byte().numpy()
+            img_np = img_np.transpose(1, 2, 0)  # CHW -> HWC
+        else:
+            img_np = np.array(img)
+        
+        # Handle label that might be an array
+        if isinstance(label, np.ndarray):
+            label = label.flatten()[0] if label.size > 0 else label
+        
+        pathmnist_correct_images.append(img_np)
+        pathmnist_correct_labels.append(label)
+    
+    pathmnist_correct_images = np.array(pathmnist_correct_images)  # (N_correct, 224, 224, 3)
+    pathmnist_correct_labels = np.array(pathmnist_correct_labels).flatten()  # Ensure 1D array
+    
+    # Create artificial test set
+    # Success samples: unanimous correct predictions from PathMNIST (in-distribution)
+    success_images = pathmnist_correct_images
+    success_original_labels = pathmnist_correct_labels  # Keep original PathMNIST labels
+    
+    # Failure samples: all MIDOG patches (out-of-distribution)
+    failure_images = midog_images
+    failure_original_labels = np.full(len(failure_images), -1, dtype=np.int64)  # -1 = OOD (no valid PathMNIST label)
+    
+    # Combine
+    artificial_images = np.concatenate([success_images, failure_images], axis=0)
+    original_labels = np.concatenate([success_original_labels, failure_original_labels], axis=0)
+    
+    # Binary ground truth for failure detection: 0 = success (PathMNIST), 1 = failure (MIDOG/OOD)
+    binary_gt = np.concatenate([
+        np.zeros(len(success_images), dtype=np.int64),  # PathMNIST = not failures
+        np.ones(len(failure_images), dtype=np.int64)    # MIDOG = failures (OOD)
+    ], axis=0)
+    
+    print(f"  Artificial test set: {len(success_images)} success (PathMNIST) + {len(failure_images)} failures (MIDOG) "
+          f"= {len(artificial_images)} total")
+    print(f"  Failure rate: {100*len(failure_images)/len(artificial_images):.1f}%")
+    
+    # Create custom dataset class for RGB images
+    class RGBImageDataset(Dataset):
+        """Dataset for RGB images stored as numpy arrays."""
+        def __init__(self, images, labels, transform=None):
+            self.images = images  # (N, H, W, 3) uint8
+            self.labels = labels
+            self.transform = transform
+        
+        def __len__(self):
+            return len(self.images)
+        
+        def __getitem__(self, idx):
+            from PIL import Image as PILImage
+            img = self.images[idx]  # (224, 224, 3) uint8
+            label = self.labels[idx]
+            
+            # Convert to PIL for transforms
+            img_pil = PILImage.fromarray(img.astype(np.uint8), mode='RGB')
+            
+            if self.transform:
+                img_tensor = self.transform(img_pil)
+            else:
+                img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+            
+            return img_tensor, label
+    
+    # Create datasets with original labels for model evaluation, binary_gt stored as attribute
+    test_dataset = RGBImageDataset(artificial_images, original_labels, transform=transform)
+    test_dataset.binary_gt = binary_gt  # For failure detection metrics
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+    )
+    test_dataset_tta = RGBImageDataset(artificial_images, original_labels, transform=transform_tta)
+    test_dataset_tta.binary_gt = binary_gt
+    
+    return test_dataset, test_loader, test_dataset_tta
+
+
 def subsample_dataset_failure_aware(dataset, models, device, max_samples=None, 
                                      min_failure_ratio=0.3, seed=42, batch_size=256,
                                      eval_dataset=None):
