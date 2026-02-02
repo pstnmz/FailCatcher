@@ -415,7 +415,7 @@ def main():
     """Run comprehensive evaluation with corruptions on all datasets and setups."""
     
     # Configuration
-    datasets = ['dermamnist-e-id'] #[
+    datasets = ['pathmnist'] #[
         #'breastmnist', 'organamnist', 'pneumoniamnist', 
         #'bloodmnist', 'tissuemnist', 'octmnist', 'pathmnist',
         #'dermamnist-e-id'

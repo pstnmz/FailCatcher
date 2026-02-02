@@ -840,7 +840,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         uncertainties, metrics = detector.run_mcdropout(
             test_dataset, y_true,
             batch_size=batch_size,
-            num_samples=5,
+            num_samples=30,
             per_fold_evaluation=per_fold_eval
         )
         results['MCDropout'] = metrics

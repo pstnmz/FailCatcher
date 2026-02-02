@@ -282,15 +282,15 @@ def main():
     
     # Configuration
     datasets = [
-        #'dermamnist-e-id',
-        #'dermamnist-e-ood',
-        #'organamnist',
-        #'breastmnist',
-        #'pneumoniamnist',
-        #'bloodmnist',
-        #'tissuemnist',
-        #'octmnist',
-        #'pathmnist',
+        'dermamnist-e-id',
+        'dermamnist-e-ood',
+        'organamnist',
+        'breastmnist',
+        'pneumoniamnist',
+        'bloodmnist',
+        'tissuemnist',
+        'octmnist',
+        'pathmnist',
         'amos22'
     ]
     

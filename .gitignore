@@ -14,3 +14,4 @@ __pycache__/
 uq_benchmark_results/
 benchmarks/medMNIST/Data/
 umap_projections/
+**/CAMELYON17

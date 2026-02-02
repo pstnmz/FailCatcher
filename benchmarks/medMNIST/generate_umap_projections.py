@@ -328,7 +328,7 @@ def create_umap_plot(embeddings_dict, labels_dict, dataset_name, output_path, cl
 
 
 def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3, 
-                              batch_size=512, image_size=224):
+                              batch_size=512, image_size=224, fit_on_all=False):
     """
     Generate UMAP projections for a single dataset using raw images.
     
@@ -339,9 +339,12 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
         corruption_severity: Severity for corruption shift (1-5)
         batch_size: Batch size for feature extraction
         image_size: Image size
+        fit_on_all: If True, fit PCA+UMAP on all data at once (experimental)
+                   If False, fit on train and project test data (default)
     """
     print(f"\n{'='*80}")
     print(f"Processing: {flag}")
+    print(f"  Mode: {'FIT ON ALL DATA' if fit_on_all else 'FIT ON TRAIN, PROJECT TEST'}")
     print(f"{'='*80}")
     
     config = DATASET_CONFIGS[flag]
@@ -374,7 +377,7 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
     print(f"  Classes: {len(info['label'])}")
     
     # ========================================================================
-    # EXTRACT TRAIN FEATURES & FIT UMAP
+    # EXTRACT TRAIN FEATURES
     # ========================================================================
     print("\n🔬 Extracting training image features (raw images)...")
     train_features, train_labels = extract_image_features(train_loader, device)
@@ -383,19 +386,12 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
     print(f"  Train statistics: mean={train_features.mean():.4f}, std={train_features.std():.4f}")
     print(f"  Train labels distribution: {np.bincount(train_labels.astype(int))}")
     
-    # Fit UMAP on training features (no scaling to preserve corruption signal, PCA to reduce dims)
-    umap_model, scaler, pca, train_embedding = fit_umap_on_train(
-        train_features, n_neighbors=15, min_dist=0.1, random_state=42, 
-        use_scaler=False, pca_variance=0.99
-    )
-    
-    print(f"  ✓ UMAP fitted on training set")
-    
     # ========================================================================
-    # COLLECT ALL TEST SCENARIOS
+    # COLLECT ALL TEST SCENARIOS (for both modes)
     # ========================================================================
-    embeddings_dict = {'train': train_embedding}
+    features_dict = {'train': train_features}
     labels_dict = {'train': train_labels}
+    embeddings_dict = {}  # Will be populated after fitting
     
     scenarios = config['test_scenarios']
     
@@ -413,11 +409,9 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
         print(f"  ID statistics: mean={test_features.mean():.4f}, std={test_features.std():.4f}")
         print(f"  ID labels distribution: {np.bincount(test_labels.astype(int))}")
         
-        test_embedding = project_features(umap_model, scaler, pca, test_features)
-        
-        embeddings_dict['id'] = test_embedding
+        features_dict['id'] = test_features
         labels_dict['id'] = test_labels
-        print(f"  ✓ ID test projected")
+        print(f"  ✓ ID test extracted")
     
     # Corruption Shift (CS)
     if 'cs' in scenarios:
@@ -449,11 +443,9 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
             max_diff = np.abs(test_features_cs - test_features).max()
             print(f"  Mean |CS - ID| per pixel: {diff:.4f}, Max: {max_diff:.4f} (should be > 0)")
         
-        test_embedding_cs = project_features(umap_model, scaler, pca, test_features_cs)
-        
-        embeddings_dict[f'cs_sev{corruption_severity}'] = test_embedding_cs
+        features_dict[f'cs_sev{corruption_severity}'] = test_features_cs
         labels_dict[f'cs_sev{corruption_severity}'] = test_labels_cs
-        print(f"  ✓ CS test projected")
+        print(f"  ✓ CS test extracted")
     
     # Population Shift (PS)
     if 'ps' in scenarios:
@@ -484,11 +476,10 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
             print(f"  PS test set: {len(ps_dataset)} samples")
         
         ps_features, ps_labels = extract_image_features(ps_loader, device)
-        ps_embedding = project_features(umap_model, scaler, pca, ps_features)
         
-        embeddings_dict['ps'] = ps_embedding
+        features_dict['ps'] = ps_features
         labels_dict['ps'] = ps_labels
-        print(f"  ✓ PS test projected")
+        print(f"  ✓ PS test extracted")
     
     # New Class Shift (NCS) - only for organamnist
     if 'ncs' in scenarios and flag == 'organamnist':
@@ -548,18 +539,73 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
         # Use binary labels for coloring: 0=known class, 1=new class
         ncs_labels = ncs_binary_labels
         
-        ncs_embedding = project_features(umap_model, scaler, pca, ncs_features)
-        
-        embeddings_dict['ncs'] = ncs_embedding
+        features_dict['ncs'] = ncs_features
         labels_dict['ncs'] = ncs_labels
-        print(f"  ✓ NCS test projected")
+        print(f"  ✓ NCS test extracted")
+    
+    # ========================================================================
+    # FIT UMAP (two modes)
+    # ========================================================================
+    if fit_on_all:
+        print("\n🔬 Fitting PCA+UMAP on ALL data at once (experimental)...")
+        
+        # Concatenate all features
+        all_features = np.concatenate([features_dict[k] for k in features_dict.keys()], axis=0)
+        
+        # Create scenario indices for later splitting
+        scenario_indices = {}
+        current_idx = 0
+        for scenario_name in features_dict.keys():
+            n_samples = len(features_dict[scenario_name])
+            scenario_indices[scenario_name] = (current_idx, current_idx + n_samples)
+            current_idx += n_samples
+        
+        print(f"  Combined features shape: {all_features.shape}")
+        print(f"  Scenarios: {list(features_dict.keys())}")
+        
+        # Fit on all data
+        umap_model, scaler, pca, all_embedding = fit_umap_on_train(
+            all_features, n_neighbors=15, min_dist=0.1, random_state=42,
+            use_scaler=False, pca_variance=0.99
+        )
+        
+        # Split embeddings back into scenarios
+        for scenario_name, (start_idx, end_idx) in scenario_indices.items():
+            embeddings_dict[scenario_name] = all_embedding[start_idx:end_idx]
+        
+        print(f"  ✓ UMAP fitted on all data, embeddings split by scenario")
+        
+    else:
+        print("\n🔬 Fitting PCA+UMAP on training data (default mode)...")
+        
+        # Fit on training features only
+        umap_model, scaler, pca, train_embedding = fit_umap_on_train(
+            train_features, n_neighbors=15, min_dist=0.1, random_state=42,
+            use_scaler=False, pca_variance=0.99
+        )
+        
+        embeddings_dict['train'] = train_embedding
+        print(f"  ✓ UMAP fitted on training set")
+        
+        # Project test scenarios
+        print("\n📊 Projecting test scenarios...")
+        for scenario_name in features_dict.keys():
+            if scenario_name == 'train':
+                continue
+            
+            test_embedding = project_features(
+                umap_model, scaler, pca, features_dict[scenario_name]
+            )
+            embeddings_dict[scenario_name] = test_embedding
+            print(f"  ✓ {scenario_name.upper()} projected")
     
     # ========================================================================
     # CREATE VISUALIZATION
     # ========================================================================
     print("\n📈 Creating UMAP visualization...")
     
-    output_path = os.path.join(output_dir, f'umap_{flag}.png')
+    suffix = '_fit_on_all' if fit_on_all else ''
+    output_path = os.path.join(output_dir, f'umap_{flag}{suffix}.png')
     
     # Get class names from info
     class_names = info['label'] if 'label' in info else None
@@ -572,7 +618,8 @@ def generate_umap_for_dataset(flag, device, output_dir, corruption_severity=3,
     # SAVE EMBEDDINGS FOR FURTHER ANALYSIS
     # ========================================================================
     print("\n💾 Saving embeddings...")
-    embeddings_path = os.path.join(output_dir, f'umap_{flag}_embeddings.npz')
+    suffix = '_fit_on_all' if fit_on_all else ''
+    embeddings_path = os.path.join(output_dir, f'umap_{flag}{suffix}_embeddings.npz')
     
     np.savez_compressed(
         embeddings_path,
@@ -618,6 +665,10 @@ def main():
         '--gpu', type=int, default=0,
         help='GPU device ID (default: 0) - not used for raw images but kept for compatibility'
     )
+    parser.add_argument(
+        '--fit-on-all', action='store_true',
+        help='Experimental: Fit PCA+UMAP on all data at once (train+ID+CS+PS+NCS) instead of fitting on train and projecting test'
+    )
     
     args = parser.parse_args()
     
@@ -640,6 +691,7 @@ def main():
     print(f"{'='*80}")
     print(f"Datasets: {', '.join(datasets_to_process)}")
     print(f"Corruption severity: {args.corruption_severity}")
+    print(f"Mode: {'FIT ON ALL DATA (experimental)' if args.fit_on_all else 'FIT ON TRAIN, PROJECT TEST (default)'}")
     print(f"Using: Flattened raw images (no model features)")
     print(f"Output: {args.output_dir}")
     print(f"{'='*80}\n")
@@ -656,7 +708,8 @@ def main():
                 flag, device, args.output_dir,
                 corruption_severity=args.corruption_severity,
                 batch_size=args.batch_size,
-                image_size=224
+                image_size=224,
+                fit_on_all=args.fit_on_all
             )
             
         except Exception as e:
