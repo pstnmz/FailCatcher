@@ -106,7 +106,7 @@ DATASET_CONFIG = {
     'dermamnist-e-id': {'batch_size': 4000, 'gps_subsample': 5000},
     'dermamnist-e-external': {'batch_size': 3500, 'gps_subsample': 5000},
     'amos2022': {'batch_size': 3500, 'gps_subsample': 5000},
-    'midog': {'batch_size': 128, 'gps_subsample': 5000},
+    'midog': {'batch_size': 4000, 'gps_subsample': 5000},
 }
 
 
