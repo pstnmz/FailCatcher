@@ -1,6 +1,14 @@
 """
 Extract 224x224 patches from MIDOG++ dataset images.
 Creates non-overlapping patches from each image in the dataset.
+
+CRITICAL: Resolution matching for cross-dataset comparison
+---------------------------------------------------------
+PathMNIST patches: 224×224 at 0.5 µm/px → 112 µm × 112 µm physical area
+MIDOG++ images: typically at 0.23-0.25 µm/px → need resampling to 0.5 µm/px
+
+This script resamples MIDOG++ images to match PathMNIST's physical resolution
+BEFORE extracting patches to avoid magnification confounds in OOD detection.
 """
 
 import json
@@ -16,6 +24,72 @@ except ImportError:
     def tqdm(iterable, desc=""):
         print(f"{desc}...")
         return iterable
+
+
+# Target resolution for PathMNIST compatibility
+TARGET_RESOLUTION = 0.5  # µm/pixel (PathMNIST standard)
+
+# Default MIDOG++ resolutions (if not in metadata)
+# Based on MIDOG++ paper: mostly 0.23-0.25 µm/px
+DEFAULT_MIDOG_RESOLUTION = 0.25  # µm/pixel
+
+
+def get_image_resolution(img_meta, default=DEFAULT_MIDOG_RESOLUTION):
+    """
+    Extract physical resolution (µm/pixel) from image metadata.
+    
+    Args:
+        img_meta: Image metadata dict from JSON
+        default: Default resolution if not found in metadata
+    
+    Returns:
+        float: Resolution in µm/pixel
+    """
+    # Check common metadata fields for resolution info
+    # MIDOG++ may store this as 'mpp' (microns per pixel) or 'resolution'
+    if 'mpp' in img_meta:
+        return float(img_meta['mpp'])
+    elif 'resolution' in img_meta:
+        return float(img_meta['resolution'])
+    elif 'microns_per_pixel' in img_meta:
+        return float(img_meta['microns_per_pixel'])
+    else:
+        # Use default and warn
+        return default
+
+
+def resample_to_target_resolution(image, source_resolution, target_resolution=TARGET_RESOLUTION):
+    """
+    Resample image to match target physical resolution.
+    
+    Uses high-quality LANCZOS resampling to avoid aliasing artifacts.
+    
+    Args:
+        image: PIL Image
+        source_resolution: Source resolution in µm/pixel
+        target_resolution: Target resolution in µm/pixel (default: 0.5 for PathMNIST)
+    
+    Returns:
+        PIL Image resampled to target resolution
+    """
+    # Calculate scaling factor
+    # If source is 0.25 µm/px and target is 0.5 µm/px:
+    #   scale = 0.25 / 0.5 = 0.5 (downsample to 50%)
+    scale_factor = source_resolution / target_resolution
+    
+    if abs(scale_factor - 1.0) < 0.01:  # Already at target resolution (within 1%)
+        return image
+    
+    # Calculate new dimensions
+    original_width, original_height = image.size
+    new_width = int(original_width * scale_factor)
+    new_height = int(original_height * scale_factor)
+    
+    # Resample with LANCZOS for high-quality downsampling (anti-aliasing)
+    # LANCZOS is best for downsampling as it includes anti-aliasing filter
+    resampled = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    
+    return resampled
 
 
 def extract_non_overlapping_patches(image, patch_size=224, num_patches=50):
@@ -77,18 +151,26 @@ def create_patch_dataset(
     output_path,
     patch_size=224,
     num_patches=50,
-    save_individual=True
+    save_individual=True,
+    target_resolution=TARGET_RESOLUTION,
+    assume_default_resolution=False
 ):
     """
     Create a dataset of patches from MIDOG++ images and save as .npz file.
+    
+    CRITICAL: Applies resolution matching to ensure patches represent the same
+    physical tissue area as PathMNIST (0.5 µm/px standard).
     
     Args:
         images_dir: Path to directory containing TIFF images
         json_path: Path to MIDOGpp.json file
         output_path: Path to save .npz file
-        patch_size: Size of square patches
+        patch_size: Size of square patches (default: 224)
         num_patches: Number of patches per image
         save_individual: If True, also save individual PNG files
+        target_resolution: Target resolution in µm/px (default: 0.5 for PathMNIST)
+        assume_default_resolution: If True, use default resolution for all images
+                                   If False, try to read from metadata
     """
     images_dir = Path(images_dir)
     output_path = Path(output_path)
@@ -122,6 +204,13 @@ def create_patch_dataset(
     for tumor_type, label in tumor_type_to_label.items():
         count = sum(1 for img in canine_images if img['tumor_type'] == tumor_type)
         print(f"  {label}: {tumor_type} ({count} images)")
+    print(f"\n{'='*70}")
+    print(f"RESOLUTION MATCHING FOR CROSS-DATASET COMPARISON")
+    print(f"{'='*70}")
+    print(f"Target resolution: {target_resolution} µm/px (PathMNIST standard)")
+    print(f"Default MIDOG++ resolution: {DEFAULT_MIDOG_RESOLUTION} µm/px (if not in metadata)")
+    print(f"Physical area per patch: {patch_size * target_resolution:.1f} µm × {patch_size * target_resolution:.1f} µm")
+    print(f"{'='*70}")
     print(f"\nExtracting {num_patches} patches of size {patch_size}x{patch_size} from each image")
     print(f"Output file: {output_path}")
     if save_individual:
@@ -132,6 +221,7 @@ def create_patch_dataset(
     all_labels = []
     all_ids = []
     failed_images = []
+    resolution_stats = {}  # Track resolution per image for reporting
     
     # Process each image
     for image_id, img_meta in tqdm(image_info.items(), desc="Processing images"):
@@ -148,8 +238,25 @@ def create_patch_dataset(
         try:
             # Load image
             image = Image.open(image_path)
+            original_size = image.size
             
-            # Extract patches
+            # Get source resolution
+            if assume_default_resolution:
+                source_resolution = DEFAULT_MIDOG_RESOLUTION
+            else:
+                source_resolution = get_image_resolution(img_meta, default=DEFAULT_MIDOG_RESOLUTION)
+            
+            # Track resolution for reporting
+            if source_resolution not in resolution_stats:
+                resolution_stats[source_resolution] = 0
+            resolution_stats[source_resolution] += 1
+            
+            # CRITICAL: Resample to target resolution BEFORE extracting patches
+            # This ensures physical tissue area is consistent with PathMNIST
+            image = resample_to_target_resolution(image, source_resolution, target_resolution)
+            resampled_size = image.size
+            
+            # Extract patches from resampled image
             patches = extract_non_overlapping_patches(
                 image, 
                 patch_size=patch_size, 
@@ -204,7 +311,14 @@ def create_patch_dataset(
     print(f"Dataset creation complete!")
     print(f"Total patches created: {len(all_patches)}")
     print(f"Successfully processed: {len(image_info) - len(failed_images)}/{len(image_info)} images")
-    print(f"File saved to: {output_path}")
+    print(f"\nResolution matching applied:")
+    print(f"  Target resolution: {target_resolution} µm/px")
+    print(f"  Source resolutions found:")
+    for res, count in sorted(resolution_stats.items()):
+        scale = res / target_resolution
+        print(f"    {res} µm/px: {count} images (resampled by {scale:.3f}x)")
+    print(f"  Physical patch size: {patch_size * target_resolution:.1f} µm × {patch_size * target_resolution:.1f} µm")
+    print(f"\nFile saved to: {output_path}")
     if save_individual:
         print(f"Individual patches saved to: {patches_dir}")
     
@@ -222,6 +336,20 @@ def create_patch_dataset(
         'filter_applied': 'canine tumor_type only',
         'canine_images_found': len(image_info),
         'tumor_types': tumor_type_to_label,
+        'resolution_matching': {
+            'applied': True,
+            'target_resolution_um_per_px': target_resolution,
+            'default_source_resolution_um_per_px': DEFAULT_MIDOG_RESOLUTION,
+            'source_resolutions_found': {str(k): v for k, v in resolution_stats.items()},
+            'physical_patch_size_um': patch_size * target_resolution,
+            'note': 'Images resampled to match PathMNIST physical resolution before patch extraction'
+        },
+        'pathmnist_compatibility': {
+            'resolution': f'{target_resolution} µm/px',
+            'patch_size': f'{patch_size}x{patch_size} pixels',
+            'physical_area': f'{patch_size * target_resolution:.1f} µm × {patch_size * target_resolution:.1f} µm',
+            'note': 'Patches represent same physical tissue area as PathMNIST'
+        },
         'individual_patches_saved': save_individual,
         'individual_patches_dir': str(patches_dir) if save_individual else None,
         'failed_images': failed_images,
@@ -283,6 +411,18 @@ def main():
         action='store_false',
         help='Do not save individual PNG files'
     )
+    parser.add_argument(
+        '--target-resolution',
+        type=float,
+        default=TARGET_RESOLUTION,
+        help=f'Target resolution in µm/px (default: {TARGET_RESOLUTION} for PathMNIST compatibility)'
+    )
+    parser.add_argument(
+        '--assume-default-resolution',
+        action='store_true',
+        default=False,
+        help=f'Assume all images are at {DEFAULT_MIDOG_RESOLUTION} µm/px (ignore metadata)'
+    )
     
     args = parser.parse_args()
     
@@ -292,7 +432,9 @@ def main():
         output_path=args.output_path,
         patch_size=args.patch_size,
         num_patches=args.num_patches,
-        save_individual=args.save_individual
+        save_individual=args.save_individual,
+        target_resolution=args.target_resolution,
+        assume_default_resolution=args.assume_default_resolution
     )
 
 
