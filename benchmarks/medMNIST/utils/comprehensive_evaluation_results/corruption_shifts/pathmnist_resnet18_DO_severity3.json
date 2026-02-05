@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.6651810584958218,
+    "balanced_accuracy": 0.6355925773283779,
+    "auc": 0.9208089061503192,
+    "oracle_aurc": 0.056051861794989166,
+    "oracle_augrc": 0.056051861794989166,
+    "n_correct": 4776,
+    "n_incorrect": 2404,
+    "n_total": 7180
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.6835654596100279,
+      "balanced_accuracy": 0.6411926339954512,
+      "auc": 0.9031277864530222,
+      "oracle_aurc": 0.05006540917590644,
+      "oracle_augrc": 0.05006540917590644,
+      "n_correct": 4908,
+      "n_incorrect": 2272,
+      "n_total": 7180
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.5657381615598885,
+      "balanced_accuracy": 0.5602660357171994,
+      "auc": 0.8649045172951089,
+      "oracle_aurc": 0.09429167216269273,
+      "oracle_augrc": 0.09429167216269273,
+      "n_correct": 4062,
+      "n_incorrect": 3118,
+      "n_total": 7180
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.6278551532033426,
+      "balanced_accuracy": 0.6131385588210256,
+      "auc": 0.8948392606951374,
+      "oracle_aurc": 0.0692458934986538,
+      "oracle_augrc": 0.0692458934986538,
+      "n_correct": 4508,
+      "n_incorrect": 2672,
+      "n_total": 7180
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.5987465181058496,
+      "balanced_accuracy": 0.5858584935712606,
+      "auc": 0.8728569782050917,
+      "oracle_aurc": 0.08050217836608965,
+      "oracle_augrc": 0.08050217836608965,
+      "n_correct": 4299,
+      "n_incorrect": 2881,
+      "n_total": 7180
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.634958217270195,
+      "balanced_accuracy": 0.6040714123267727,
+      "auc": 0.9014875349017031,
+      "oracle_aurc": 0.0666277515692771,
+      "oracle_augrc": 0.0666277515692771,
+      "n_correct": 4559,
+      "n_incorrect": 2621,
+      "n_total": 7180
+    }
+  ],
+  "metadata": {
+    "dataset": "pathmnist",
+    "model": "resnet18",
+    "setup": "DO",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 9,
+    "task": "multi-class",
+    "timestamp": "2026-02-05 11:23:17"
+  }
+}

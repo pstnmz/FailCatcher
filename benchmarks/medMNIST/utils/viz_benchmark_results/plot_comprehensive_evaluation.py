@@ -130,12 +130,6 @@ def load_all_results(results_dir):
                     'per_fold_bacc': per_fold_bacc,
                     'ensemble_bacc': ensemble_bacc,
                 }
-            elif dataset == 'pathmnist':
-                # Pathmnist population shift
-                results['pathmnist'][model][setup]['population'] = {
-                    'per_fold_bacc': per_fold_bacc,
-                    'ensemble_bacc': ensemble_bacc,
-                }
     
     return results
 
@@ -654,7 +648,7 @@ def create_three_column_layout(results, output_dir):
     # Define datasets and their shift availability
     dataset_rows = [
         ('dermamnist-e-id', True, True, True),  # id, corruption, ood
-        ('pathmnist', False, False, True),       # only population
+        ('pathmnist', True, True, False),       # only population
         ('octmnist', True, True, False),         # id, corruption
         ('pneumoniamnist', True, True, False),   # id, corruption
         ('breastmnist', True, True, False),      # id, corruption
@@ -1089,7 +1083,7 @@ def main():
     """Main execution function."""
     
     # Paths
-    repo_root = Path(__file__).parent.parent.parent.parent
+    repo_root = Path(__file__).parent.parent.parent.parent.parent
     results_dir = repo_root / 'benchmarks/medMNIST/utils/comprehensive_evaluation_results'
     output_dir = repo_root / 'benchmarks/medMNIST/utils/comprehensive_evaluation_results/figures'
     

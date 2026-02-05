@@ -1,0 +1,80 @@
+{
+  "ensemble": {
+    "accuracy": 0.9075208913649025,
+    "balanced_accuracy": 0.8949354881623104,
+    "auc": 0.9923133984632925,
+    "oracle_aurc": 0.004276192766971078,
+    "oracle_augrc": 0.004276192766971078,
+    "n_correct": 6516,
+    "n_incorrect": 664,
+    "n_total": 7180
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "accuracy": 0.8580779944289694,
+      "balanced_accuracy": 0.8541057809133721,
+      "auc": 0.9879746020124457,
+      "oracle_aurc": 0.010070927832651825,
+      "oracle_augrc": 0.010070927832651825,
+      "n_correct": 6161,
+      "n_incorrect": 1019,
+      "n_total": 7180
+    },
+    {
+      "fold": 1,
+      "accuracy": 0.9,
+      "balanced_accuracy": 0.8817662347524082,
+      "auc": 0.992310873538033,
+      "oracle_aurc": 0.0049999999999999975,
+      "oracle_augrc": 0.0049999999999999975,
+      "n_correct": 6462,
+      "n_incorrect": 718,
+      "n_total": 7180
+    },
+    {
+      "fold": 2,
+      "accuracy": 0.8816155988857939,
+      "balanced_accuracy": 0.8670346896865698,
+      "auc": 0.989387531376346,
+      "oracle_aurc": 0.0070074332135846235,
+      "oracle_augrc": 0.0070074332135846235,
+      "n_correct": 6330,
+      "n_incorrect": 850,
+      "n_total": 7180
+    },
+    {
+      "fold": 3,
+      "accuracy": 0.8646239554317549,
+      "balanced_accuracy": 0.8627276124846808,
+      "auc": 0.9869278657018694,
+      "oracle_aurc": 0.009163336721471748,
+      "oracle_augrc": 0.009163336721471748,
+      "n_correct": 6208,
+      "n_incorrect": 972,
+      "n_total": 7180
+    },
+    {
+      "fold": 4,
+      "accuracy": 0.8892757660167131,
+      "balanced_accuracy": 0.8724475101632705,
+      "auc": 0.9889103539487698,
+      "oracle_aurc": 0.006129927995592833,
+      "oracle_augrc": 0.006129927995592833,
+      "n_correct": 6385,
+      "n_incorrect": 795,
+      "n_total": 7180
+    }
+  ],
+  "metadata": {
+    "dataset": "pathmnist",
+    "model": "vit_b_16",
+    "setup": "DO",
+    "corruption_severity": 3,
+    "image_size": 224,
+    "num_folds": 5,
+    "num_classes": 9,
+    "task": "multi-class",
+    "timestamp": "2026-02-05 11:34:01"
+  }
+}

@@ -142,11 +142,11 @@ def create_scatter_plot(results, output_path='ensemble_vs_accuracy_plot.png'):
     
     # Plot both metrics
     ax.scatter(x_pos, test_error_rates, alpha=0.7, s=100, label='Test Error Rate (1-Acc)', color=blue_color, marker='o')
-    ax.scatter(x_pos, augrc_means, alpha=0.8, s=200, label='Ensemble AUGRC Mean', color=yellow_color, marker='$\u26A1$', edgecolors='black', linewidths=0.5)
+    ax.scatter(x_pos, augrc_means, alpha=0.8, s=200, label='Mean Agg+Ens AUGRC', color=yellow_color, marker='$\u26A1$', edgecolors='black', linewidths=0.5)
     
     # Configure plot
-    ax.set_ylabel('Value', fontsize=12, fontweight='bold')
-    ax.set_title('Test Error Rate (1-Acc) vs Ensemble AUGRC Mean Across Configurations', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Error Rate', fontsize=12, fontweight='bold')
+    ax.set_title('Test Error Rate (1-Acc) vs AUGRC Mean Aggregation + Ensemble Across Configurations', fontsize=14, fontweight='bold')
     ax.legend(loc='best', fontsize=10)
     ax.grid(True, alpha=0.3, axis='y')
     
