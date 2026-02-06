@@ -11,16 +11,17 @@ from collections import defaultdict
 import numpy as np
 
 # Reuse the same directory and dataset definitions
-ID_DIR = Path("uq_benchmark_results/in_distribution")
-CS_DIR = Path("uq_benchmark_results/corruption_shifts")
-PS_DIR = Path("uq_benchmark_results/population_shifts")
-NCS_DIR = Path("uq_benchmark_results/new_class_shifts")
+ID_DIR = Path("uq_benchmark_results/full_results/in_distribution")
+CS_DIR = Path("uq_benchmark_results/full_results/corruption_shifts")
+PS_DIR = Path("uq_benchmark_results/full_results/population_shifts")
+NCS_DIR = Path("uq_benchmark_results/full_results/new_class_shifts")
 
 DATASETS_ID = {
     "dermamnist-e-id": "DermaMNIST",
     "breastmnist": "BreastMNIST",
     "tissuemnist": "TissueMNIST",
     "pneumoniamnist": "PneumoniaMNIST",
+    "pathmnist": "PathMNIST",
     "octmnist": "OctMNIST",
     "organamnist": "OrganAMNIST",
     "bloodmnist": "BloodMNIST"
@@ -28,12 +29,12 @@ DATASETS_ID = {
 
 DATASETS_PS = {
     "dermamnist-e-external": "DermaMNIST",
-    "amos2022": "OrganAMNIST",
-    "pathmnist": "PathMNIST"
+    "amos2022": "OrganAMNIST"
 }
 
 DATASETS_NCS = {
-    "amos2022": "OrganAMNIST"
+    "amos2022": "OrganAMNIST",
+    "midog": "MIDOG++"
 }
 
 SETUPS = ["", "DA", "DO", "DADO"]
@@ -144,7 +145,7 @@ def extract_method_metrics(json_path, metric_type="auroc_f"):
         
         # Special handling for Mean_Aggregation_Ensemble - only ensemble value
         if method_name == "Mean_Aggregation_Ensemble":
-            mean_val = method_data.get(mean_key)  # This goes in ensemble column
+            mean_val = method_data.get(ens_key)  # This goes in ensemble column
             results[method_name] = {
                 "mean": None,  # No fold average for this method
                 "std": None,

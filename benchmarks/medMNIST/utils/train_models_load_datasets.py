@@ -1085,8 +1085,21 @@ def evaluate_model(model, test_loader, data_flag, device=None, output_dir=None, 
         if is_binary:
             auc = roc_auc_score(y_true, y_score)
         else:
-            auc = roc_auc_score(y_true, y_score, multi_class='ovr', average='macro')
-    except Exception:
+            # Handle case where model predicts more classes than exist in test set
+            # (e.g., AMOS test set only has 6 of 11 OrganaMNIST classes)
+            present_classes = np.unique(y_true)
+            if len(present_classes) < num_classes:
+                # Filter y_score to only include present classes and renormalize
+                y_score_filtered = y_score[:, present_classes]
+                # Renormalize probabilities to sum to 1.0
+                y_score_filtered = y_score_filtered / y_score_filtered.sum(axis=1, keepdims=True)
+                auc = roc_auc_score(y_true, y_score_filtered, multi_class='ovr', average='macro', labels=present_classes)
+            else:
+                auc = roc_auc_score(y_true, y_score, multi_class='ovr', average='macro')
+    except Exception as e:
+        print(f"  AUC computation failed: {e}")
+        print(f"  y_true shape: {y_true.shape}, unique classes: {np.unique(y_true)}")
+        print(f"  y_score shape: {y_score.shape}, num_classes: {num_classes}")
         auc = float('nan')
 
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
