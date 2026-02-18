@@ -805,14 +805,14 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         
         # For new_class_shift: use fixed k=1000 (no calibration set available)
         # For other shifts: use grid search on calibration set
-        if new_class_shift:
-            k = 1000
-            k_grid = None
-            print(f"  New class shift detected: Using fixed k={k} (no calibration)")
-        else:
-            k = None
-            k_grid = [1, 5, 10, 20, 50, 100, 200]
-            print(f"  Using k grid search: {k_grid}")
+        # if new_class_shift:
+        #     k = 1000
+        #     k_grid = None
+        #     print(f"  New class shift detected: Using fixed k={k} (no calibration)")
+        # else:
+        k = None
+        k_grid = [1, 5, 10, 20, 50, 100, 200]
+        print(f"  Using k grid search: {k_grid}")
         
         uncertainties, metrics = detector.run_knn_raw(
             test_loader=knn_test_loader,

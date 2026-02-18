@@ -1,0 +1,148 @@
+{
+  "resnet18": {
+    "mean_auroc_f_diff": -0.020669937642852715,
+    "std_auroc_f_diff": 0.04382193972947983,
+    "mean_augrc_diff": -0.23456152239383543,
+    "std_augrc_diff": 0.014542585160691094,
+    "n_samples": 4,
+    "backbone_averaged": {
+      "id_auroc_f": 0.9099985337613485,
+      "ncs_auroc_f": 0.9306684714042013,
+      "id_augrc": 0.0058310840038485155,
+      "ncs_augrc": 0.24039260639768395,
+      "auroc_f_diff": -0.020669937642852743,
+      "augrc_diff": -0.23456152239383543
+    },
+    "details": [
+      {
+        "model": "resnet18",
+        "setup": "S",
+        "id_auroc_f": 0.9130313078635023,
+        "ncs_auroc_f": 0.8959400553548573,
+        "auroc_f_diff": 0.01709125250864496,
+        "id_augrc": 0.008232361635927717,
+        "ncs_augrc": 0.256875671502405,
+        "augrc_diff": -0.24864330986647726,
+        "id_auroc_method": "MSR_calibrated",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      },
+      {
+        "model": "resnet18",
+        "setup": "DA",
+        "id_auroc_f": 0.9034815529207568,
+        "ncs_auroc_f": 0.9721695594579829,
+        "auroc_f_diff": -0.06868800653722607,
+        "id_augrc": 0.003918546954167022,
+        "ncs_augrc": 0.2222934016709559,
+        "augrc_diff": -0.21837485471678889,
+        "id_auroc_method": "GPS",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      },
+      {
+        "model": "resnet18",
+        "setup": "DO",
+        "id_auroc_f": 0.9166098351319513,
+        "ncs_auroc_f": 0.8880083531922314,
+        "auroc_f_diff": 0.028601481939719897,
+        "id_augrc": 0.0074173947284704635,
+        "ncs_augrc": 0.25687742026377264,
+        "augrc_diff": -0.24946002553530217,
+        "id_auroc_method": "Mean_Aggregation_Ensemble",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      },
+      {
+        "model": "resnet18",
+        "setup": "DADO",
+        "id_auroc_f": 0.906871439129184,
+        "ncs_auroc_f": 0.9665559176117337,
+        "auroc_f_diff": -0.05968447848254965,
+        "id_augrc": 0.0037560326968288575,
+        "ncs_augrc": 0.2255239321536022,
+        "augrc_diff": -0.22176789945677333,
+        "id_auroc_method": "GPS",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      }
+    ]
+  },
+  "vit_b_16": {
+    "mean_auroc_f_diff": -0.058760405285771256,
+    "std_auroc_f_diff": 0.01145923546140373,
+    "mean_augrc_diff": -0.21798703192660798,
+    "std_augrc_diff": 0.0015240729062474278,
+    "n_samples": 4,
+    "backbone_averaged": {
+      "id_auroc_f": 0.9118399168007465,
+      "ncs_auroc_f": 0.9706003220865178,
+      "id_augrc": 0.002605625538287259,
+      "ncs_augrc": 0.22059265746489526,
+      "auroc_f_diff": -0.05876040528577131,
+      "augrc_diff": -0.217987031926608
+    },
+    "details": [
+      {
+        "model": "vit_b_16",
+        "setup": "S",
+        "id_auroc_f": 0.9112090769915909,
+        "ncs_auroc_f": 0.9707751083252423,
+        "auroc_f_diff": -0.05956603133365135,
+        "id_augrc": 0.00263956673210171,
+        "ncs_augrc": 0.220420108421977,
+        "augrc_diff": -0.2177805416898753,
+        "id_auroc_method": "Mean_Aggregation",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      },
+      {
+        "model": "vit_b_16",
+        "setup": "DA",
+        "id_auroc_f": 0.9017955347091661,
+        "ncs_auroc_f": 0.9731453134778144,
+        "auroc_f_diff": -0.07134977876864834,
+        "id_augrc": 0.002718253660353348,
+        "ncs_augrc": 0.2194187764049905,
+        "augrc_diff": -0.21670052274463714,
+        "id_auroc_method": "MSR",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      },
+      {
+        "model": "vit_b_16",
+        "setup": "DO",
+        "id_auroc_f": 0.922159102399316,
+        "ncs_auroc_f": 0.9624661169452932,
+        "auroc_f_diff": -0.04030701454597718,
+        "id_augrc": 0.0024305463955121387,
+        "ncs_augrc": 0.22296392874318996,
+        "augrc_diff": -0.22053338234767783,
+        "id_auroc_method": "GPS",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      },
+      {
+        "model": "vit_b_16",
+        "setup": "DADO",
+        "id_auroc_f": 0.9121959531029133,
+        "ncs_auroc_f": 0.9760147495977215,
+        "auroc_f_diff": -0.06381879649480815,
+        "id_augrc": 0.0026341353651818393,
+        "ncs_augrc": 0.2195678162894235,
+        "augrc_diff": -0.21693368092424167,
+        "id_auroc_method": "GPS",
+        "ncs_auroc_method": "Mean_Aggregation_Ensemble",
+        "id_augrc_method": "Mean_Aggregation_Ensemble",
+        "ncs_augrc_method": "Mean_Aggregation_Ensemble"
+      }
+    ]
+  }
+}

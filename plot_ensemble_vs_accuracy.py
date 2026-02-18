@@ -22,7 +22,8 @@ def parse_json_files(base_dir):
     shift_folders = {
         'in_distribution': 'ID',
         'corruption_shifts': 'Corruption',
-        'population_shifts': 'Population'
+        'population_shifts': 'Population',
+        'new_class_shifts': 'New Class'
     }
     
     for folder, shift_type in shift_folders.items():
@@ -43,7 +44,7 @@ def parse_json_files(base_dir):
                 
                 # Extract required values
                 test_accuracy = data.get('test_accuracy')
-                augrc_mean = data.get('methods', {}).get('Mean_Aggregation_Ensemble', {}).get('augrc_mean')
+                augrc_mean = data.get('methods', {}).get('Mean_Aggregation_Ensemble', {}).get('augrc')
                 
                 # Skip if either value is missing
                 if test_accuracy is None or augrc_mean is None:
@@ -110,8 +111,8 @@ def create_scatter_plot(results, output_path='ensemble_vs_accuracy_plot.png'):
         print("No results to plot!")
         return
     
-    # Define custom sort order for shift types: ID, Corruption, Population
-    shift_order = {'ID': 0, 'Corruption': 1, 'Population': 2}
+    # Define custom sort order for shift types: ID, Corruption, Population, New Class
+    shift_order = {'ID': 0, 'Corruption': 1, 'Population': 2, 'New Class': 3}
     
     # Sort results by shift type (custom order), then dataset, then backbone, then setup
     results_sorted = sorted(results, key=lambda x: (shift_order.get(x['shift_type'], 99), x['dataset'], x['backbone'], x['setup']))
@@ -145,10 +146,13 @@ def create_scatter_plot(results, output_path='ensemble_vs_accuracy_plot.png'):
     ax.scatter(x_pos, augrc_means, alpha=0.8, s=200, label='Mean Agg+Ens AUGRC', color=yellow_color, marker='$\u26A1$', edgecolors='black', linewidths=0.5)
     
     # Configure plot
-    ax.set_ylabel('Error Rate', fontsize=12, fontweight='bold')
-    ax.set_title('Test Error Rate (1-Acc) vs AUGRC Mean Aggregation + Ensemble Across Configurations', fontsize=14, fontweight='bold')
-    ax.legend(loc='best', fontsize=10)
+    ax.set_ylabel('Error Rate', fontsize=15, fontweight='bold')
+    ax.set_title('Test Error Rate (1-Acc) vs AUGRC Mean Aggregation + Ensemble Across Configurations', fontsize=22, fontweight='bold')
+    ax.legend(loc='best', fontsize=16)
     ax.grid(True, alpha=0.3, axis='y')
+    
+    # Set x-axis limits to fit data tightly
+    ax.set_xlim(-1, len(results_sorted) +1)
     
     # Add horizontal line at 0 for reference
     ax.axhline(y=0, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
@@ -203,7 +207,7 @@ def create_scatter_plot(results, output_path='ensemble_vs_accuracy_plot.png'):
     for key, indices in dataset_groups.items():
         mid_pos = (indices[0] + indices[-1]) / 2
         # Shorten long dataset names for display
-        dataset_name = key[1].replace('dermamnist-e-external', 'dermamnist-e-ext')
+        dataset_name = key[1].replace('dermamnist-e-external', 'dermamnist-e-ext').replace('midog', 'midog++')
         ax.text(mid_pos, -0.12, dataset_name, ha='center', va='top', fontsize=10, 
                 transform=ax.get_xaxis_transform(), fontweight='bold', color='black', rotation=15)
     
@@ -217,7 +221,7 @@ def create_scatter_plot(results, output_path='ensemble_vs_accuracy_plot.png'):
     
     for key, indices in shift_groups.items():
         mid_pos = (indices[0] + indices[-1]) / 2
-        ax.text(mid_pos, -0.20, key, ha='center', va='top', fontsize=11, 
+        ax.text(mid_pos, -0.20, key, ha='center', va='top', fontsize=13, 
                 transform=ax.get_xaxis_transform(), fontweight='bold', 
                 bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.7))
     
@@ -242,6 +246,29 @@ def create_scatter_plot(results, output_path='ensemble_vs_accuracy_plot.png'):
     print(f"  Std:  {np.std(augrc_means):.4f}")
     print(f"  Min:  {np.min(augrc_means):.4f}")
     print(f"  Max:  {np.max(augrc_means):.4f}")
+    
+    # Calculate average % improvement of AUGRC over Test Error Rate by shift type
+    print(f"\n{'='*80}")
+    print(f"AVERAGE % IMPROVEMENT (Error Rate Reduction by AUGRC) BY SHIFT TYPE")
+    print(f"{'='*80}")
+    
+    shift_types = ['ID', 'Corruption', 'Population', 'New Class']
+    for shift_type in shift_types:
+        shift_indices = [i for i, r in enumerate(results_sorted) if r['shift_type'] == shift_type]
+        if shift_indices:
+            shift_error_rates = [test_error_rates[i] for i in shift_indices]
+            shift_augrc = [augrc_means[i] for i in shift_indices]
+            # Calculate percentage improvement: (error - augrc) / error * 100
+            pct_improvements = [(err - augrc) / err * 100 if err > 0 else 0 
+                               for err, augrc in zip(shift_error_rates, shift_augrc)]
+            avg_pct_improvement = np.mean(pct_improvements)
+            print(f"{shift_type:15s}: {avg_pct_improvement:+.2f}%")
+    
+    # Overall average percentage improvement
+    all_pct_improvements = [(err - augrc) / err * 100 if err > 0 else 0 
+                           for err, augrc in zip(test_error_rates, augrc_means)]
+    overall_avg_pct_improvement = np.mean(all_pct_improvements)
+    print(f"{'Overall':15s}: {overall_avg_pct_improvement:+.2f}%")
 
 def main():
     # Base directory containing the three subfolders

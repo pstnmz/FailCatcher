@@ -19,17 +19,21 @@ warnings.filterwarnings('ignore')
 
 def compute_polygon_area_polar(angles, radii):
     """
-    Compute the area of a polygon in polar coordinates.
+    Compute the area under the curve in polar coordinates using trapezoidal integration.
+    This is equivalent to "unrolling" the radar to Cartesian coordinates and computing AUC.
     
-    For a polygon with vertices at (θ_i, r_i), the area is:
-    A = 0.5 * Σ(r_i * r_{i+1} * sin(θ_{i+1} - θ_i))
+    Instead of polar area (which scales with r²), we compute:
+    AUC = ∫ r(θ) dθ using trapezoidal rule
+    
+    This makes the surface metric scale LINEARLY with radius, not quadratically.
+    This is order-invariant and better reflects performance across datasets.
     
     Args:
         angles: List of angles in radians (should form a closed loop)
         radii: List of radii at each angle
     
     Returns:
-        float: Area of the polygon
+        float: Area under the curve (AUC in unrolled Cartesian space)
     """
     if len(angles) != len(radii):
         raise ValueError("Angles and radii must have the same length")
@@ -39,21 +43,21 @@ def compute_polygon_area_polar(angles, radii):
         angles = list(angles) + [angles[0]]
         radii = list(radii) + [radii[0]]
     
-    area = 0.0
-    n = len(angles) - 1  # Exclude the duplicate closing point
+    # Sort by angle to ensure proper integration order
+    sorted_pairs = sorted(zip(angles[:-1], radii[:-1]))  # Exclude duplicate closing point
+    sorted_angles, sorted_radii = zip(*sorted_pairs)
+    sorted_angles = list(sorted_angles) + [sorted_angles[0] + 2*np.pi]  # Close with wraparound
+    sorted_radii = list(sorted_radii) + [sorted_radii[0]]
+    
+    # Trapezoidal integration: AUC = Σ (θ_{i+1} - θ_i) * (r_i + r_{i+1}) / 2
+    auc = 0.0
+    n = len(sorted_angles) - 1
     
     for i in range(n):
-        theta_diff = angles[i+1] - angles[i]
-        # Handle wraparound at 2π
-        if theta_diff < -np.pi:
-            theta_diff += 2 * np.pi
-        elif theta_diff > np.pi:
-            theta_diff -= 2 * np.pi
-        
-        # Area contribution from this segment
-        area += 0.5 * radii[i] * radii[i+1] * np.sin(theta_diff)
+        theta_diff = sorted_angles[i+1] - sorted_angles[i]
+        auc += theta_diff * (sorted_radii[i] + sorted_radii[i+1]) / 2
     
-    return abs(area)
+    return abs(auc)
 
 
 def parse_results_directory(results_dir='./', metric='auroc_f'):
@@ -444,30 +448,29 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
     for method_idx, method_name in enumerate(all_methods):
         values = []
         for dataset_key in dataset_keys:
-            auroc = model_results[dataset_key].get(method_name, np.nan)
-            values.append(auroc)
+            metric_value = model_results[dataset_key].get(method_name, np.nan)
+            values.append(metric_value)
         
-        # Transform values to square space for AUGRC (more space at edges)
-        if metric == 'augrc':
-            # Use appropriate max_display based on shift type
-            if shift in ['population_shift', 'new_class_shift']:
-                augrc_max_display = 0.45
-            else:
-                augrc_max_display = 0.3
-            values = augrc_log_transform(values, max_display=augrc_max_display, scale_factor=50.0).tolist()
+        # For visualization: apply display transform only for AUGRC with ID/CS shifts
+        # This is purely visual - uses ORIGINAL AUGRC values (0-0.5, lower is better)
+        values_display = values.copy()
+        if metric == 'augrc' and shift not in ['population_shift', 'new_class_shift']:
+            augrc_max_display = 0.3
+            # Transform original AUGRC values for display
+            values_display = augrc_log_transform(values, max_display=augrc_max_display, scale_factor=50.0).tolist()
         
-        # Complete the circle
-        values += values[:1]
+        # Complete the circle for display
+        values_display += values_display[:1]
         
         # Plot Mean_Aggregation with lightning icon, others with lines
         if method_name == 'Mean_Aggregation':
             # Plot lightning bolt markers without connecting lines
-            ax.scatter(angles[:-1], values[:-1], s=270, marker='*', 
+            ax.scatter(angles[:-1], values_display[:-1], s=270, marker='*', 
                        color='red', label=method_name,# + ' (MSR - MSR_calibrated - MLS - GPS - KNN_Raw - MC_Dropout)', 
                         alpha=0.9, zorder=99,edgecolors='black', linewidths=0.5)
         elif method_name == 'Mean_Aggregation_Ensemble':
             # Red star marker for Mean Aggregation + Ensemble
-            ax.scatter(angles[:-1], values[:-1], s=300, marker='$\u26A1$', 
+            ax.scatter(angles[:-1], values_display[:-1], s=300, marker='$\u26A1$', 
                        color=colors[method_idx], label='Mean Agg + Ens',
                        alpha=0.9, zorder=100, edgecolors='black', linewidths=0.5)
         else:
@@ -476,7 +479,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
             else:
                 method_name = method_name
             # Plot lines with enhanced styling for better visibility
-            ax.plot(angles, values, 'o-', linewidth=1.5, label=method_name, 
+            ax.plot(angles, values_display, 'o-', linewidth=1.5, label=method_name, 
                     color=colors[method_idx], markersize=7, markeredgewidth=1,
                     markeredgecolor='white', alpha=0.85)
     
@@ -518,32 +521,34 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         y_ticks = np.arange(y_min, y_max + 0.05, tick_step)
         ax.set_yticks(y_ticks)
         ax.set_yticklabels([f'{y:g}' for y in y_ticks], size=12, fontweight='medium')
-    else:  # augrc - square transform for MORE space at edges (near 0), LESS at center (near max_display)
-        # Original tick values (what we want to display) - from center (max_display) to edge (0)
-        # Using square transform to give more visual space at edges (good performance)
-        # Determine max_display based on shift type
-        if shift in ['population_shift', 'new_class_shift']:
-            augrc_max_display = 0.45
-            # Display 0.35 instead of 0.45, removed 0.40 and 0.02 for spacing
-            original_ticks = np.array([0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.01, 0.0])
-        else:
-            augrc_max_display = 0.3
-            # Display up to 0.25 for ID and corruption shifts
-            original_ticks = np.array([0.25, 0.2, 0.15, 0.10, 0.05, 0.01, 0.0])
-        # Transform using square (where they'll actually be positioned)
-        transformed_ticks = augrc_log_transform(original_ticks, max_display=augrc_max_display, scale_factor=50.0)
+    elif metric == 'augrc' and shift in ['population_shift', 'new_class_shift']:
+        # Linear scale for PS/NCS - displaying original AUGRC values
+        # AUGRC: 0 (best, edge) to 0.5 (worst, center) - lower is better
+        y_min, y_max = 0.4, 0.03
+        tick_step = 0.05
+        y_ticks = np.arange(y_max, y_min + 0.01, tick_step)  # From 0.03 to 0.4
+        ax.set_yticks(y_ticks)
+        ax.set_yticklabels([f'{y:g}' for y in y_ticks], size=12, fontweight='medium')
+    else:  # augrc for ID and CS - log transform for MORE space at edges (good performance)
+        # Original AUGRC values (0-0.5, lower is better)
+        augrc_max_display = 0.3
+        # Original AUGRC tick values from bad (center) to good (edge)
+        original_augrc_ticks = np.array([0.25, 0.2, 0.15, 0.10, 0.05, 0.01, 0.0])
+        # Transform original AUGRC values using log transform (for positioning)
+        transformed_ticks = augrc_log_transform(original_augrc_ticks, max_display=augrc_max_display, scale_factor=50.0)
         
-        # Set limits in transformed space (0.30 at center=0, 0 at edge=large)
+        # Set limits in transformed space
         y_min, y_max = transformed_ticks[0], transformed_ticks[-1]
         ax.set_yticks(transformed_ticks)
-        # Format labels: remove trailing zeros and skip the final 0.0 value
+        # Format labels using original AUGRC values (not inverted)
         tick_labels = []
-        for y in original_ticks[:-1]:  # Skip the last 0.0 value
+        for y in original_augrc_ticks:
             if y < 0.01:
                 tick_labels.append(f'{y:.3f}'.rstrip('0').rstrip('.'))
+            elif y == 0.0:
+                tick_labels.append('')  # Empty label for 0.0 (only for ID/CS shifts)
             else:
                 tick_labels.append(f'{y:g}')
-        tick_labels.append('')  # Empty label for the final 0.0
         ax.set_yticklabels(tick_labels, size=12, fontweight='medium')
     
     ax.set_ylim(y_min, y_max)
@@ -557,10 +562,10 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         # ID and CS: around 8 o'clock (between blood and organa)
         ax.set_rlabel_position(230)
     
-    # Determine max_display for AUGRC based on shift type
+    # Determine max_display for AUGRC based on shift type (for label positioning)
     if metric == 'augrc':
         if shift in ['population_shift', 'new_class_shift']:
-            augrc_max_display = 0.45
+            augrc_max_display = 0.4
         else:
             augrc_max_display = 0.3
     
@@ -568,7 +573,10 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
     # Position based on metric scale for visibility (AFTER y_max is defined)
     if metric == 'auroc_f':
         label_position = 1.16
-    else:  # augrc - position beyond edge in transformed space
+    elif metric == 'augrc' and shift in ['population_shift', 'new_class_shift']:
+        # Linear scale for PS/NCS - position relative to max value
+        label_position = -0.05
+    else:  # augrc for ID/CS - position beyond edge in transformed space
         # Edge is at 0 which transforms to large value (y_max)
         # We want to be beyond that, so add extra offset to y_max
         label_position = y_max + 1.85  # Beyond the edge
@@ -583,11 +591,13 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         custom_angle = angle_positive
         if name == 'bloodmnist':
             # Shift blood label slightly around the circle to avoid overlap with pneumonia
-            custom_angle = angle_positive - 0.27  # Rotate slightly clockwise
+            custom_angle = angle_positive + 0.35  # Rotate slightly clockwise
                 
         elif name == 'new_class_amos2022':
             display_name = 'new class\namos2022'
             custom_angle = angle_positive - 0.16
+        elif name == 'new_class_midog':
+            display_name = 'new class\nmidog++'
         elif name == 'dermamnist-e-external':
             display_name = 'derma-e\n-external'
             custom_angle = angle_positive - 0.1
@@ -595,7 +605,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
             #display_name = 'derma-e\n-id'
             custom_angle = angle_positive + 0.18
         elif name == 'pneumoniamnist':
-            custom_angle = angle_positive + 0.25
+            custom_angle = angle_positive + 0.35
         elif name == 'amos2022':
             custom_angle = angle_positive - 0.25
         elif name == 'organamnist':
@@ -604,8 +614,6 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
             custom_angle = angle_positive + 0.07
         elif name == 'octmnist':
             custom_angle = angle_positive - 0.05
-        elif name == 'pathmnist':
-            custom_angle = angle_positive - 0.25
             
         if name == 'tissuemnist' and metric == 'auroc_f':
             label_position_tissue = 1.12
@@ -628,6 +636,13 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
                     size=12, fontweight='bold', transform=ax.transData,
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
                             edgecolor='gray', alpha=0.8))
+        elif name == 'pneumoniamnist' and metric == 'auroc_f':
+            label_position_pneum = 1.1
+            ax.text(custom_angle, label_position_pneum, display_name, 
+                    horizontalalignment='center', verticalalignment='center',
+                    size=12, fontweight='bold', transform=ax.transData,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                            edgecolor='gray', alpha=0.8))
         elif name == 'bloodmnist' and metric == 'auroc_f':
             label_position_blood = 1.1
             ax.text(custom_angle, label_position_blood, display_name, 
@@ -635,13 +650,21 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
                     size=12, fontweight='bold', transform=ax.transData,
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
                             edgecolor='gray', alpha=0.8))
+        elif name == 'pathmnist' and metric == 'auroc_f':
+            label_position_path = 1.12
+            ax.text(custom_angle, label_position_path, display_name, 
+                    horizontalalignment='center', verticalalignment='center',
+                    size=12, fontweight='bold', transform=ax.transData,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                            edgecolor='gray', alpha=0.8))
         elif name == 'organamnist' and metric == 'auroc_f':
-            label_position_organa = 1.13
+            label_position_organa = 1.17
             ax.text(custom_angle, label_position_organa, display_name, 
                     horizontalalignment='center', verticalalignment='center',
                     size=12, fontweight='bold', transform=ax.transData,
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
                             edgecolor='gray', alpha=0.8))
+            
         else:
             ax.text(custom_angle, label_position, display_name, 
                     horizontalalignment='center', verticalalignment='center',
@@ -666,20 +689,15 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
     method_surfaces = {}
     method_angles = {}  # Store valid angles for each method
     
-    # Debug: Check if we're computing surfaces for AUGRC
-    if metric == 'augrc':
-        print(f"  DEBUG AUGRC: Starting surface computation for {len(all_methods)} methods, metric={metric}")
-    
+    # For each method, compute radar surface coverage using theoretical metric boundaries
     for method_idx, method_name in enumerate(all_methods):
         values = []
         for dataset_key in dataset_keys:
             val = model_results[dataset_key].get(method_name, np.nan)
+            # For AUGRC: invert so that 0 (best) -> 0.5 (edge) and 0.5 (worst) -> 0 (center)
+            if metric == 'augrc' and not np.isnan(val):
+                val = 0.5 - val
             values.append(val)
-        
-        # Debug for AUGRC
-        if metric == 'augrc' and method_name == 'Ensembling':
-            print(f"  DEBUG AUGRC {method_name}: Got {len(values)} values, NaN count: {sum(1 for v in values if np.isnan(v))}")
-            print(f"    Sample values: {values[:3]}")
         
         # Filter out NaN values and their corresponding angles
         valid_indices = [i for i, v in enumerate(values) if not np.isnan(v)]
@@ -693,51 +711,26 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         filtered_values = [values[i] for i in valid_indices]
         filtered_angles = [angles[i] for i in valid_indices]
         
-        # Debug for AUGRC
-        if metric == 'augrc' and method_name == 'Ensembling':
-            print(f"  DEBUG AUGRC {method_name}: filtered to {len(filtered_values)} values")
-        
-        # Transform values same as plotting
-        if metric == 'augrc':
-            if shift in ['population_shift', 'new_class_shift']:
-                max_display = 0.45
-            else:
-                max_display = 0.30
-            values_transformed = augrc_log_transform(filtered_values, max_display=max_display)
-            # Convert to list if it's a numpy array
-            if hasattr(values_transformed, 'tolist'):
-                values_transformed = values_transformed.tolist()
-            
-            # Debug
-            if method_name == 'Ensembling':
-                print(f"  DEBUG AUGRC {method_name}: transformed values, max_display={max_display}, transformed_range=[{min(values_transformed):.3f}, {max(values_transformed):.3f}]")
-        else:
-            values_transformed = filtered_values
+        # Surface calculation uses inverted AUGRC values directly - no additional transforms needed
+        values_for_surface = filtered_values
         
         # Add closing point
-        values_closed = values_transformed + [values_transformed[0]]
+        values_closed = values_for_surface + [values_for_surface[0]]
         angles_closed = filtered_angles + [filtered_angles[0]]
         
-        # Debug before area computation
-        if metric == 'augrc' and method_name == 'Ensembling':
-            print(f"  DEBUG AUGRC: About to compute area for {method_name}")
-            print(f"    n_values_closed={len(values_closed)}, n_angles_closed={len(angles_closed)}")
-        
-        # Compute area
+        # Compute area using theoretical metric boundaries (no transforms)
         try:
             area = compute_polygon_area_polar(angles_closed, values_closed)
             method_surfaces[method_name] = area
             method_angles[method_name] = filtered_angles  # Store without closing point
             
-            # Debug first method for AUGRC
-            if metric == 'augrc' and method_name == 'Ensembling':
-                print(f"  DEBUG AUGRC surface BEFORE normalization for {method_name}: area={area:.6f}, n_points={len(filtered_angles)}")
-                print(f"    value_range=[{min(values_transformed):.3f}, {max(values_transformed):.3f}]")
-                print(f"    angles_range=[{min(filtered_angles):.3f}, {max(filtered_angles):.3f}]")
+            # Debug for AUGRC to verify linear scaling
+            if metric == 'augrc' and shift == 'population_shift' and method_name == 'Mean_Aggregation_Ensemble':
+                avg_radius = np.mean(filtered_values)
+                print(f"  DEBUG {method_name}: avg_radius={avg_radius:.3f}, surface={area:.6f}")
+                print(f"    Expected with linear scaling: {avg_radius / 0.5:.3f}")
         except Exception as e:
             print(f"  ERROR computing area for {method_name}, metric={metric}: {e}")
-            import traceback
-            traceback.print_exc()
             method_surfaces[method_name] = 0.0
             method_angles[method_name] = []
     
@@ -750,25 +743,14 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
                 # Get this method's angles
                 method_specific_angles = method_angles[method_name]
                 
-                # Compute oracle for THIS method (perfect performance on its available datasets)
-                # For AUROC_f: perfect = 1.0 (no transformation needed)
-                # For AUGRC: perfect = 0.0, but needs to be transformed to edge
+                # Compute oracle for THIS method using theoretical metric boundaries
+                # For AUROC_f: perfect = 1.0 (at the edge, best possible)
+                # For AUGRC: perfect = 0.5 (after inversion: 0.5 - 0.0 = 0.5, at edge)
                 if metric == 'augrc':
-                    # Perfect AUGRC is 0, which transforms to max edge value
-                    if shift in ['population_shift', 'new_class_shift']:
-                        max_display = 0.45
-                    else:
-                        max_display = 0.30
-                    # Perfect AUGRC (0.0) transforms to scale_factor * max_display^1.5
-                    oracle_perfect_values = [0.0] * len(method_specific_angles)
-                    oracle_transformed = augrc_log_transform(oracle_perfect_values, max_display=max_display)
-                    oracle_values = oracle_transformed.tolist() if hasattr(oracle_transformed, 'tolist') else list(oracle_transformed)
-                    
-                    # Debug for first method
-                    if method_name == list(method_surfaces.keys())[0]:
-                        print(f"  DEBUG AUGRC oracle: max_display={max_display}, n_points={len(oracle_values)}, oracle_values[0]={oracle_values[0]:.3f}")
+                    # After inversion (0.5 - AUGRC), perfect AUGRC=0 becomes 0.5
+                    oracle_values = [0.5] * len(method_specific_angles)
                 else:
-                    # For AUROC_f, perfect is 1.0 (already at edge)
+                    # For AUROC_f, perfect is 1.0
                     oracle_values = [1.0] * len(method_specific_angles)
                 
                 oracle_values_closed = oracle_values + [oracle_values[0]]
@@ -776,17 +758,13 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
                 
                 oracle_surface = compute_polygon_area_polar(angles_closed_oracle, oracle_values_closed)
                 
-                # Debug for first method
-                if method_name == list(method_surfaces.keys())[0]:
-                    print(f"  DEBUG {metric} oracle for {method_name}: surface_before={method_surfaces[method_name]:.6f}, oracle_surface={oracle_surface:.6f}")
+                # Debug oracle for AUGRC
+                if metric == 'augrc' and shift == 'population_shift' and method_name == 'Mean_Aggregation_Ensemble':
+                    print(f"    oracle_surface={oracle_surface:.6f}, ratio={method_surfaces[method_name] / oracle_surface:.3f}")
                 
                 # Normalize this method's surface by its own oracle
                 if oracle_surface > 0:
                     method_surfaces[method_name] = method_surfaces[method_name] / oracle_surface
-                    
-                    # Debug for first method
-                    if method_name == list(method_surfaces.keys())[0]:
-                        print(f"  DEBUG normalized surface: {method_surfaces[method_name]:.6f}")
             except Exception as e:
                 print(f"  ⚠ Oracle normalization failed for {method_name}: {e}")
                 pass  # Keep unnormalized surface if computation fails
@@ -1225,18 +1203,26 @@ def aggregate_uq_methods(npz_path, aggregation='mean', methods=None, output_path
 
 
 def main(aggregation='mean', shift='corruption_shifts'):
-    """Main function to generate combined 2x2 radar plots from benchmark results.
+    """Main function to generate separate radar plots based on shift type.
     
-    Creates one figure with 4 subplots:
-    - Top row: AUROC_f (ResNet18 left, ViT right)
-    - Bottom row: AUGRC (ResNet18 left, ViT right)
+    Creates TWO separate figures:
+    
+    Figure 1 (ID + CS): 2x2 layout
+    - Top row: AUROC_f (ResNet18 left, ViT right) for ID + CS datasets
+    - Bottom row: AUGRC (ResNet18 left, ViT right) for ID + CS datasets
+    
+    Figure 2 (NCS + PS): 1x2 layout  
+    - Top row: AUROC_f (ResNet18 left, ViT right) for NCS + PS datasets
+    - Bottom row: AUGRC (ResNet18 left, ViT right) for NCS + PS datasets
     
     Args:
         aggregation: Aggregation strategy - 'mean', 'min', 'max', or 'vote'
+        shift: Controls which figures to generate - 'all' generates both, 
+               or specific shift type for single figure
     """
     
     print("=" * 80)
-    print("UQ Benchmark Radar Plot Generator")
+    print("UQ Benchmark Radar Plot Generator (Split Figures)")
     print(f"Aggregation: {aggregation.upper()}")
     print("=" * 80)
     
@@ -1244,113 +1230,245 @@ def main(aggregation='mean', shift='corruption_shifts'):
     script_dir = Path(__file__).parent
     workspace_root = script_dir.parent.parent.parent.parent
     results_dir = workspace_root / 'uq_benchmark_results'
-    if shift == 'corruption_shifts':
-        id_results_dir = results_dir / 'corruption_shifts'
-        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'corruption_shifts'
-    else:
-        id_results_dir = results_dir / 'id'
-        comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / 'in_distribution'
     
     print(f"Workspace root: {workspace_root}")
-    print(f"Looking for JSON files in: {id_results_dir}")
-    print(f"Looking for accuracy in: {comp_eval_dir}")
     
     # Create output directory for plots in the script's directory
     output_dir = script_dir / 'radar_plots'
     output_dir.mkdir(exist_ok=True)
     
-    # Parse results for both metrics
-    results_auroc = parse_results_directory(id_results_dir, metric='auroc_f')
-    results_augrc = parse_results_directory(id_results_dir, metric='augrc')
-    
-    if not results_auroc and not results_augrc:
-        print(f"\n⚠️  No results found!")
-        return
-    
-    # Create combined 2x2 figure
-    fig = plt.figure(figsize=(24, 24))
-    
-    # Define subplot positions: [left, bottom, width, height]
-    # Top row (AUROC_f): ResNet18 left, ViT right
-    # Bottom row (AUGRC): ResNet18 left, ViT right
-    axes = [
-        fig.add_subplot(2, 2, 1, projection='polar'),  # Top-left: ResNet18 AUROC_f
-        fig.add_subplot(2, 2, 2, projection='polar'),  # Top-right: ViT AUROC_f
-        fig.add_subplot(2, 2, 3, projection='polar'),  # Bottom-left: ResNet18 AUGRC
-        fig.add_subplot(2, 2, 4, projection='polar'),  # Bottom-right: ViT AUGRC
-    ]
-    
-    model_names = ['resnet18', 'vit_b_16']
-    metrics = ['auroc_f', 'augrc']
-    results_map = {'auroc_f': results_auroc, 'augrc': results_augrc}
-    
-    all_handles = []
-    all_labels = []
-    
-    # Generate each subplot
-    for idx, (row, metric) in enumerate([(0, 'auroc_f'), (1, 'augrc')]):
-        for col, model_name in enumerate(model_names):
-            ax_idx = row * 2 + col
-            ax = axes[ax_idx]
-            
-            results = results_map[metric]
-            if not results or model_name not in results:
-                continue
-            
-            model_results = results[model_name]
-            
-            print(f"\n{'='*80}")
-            print(f"Generating {metric.upper()} plot for {model_name}...")
-            print(f"{'='*80}")
-            
-            # Generate plot on this axis
-            handles, labels, method_surfaces, method_angles = create_radar_plot_on_axis(
-                ax, model_results, model_name, 
-                runs_dir=comp_eval_dir, 
-                metric=metric, aggregation=aggregation, shift=shift
-            )
-            
-            # Collect legend info from first subplot only
-            if ax_idx == 0:
-                all_handles = handles
-                all_labels = labels
-            
-            # Add subplot title
-            model_display = model_name.replace('_', ' ').upper()
-            metric_display = 'AUROC F' if metric == 'auroc_f' else 'AUGRC'
-            ax.set_title(f'{model_display}\nPer-fold {aggregation.capitalize()} {metric_display}',
-                        fontsize=16, fontweight='bold', pad=40, x=-0.1, ha='left')
-    
-    # Move "Mean_Aggregation" to bottom of legend
-    if 'Mean_Aggregation' in all_labels:
-        idx = all_labels.index('Mean_Aggregation')
-        all_labels.append(all_labels.pop(idx))
-        all_handles.append(all_handles.pop(idx))
-    
-    # Add shared legend at the bottom center
-    fig.legend(all_handles, all_labels, loc='lower center', ncol=5, 
-              fontsize=14, frameon=True, bbox_to_anchor=(0.5, -0.02))
-    
-    if shift == 'corruption_shifts':
-        title_shift = 'Corruption Shifts'
+    # Determine which figures to generate
+    if shift == 'all':
+        shift_groups = [
+            {'name': 'ID_CS', 'shifts': ['in_distribution', 'corruption_shifts'], 'title': 'In-Distribution & Corruption Shifts', 'layout': 'separate'},
+            {'name': 'NCS_PS', 'shifts': ['new_class_shift', 'population_shift'], 'title': 'New Class & Population Shifts', 'layout': 'combined'}
+        ]
     else:
-        title_shift = 'In Distribution'
-    # Add main title
-    fig.suptitle(f'CSF Performances - {title_shift}', fontsize=24, fontweight='bold', y=0.98)
+        # Single shift type (backward compatibility)
+        if shift == 'corruption_shifts':
+            shift_name = 'CS'
+            title = 'Corruption Shifts'
+        elif shift == 'in_distribution':
+            shift_name = 'ID'
+            title = 'In-Distribution'
+        elif shift == 'population_shift':
+            shift_name = 'PS'
+            title = 'Population Shift'
+        elif shift == 'new_class_shift':
+            shift_name = 'NCS'
+            title = 'New Class Shift'
+        else:
+            shift_name = shift
+            title = shift.replace('_', ' ').title()
+        shift_groups = [{'name': shift_name, 'shifts': [shift], 'title': title, 'layout': 'single'}]
     
-    # Adjust spacing
-    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
-    
-    # Save combined figure
-    output_path = output_dir / f'radar_plots_combined_{title_shift.replace(" ", "_").lower()}_{aggregation}.png'
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"\n✓ Combined plot saved to {output_path}")
-    
-    plt.close(fig)
-    
-    # Generate summary table
-    summary_path = output_dir / f'results_summary_{title_shift.replace(" ", "_").lower()}.csv'
-    generate_summary_table(results_auroc if results_auroc else results_augrc, summary_path)
+    # Process each shift group (creates separate figures)
+    for group in shift_groups:
+        print(f"\n{'='*80}")
+        print(f"Processing: {group['title']}")
+        print(f"{'='*80}")
+        
+        layout = group.get('layout', 'single')
+        
+        # Load results for each shift type separately (for 'separate' layout) or combined
+        if layout == 'separate':
+            # Load each shift separately - for ID/CS split display
+            shift_results = {}
+            for shift_type in group['shifts']:
+                shift_results_dir = results_dir / 'jsons_results' / shift_type
+                
+                if not shift_results_dir.exists():
+                    print(f"  Warning: Directory not found: {shift_results_dir}")
+                    continue
+                
+                print(f"  Loading from: {shift_results_dir}")
+                
+                # Parse results for this shift type
+                auroc_results = parse_results_directory(shift_results_dir, metric='auroc_f')
+                augrc_results = parse_results_directory(shift_results_dir, metric='augrc')
+                
+                shift_results[shift_type] = {
+                    'auroc_f': auroc_results,
+                    'augrc': augrc_results
+                }
+            
+            if not shift_results:
+                print(f"  ERROR: No results found for {group['title']}")
+                continue
+        else:
+            # Combine results from all shifts in this group - for NCS/PS combined display
+            combined_auroc = {}
+            combined_augrc = {}
+            
+            for shift_type in group['shifts']:
+                shift_results_dir = results_dir / 'jsons_results' / shift_type
+                
+                if not shift_results_dir.exists():
+                    print(f"  Warning: Directory not found: {shift_results_dir}")
+                    continue
+                
+                print(f"  Loading from: {shift_results_dir}")
+                
+                # Parse results for this shift type
+                auroc_results = parse_results_directory(shift_results_dir, metric='auroc_f')
+                augrc_results = parse_results_directory(shift_results_dir, metric='augrc')
+                
+                # Merge into combined results
+                for model_name in auroc_results:
+                    if model_name not in combined_auroc:
+                        combined_auroc[model_name] = {}
+                    combined_auroc[model_name].update(auroc_results[model_name])
+                
+                for model_name in augrc_results:
+                    if model_name not in combined_augrc:
+                        combined_augrc[model_name] = {}
+                    combined_augrc[model_name].update(augrc_results[model_name])
+            
+            if not combined_auroc and not combined_augrc:
+                print(f"  ERROR: No results found for {group['title']}")
+                continue
+        
+        model_names = ['resnet18', 'vit_b_16']
+        all_handles = []
+        all_labels = []
+        
+        # Different layouts based on group type
+        if layout == 'separate':
+            # Figure 1: 2x2 layout - ID and CS as separate radars
+            # Top row: ID (ResNet18 left, ViT right)
+            # Bottom row: CS (ResNet18 left, ViT right)
+            fig = plt.figure(figsize=(24, 24))
+            axes = [
+                fig.add_subplot(2, 2, 1, projection='polar'),  # Top-left: ResNet18 ID
+                fig.add_subplot(2, 2, 2, projection='polar'),  # Top-right: ViT ID
+                fig.add_subplot(2, 2, 3, projection='polar'),  # Bottom-left: ResNet18 CS
+                fig.add_subplot(2, 2, 4, projection='polar'),  # Bottom-right: ViT CS
+            ]
+            
+            # Generate subplot for each shift × model combination
+            plot_idx = 0
+            for shift_idx, shift_type in enumerate(group['shifts']):
+                if shift_type not in shift_results:
+                    continue
+                    
+                for col, model_name in enumerate(model_names):
+                    ax = axes[plot_idx]
+                    
+                    # Get results for this shift and model (using AUROC for display)
+                    results = shift_results[shift_type]['auroc_f']
+                    if not results or model_name not in results:
+                        plot_idx += 1
+                        continue
+                    
+                    model_results = results[model_name]
+                    
+                    print(f"\n  {'='*76}")
+                    print(f"  Generating {shift_type.upper()} plot for {model_name}...")
+                    print(f"  {'='*76}")
+                    
+                    # Get comp_eval_dir for this shift
+                    comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / shift_type
+                    
+                    # Generate plot on this axis (only AUROC_f for separate layout)
+                    handles, labels, method_surfaces, method_angles = create_radar_plot_on_axis(
+                        ax, model_results, model_name, 
+                        runs_dir=comp_eval_dir, 
+                        metric='auroc_f', aggregation=aggregation, shift=shift_type
+                    )
+                    
+                    # Collect legend info from first subplot only
+                    if plot_idx == 0:
+                        all_handles = handles
+                        all_labels = labels
+                    
+                    # Add subplot title
+                    model_display = model_name.replace('_', ' ').upper()
+                    shift_display = 'ID' if shift_type == 'in_distribution' else 'CS'
+                    ax.set_title(f'{model_display} - {shift_display}\\nPer-fold {aggregation.capitalize()} AUROC F',
+                                fontsize=16, fontweight='bold', pad=40, x=-0.1, ha='left')
+                    
+                    plot_idx += 1
+        
+        else:
+            # Figure 2: 1x2 layout - PS and NCS combined on same radar
+            # Left: ResNet18 with both PS+NCS
+            # Right: ViT with both PS+NCS
+            fig = plt.figure(figsize=(24, 12))
+            axes = [
+                fig.add_subplot(1, 2, 1, projection='polar'),  # Left: ResNet18 PS+NCS
+                fig.add_subplot(1, 2, 2, projection='polar'),  # Right: ViT PS+NCS
+            ]
+            
+            # Generate subplot for each model (using combined PS+NCS data)
+            for col, model_name in enumerate(model_names):
+                ax = axes[col]
+                
+                results = combined_auroc  # Use AUROC for combined display
+                if not results or model_name not in results:
+                    continue
+                
+                model_results = results[model_name]
+                
+                print(f"\n  {'='*76}")
+                print(f"  Generating combined PS+NCS plot for {model_name}...")
+                print(f"  {'='*76}")
+                
+                # Use the first shift type for display parameters
+                plot_shift = group['shifts'][0]
+                
+                # Get comp_eval_dir for this shift
+                comp_eval_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results' / plot_shift
+                
+                # Generate plot on this axis (AUROC_f only)
+                handles, labels, method_surfaces, method_angles = create_radar_plot_on_axis(
+                    ax, model_results, model_name, 
+                    runs_dir=comp_eval_dir, 
+                    metric='auroc_f', aggregation=aggregation, shift=plot_shift
+                )
+                
+                # Collect legend info from first subplot only
+                if col == 0:
+                    all_handles = handles
+                    all_labels = labels
+                
+                # Add subplot title
+                model_display = model_name.replace('_', ' ').upper()
+                ax.set_title(f'{model_display} - PS + NCS\\nPer-fold {aggregation.capitalize()} AUROC F',
+                            fontsize=16, fontweight='bold', pad=40, x=-0.1, ha='left')
+        
+        # Move "Mean_Aggregation" to bottom of legend
+        if 'Mean_Aggregation' in all_labels:
+            idx = all_labels.index('Mean_Aggregation')
+            all_labels.append(all_labels.pop(idx))
+            all_handles.append(all_handles.pop(idx))
+        
+        # Add shared legend at the bottom center
+        fig.legend(all_handles, all_labels, loc='lower center', ncol=5, 
+                  fontsize=14, frameon=True, bbox_to_anchor=(0.5, -0.02))
+        
+        # Add main title
+        fig.suptitle(f'CSF Performances - {group["title"]}', fontsize=24, fontweight='bold', y=0.98)
+        
+        # Adjust spacing
+        plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+        
+        # Save combined figure with group-specific name
+        output_path = output_dir / f'radar_plots_{group["name"].lower()}_{aggregation}.png'
+        fig.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"\n  ✓ Plot saved to {output_path}")
+        
+        plt.close(fig)
+        
+        # Generate summary table for this group
+        summary_path = output_dir / f'results_summary_{group["name"].lower()}.csv'
+        if layout == 'separate':
+            # For separate layout, use results from first shift type
+            first_shift = group['shifts'][0]
+            if first_shift in shift_results:
+                generate_summary_table(shift_results[first_shift]['auroc_f'], summary_path)
+        else:
+            # For combined layout, use combined results
+            generate_summary_table(combined_auroc if combined_auroc else combined_augrc, summary_path)
     
     print("\n" + "=" * 80)
     print("✓ All plots generated successfully!")
@@ -1613,15 +1731,19 @@ def create_rank_radar_plot_on_axis(ax, ranked_results, model_name, aggregation='
 if __name__ == '__main__':
     import sys
     
-    # Usage: python generate_radar_plots.py [mean|min|max|vote]
+    # Usage: python generate_radar_plots.py [mean|min|max|vote] [all|in_distribution|corruption_shifts|new_class_shift|population_shift]
+    # Default: python generate_radar_plots.py mean all
+    #   -> Generates both ID+CS figure and NCS+PS figure
     aggregation = sys.argv[1] if len(sys.argv) > 1 else 'mean'
-    shift = sys.argv[2] if len(sys.argv) > 2 else 'corruption_shifts'
+    shift = sys.argv[2] if len(sys.argv) > 2 else 'all'
     
     if aggregation not in ['mean', 'min', 'max', 'vote']:
         print(f"Unknown aggregation: {aggregation}")
-        print("Usage: python generate_radar_plots.py [mean|min|max|vote]")
+        print("Usage: python generate_radar_plots.py [mean|min|max|vote] [all|in_distribution|corruption_shifts|new_class_shift|population_shift]")
         sys.exit(1)
     
     # Generate radar plots with specified aggregation
+    # shift='all' will create both figures (ID+CS and NCS+PS)
+    # or specify individual shift type for single figure
     main(aggregation=aggregation, shift=shift)
 

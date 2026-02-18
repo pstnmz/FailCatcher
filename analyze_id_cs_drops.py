@@ -11,8 +11,8 @@ from collections import defaultdict
 import numpy as np
 
 # Directories
-ID_DIR = Path("uq_benchmark_results/in_distribution")
-CS_DIR = Path("uq_benchmark_results/corruption_shifts")
+ID_DIR = Path("uq_benchmark_results/full_results/in_distribution")
+CS_DIR = Path("uq_benchmark_results/full_results/corruption_shifts")
 
 # Dataset mappings (ID name -> base name)
 DATASETS = {
@@ -22,7 +22,8 @@ DATASETS = {
     "pneumoniamnist": "pneumoniamnist",
     "octmnist": "octmnist",
     "organamnist": "organamnist",
-    "bloodmnist": "bloodmnist"
+    "bloodmnist": "bloodmnist",
+    "pathmnist": "pathmnist"
 }
 
 # Model architectures
@@ -105,14 +106,16 @@ def extract_best_metrics(json_path):
     """Extract best AUROC-F and AUGRC across all UQ methods from a JSON file.
     
     Notes:
-    - Most methods have 'auroc_f' and 'augrc' fields
-    - Mean_Aggregation and Mean_Aggregation_Ensemble have 'auroc_f_mean' and 'augrc_mean' fields
+    - Best AUROC-F is highest (maximum)
+    - Best AUGRC is lowest (minimum)
+    - Mean_Aggregation_Ensemble only has 'auroc_f'/'augrc' (no '_mean' suffix)
+    - All other methods have 'auroc_f_mean'/'augrc_mean'
     """
     with open(json_path, 'r') as f:
         data = json.load(f)
     
     best_auroc_f = -np.inf
-    best_augrc = -np.inf
+    best_augrc = np.inf  # Lower AUGRC is better!
     best_auroc_method = None
     best_augrc_method = None
     
@@ -121,21 +124,26 @@ def extract_best_metrics(json_path):
     for method_name, method_data in methods.items():
         # Check if this is a valid UQ method result
         if isinstance(method_data, dict):
-            # ALL methods use 'auroc_f_mean' and 'augrc_mean' fields
-            auroc_f = method_data.get("auroc_f_mean", None)
-            augrc = method_data.get("augrc_mean", None)
+            # Mean_Aggregation_Ensemble only has 'auroc_f'/'augrc' (no '_mean' suffix)
+            # All other methods have 'auroc_f_mean'/'augrc_mean'
+            if method_name == "Mean_Aggregation_Ensemble":
+                auroc_f = method_data.get("auroc_f", None)
+                augrc = method_data.get("augrc", None)
+            else:
+                auroc_f = method_data.get("auroc_f_mean", None)
+                augrc = method_data.get("augrc_mean", None)
             
             if auroc_f is not None and auroc_f > best_auroc_f:
                 best_auroc_f = auroc_f
                 best_auroc_method = method_name
             
-            if augrc is not None and augrc > best_augrc:
+            if augrc is not None and augrc < best_augrc:  # Lower is better!
                 best_augrc = augrc
                 best_augrc_method = method_name
     
     return {
         "auroc_f": best_auroc_f if best_auroc_f != -np.inf else None,
-        "augrc": best_augrc if best_augrc != -np.inf else None,
+        "augrc": best_augrc if best_augrc != np.inf else None,
         "auroc_f_method": best_auroc_method,
         "augrc_method": best_augrc_method
     }

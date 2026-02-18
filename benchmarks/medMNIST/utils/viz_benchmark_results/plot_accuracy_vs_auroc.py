@@ -252,7 +252,7 @@ def collect_all_data_points(workspace_root):
         }
     """
     comprehensive_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results'
-    uq_results_dir = workspace_root / 'uq_benchmark_results'
+    uq_results_dir = workspace_root / 'uq_benchmark_results' / 'jsons_results'
     
     per_fold_data = []
     ensemble_data = []
@@ -766,8 +766,8 @@ def create_per_method_correlation_plots(data, output_dir):
                 x_line = np.linspace(x.min(), x.max(), 100)
                 ax.plot(x_line, p(x_line), "r--", alpha=0.5, linewidth=2)
                 
-                # Add correlation text
-                ax.text(0.05, 0.95, f'r = {corr:.3f}', 
+                # Add correlation text with linear approximation
+                ax.text(0.4, 0.2, f'r = {corr:.2f}\ny = {z[0]:.2f}x + {z[1]:.2f}', 
                        transform=ax.transAxes, fontsize=12, 
                        verticalalignment='top',
                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
@@ -959,17 +959,18 @@ def create_sample_level_pairplots(workspace_root, output_dir):
     # Values: {'xlim': (min, max), 'ylim': (min, max)}
     paired_axis_limits = {}
     
-    # Process each shift type (excluding new_class_shifts - handled separately)
+    # Process each shift type including new_class_shifts
     shift_info = [
         ('in_distribution', 'In-Distribution'),
         ('corruption_shifts', 'Corruption Shifts'),
-        ('population_shifts', 'Population Shifts')
+        ('population_shifts', 'Population Shifts'),
+        ('new_class_shifts', 'New Class Shifts')
     ]
     
     for shift_dir_name, shift_title in shift_info:
         print(f"\n{shift_title}: Loading sample-level scores...")
         
-        uq_shift_dir = workspace_root / 'uq_benchmark_results' / shift_dir_name
+        uq_shift_dir = workspace_root / 'uq_benchmark_results' / 'full_results' / shift_dir_name
         
         if not uq_shift_dir.exists():
             print(f"  Directory not found: {uq_shift_dir}")
@@ -981,6 +982,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         
         # Find all NPZ files
         npz_files = list(uq_shift_dir.glob('all_metrics_*.npz'))
+        print(f"  Found {len(npz_files)} NPZ files")
         
         for npz_file in npz_files:
             # Parse filename to get dataset, model, config
@@ -1015,8 +1017,12 @@ def create_sample_level_pairplots(workspace_root, output_dir):
                     npz_data = np.load(npz_file, allow_pickle=True)
                     
                     # Get cache file for y_true
-                    cache_dir = uq_shift_dir.parent / 'cache'
-                    shift_name_short = shift_dir_name.replace('_shifts', '')
+                    cache_dir = uq_shift_dir.parent.parent / 'cache'
+                    # For new_class_shifts, keep 'shift' singular (not 'new_class')
+                    if shift_dir_name == 'new_class_shifts':
+                        shift_name_short = 'new_class_shift'
+                    else:
+                        shift_name_short = shift_dir_name.replace('_shifts', '')
                     cache_file = find_cache_file(cache_dir, dataset, model, config, shift_name_short)
                     
                     if not cache_file or not cache_file.exists():
@@ -1033,33 +1039,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
                     # For new_class_shift: use binary_gt for correctness labels
                     binary_gt = cache_data.get('binary_gt', None)
                     
-
-                    
                     # Process each method in NPZ file
-                    for method_name in npz_data.keys():
-                        # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
-                        if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
-                            continue
-                        
-                        # Remove _per_fold suffix for display name
-                        base_method_name = method_name.replace('_per_fold', '')
-                        
-                        if base_method_name in ['Mean_Aggregation_Ensemble', 'DE']:  # Skip ensemble
-                            continue
-                        
-                        display_name = name_mapping.get(base_method_name, base_method_name)
-                        if display_name in ensemble_methods:
-                            continue
-                        
-                        scores = npz_data[method_name]
-                        
-                        # Handle shape mismatch for all methods
-                        if scores.ndim == 2 and scores.shape[1] != n_samples:
-                            scores = scores[:, :n_samples]
-                        elif scores.ndim == 1 and len(scores) != n_samples:
-                            scores = scores[:n_samples]
-                        
-                        # Check shape
                     for method_name in npz_data.keys():
                         # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
                         if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
@@ -1510,401 +1490,280 @@ def create_sample_level_pairplots(workspace_root, output_dir):
     return shift_dataframes
 
 
-def create_amos2022_newclass_pairplot(workspace_root, output_dir, shift_dataframes=None):
+def create_combined_pairplot(shift_dataframe_a, shift_dataframe_b, output_dir, shift_a_name='ID', shift_b_name='CS'):
     """
-    Create a dedicated pairplot for amos2022 data from new_class_shifts.
-    Colors samples by correct/incorrect predictions (green/red).
+    Create a combined pairplot with shift_a data in lower-left and shift_b data in upper-right.
+    Both shifts share the same diagonal.
     
     Args:
-        workspace_root: path to workspace root
+        shift_dataframe_a: DataFrame for first shift (lower-left)
+        shift_dataframe_b: DataFrame for second shift (upper-right)
         output_dir: directory to save plot
-        shift_dataframes: dict of shift dataframes for paired limit computation
+        shift_a_name: display name for shift A
+        shift_b_name: display name for shift B
     """
     print("\n" + "="*80)
-    print("Creating dedicated AMOS2022 New Class Shift sample-level pairplot")
+    print(f"Creating combined {shift_a_name} (lower-left) + {shift_b_name} (upper-right) pairplot")
     print("="*80)
     
-    # Rename methods for display
-    name_mapping = {
-        'MSR_calibrated': 'MSR-S',
-        'KNN_Raw': 'KNN',
-        'MCDropout': 'MCD',
-        'Mean_Aggregation': 'Mean Agg'
-    }
-    
-    # Define ensemble methods to exclude
-    ensemble_methods = ['DE', 'Mean_Aggregation_Ensemble']
-    
-    uq_shift_dir = workspace_root / 'uq_benchmark_results' / 'new_class_shifts'
-    
-    if not uq_shift_dir.exists():
-        print(f"  Directory not found: {uq_shift_dir}")
+    if shift_dataframe_a is None or shift_dataframe_b is None or shift_dataframe_a.empty or shift_dataframe_b.empty:
+        print(f"\n⚠ Skipping combined {shift_a_name}+{shift_b_name} pairplot - missing data")
         return
     
-    # Collect sample-level scores for amos2022 only
-    sample_scores = defaultdict(dict)
+    df_a = shift_dataframe_a
+    df_b = shift_dataframe_b
     
-    # Find all NPZ files for amos2022
-    npz_files = list(uq_shift_dir.glob('all_metrics_amos2022*.npz'))
+    # Get all methods (union from both shifts)
+    id_methods = [c for c in df_a.columns if c not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct', 'Prediction']]
+    cs_methods = [c for c in df_b.columns if c not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct', 'Prediction']]
+    all_methods = list(set(id_methods) | set(cs_methods))  # Union instead of intersection
     
-    print(f"Found {len(npz_files)} NPZ files for amos2022")
-    
-    for npz_file in npz_files:
-        # Parse filename to get model and config
-        filename = npz_file.name
-        if filename.startswith('all_metrics_'):
-            name = filename.replace('all_metrics_', '').replace('.json', '').replace('.npz', '')
-            
-            # Remove timestamp
-            import re
-            name = re.sub(r'_\d{8}_\d{6}$', '', name)
-            name = name.replace('_new_class_shift', '')
-            
-            parts = name.split('_')
-            
-            # Find model
-            if 'resnet18' in parts:
-                model_idx = parts.index('resnet18')
-                model = 'resnet18'
-            elif 'vit' in parts and 'b' in parts and '16' in parts:
-                model_idx = parts.index('vit')
-                model = 'vit_b_16'
-            else:
-                continue
-            
-            dataset = '_'.join(parts[:model_idx])
-            if dataset != 'amos2022':
-                continue
-            
-            config_parts = parts[model_idx+1:] if model == 'resnet18' else parts[model_idx+3:]
-            config = config_parts[0] if config_parts and config_parts[0] in ['DA', 'DO', 'DADO'] else 'standard'
-            
-            print(f"  Processing: {dataset} / {model} / {config}")
-            
-            # Load NPZ data
-            try:
-                npz_data = np.load(npz_file, allow_pickle=True)
-                
-                # Get cache file for y_true
-                cache_dir = uq_shift_dir.parent / 'cache'
-                cache_file = find_cache_file(cache_dir, dataset, model, config, 'new_class_shift')
-                
-                if not cache_file or not cache_file.exists():
-                    print(f"    Cache file not found")
-                    continue
-                
-                cache_data = load_cache_data(cache_file)
-                if cache_data is None or cache_data['per_fold_predictions'] is None:
-                    print(f"    Failed to load cache data")
-                    continue
-                
-                n_folds = len(cache_data['per_fold_predictions'])
-                n_samples = len(cache_data['y_true'])
-                y_true = cache_data['y_true']
-                
-                # For new_class_shift: use binary_gt for correctness labels
-                if cache_data['binary_gt'] is not None:
-                    binary_gt = cache_data['binary_gt']
-                else:
-                    binary_gt = None
-                
-                # Process each method in NPZ file
-                for method_name in npz_data.keys():
-                    # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
-                    if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
-                        continue
-                    
-                    # Remove _per_fold suffix for display name
-                    base_method_name = method_name.replace('_per_fold', '')
-                    
-                    if base_method_name in ['Mean_Aggregation_Ensemble', 'DE']:  # Skip ensemble
-                        continue
-                    
-                    display_name = name_mapping.get(base_method_name, base_method_name)
-                    if display_name in ensemble_methods:
-                        continue
-                    
-                    scores = npz_data[method_name]
-                    
-                    # Handle shape mismatch
-                    if scores.ndim == 2 and scores.shape[1] != n_samples:
-                        scores = scores[:, :n_samples]
-                    
-                    # Check shape
-                for method_name in npz_data.keys():
-                    # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
-                    if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
-                        continue
-                    
-                    # Remove _per_fold suffix for display name
-                    base_method_name = method_name.replace('_per_fold', '')
-                    
-                    if base_method_name in ['Mean_Aggregation_Ensemble', 'DE']:  # Skip ensemble
-                        continue
-                    
-                    display_name = name_mapping.get(base_method_name, base_method_name)
-                    if display_name in ensemble_methods:
-                        continue
-                    
-                    scores = npz_data[method_name]
-                    
-                    # Check shape
-                    if scores.ndim == 2:  # (n_folds, n_samples)
-                        for fold_idx in range(n_folds):
-                            fold_scores = scores[fold_idx]
-                            y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
-                            # Use minimum length to avoid index errors
-                            n_samples_safe = min(len(fold_scores), len(y_pred_fold), len(y_true))
-                            for sample_idx in range(n_samples_safe):
-                                key = (dataset, model, config, fold_idx, sample_idx)
-                                sample_scores[key][display_name] = fold_scores[sample_idx]
-                                # Add correctness label if not already present
-                                if 'correct' not in sample_scores[key]:
-                                    # For new_class_shift: use binary_gt (0=correct, 1=failure)
-                                    if binary_gt is not None:
-                                        sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
-                                    else:
-                                        sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
-                    elif scores.ndim == 1:  # (n_samples,) - method that doesn't use folds
-                        for fold_idx in range(n_folds):
-                            y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
-                            # Use minimum length to avoid index errors
-                            n_samples_safe = min(len(scores), len(y_pred_fold), len(y_true))
-                            for sample_idx in range(n_samples_safe):
-                                key = (dataset, model, config, fold_idx, sample_idx)
-                                sample_scores[key][display_name] = scores[sample_idx]
-                                # Add correctness label if not already present
-                                if 'correct' not in sample_scores[key]:
-                                    # For new_class_shift: use binary_gt (0=correct, 1=failure)
-                                    if binary_gt is not None:
-                                        sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
-                                    else:
-                                        sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
-            
-            except Exception as e:
-                print(f"    Warning: Failed to process {npz_file.name}: {e}")
-                continue
-    
-    if not sample_scores:
-        print(f"  No sample scores found for amos2022")
+    if len(all_methods) < 2:
+        print("  Insufficient methods")
         return
-    
-    # Convert to DataFrame
-    rows = []
-    for (dataset, model, config, fold, sample_idx), method_dict in sample_scores.items():
-        row = {'dataset': dataset, 'model': model, 'config': config, 'fold': fold, 'sample_idx': sample_idx}
-        row.update(method_dict)
-        rows.append(row)
-    
-    df = pd.DataFrame(rows)
-    
-    # Get method columns
-    method_cols = [col for col in df.columns 
-                  if col not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct']]
-    
-    # Only keep methods with sufficient data
-    method_cols = [col for col in method_cols if df[col].notna().sum() > 100]
     
     # Sort alphabetically, but put Mean Agg at the end
-    method_cols = sorted(method_cols)
-    if 'Mean Agg' in method_cols:
-        method_cols.remove('Mean Agg')
-        method_cols.append('Mean Agg')
+    all_methods = sorted(all_methods)
+    if 'Mean Agg' in all_methods:
+        all_methods.remove('Mean Agg')
+        all_methods.append('Mean Agg')
     
-    # Remove samples with missing values in any method
-    # Keep 'correct', 'config', 'dataset', 'model' columns for hue parameter and stratification
-    df_complete = df[method_cols + ['correct', 'config', 'dataset', 'model', 'fold']].dropna()
+    print(f"  All methods ({len(all_methods)}): {', '.join(all_methods)}")
+    print(f"  {shift_a_name} samples: {len(df_a)}, {shift_b_name} samples: {len(df_b)}")
     
-    # Z-score normalization per fold and per method to handle scale differences
-    for method in method_cols:
-        for fold in df_complete['fold'].unique():
-            mask = df_complete['fold'] == fold
-            scores = df_complete.loc[mask, method]
-            mean = scores.mean()
-            std = scores.std()
-            if std > 0:
-                df_complete.loc[mask, method] = (scores - mean) / std
-            else:
-                df_complete.loc[mask, method] = 0.0
+    # Shuffle both dataframes - only include columns that exist in each
+    id_cols_to_keep = [m for m in all_methods if m in df_a.columns] + ['Prediction']
+    cs_cols_to_keep = [m for m in all_methods if m in df_b.columns] + ['Prediction']
     
-    # Convert correct boolean to string labels for better legend
-    df_complete['Prediction'] = df_complete['correct'].map({True: 'Correct', False: 'Incorrect'})
+    df_a_plot = df_a[id_cols_to_keep].sample(frac=1, random_state=42).reset_index(drop=True)
+    df_b_plot = df_b[cs_cols_to_keep].sample(frac=1, random_state=42).reset_index(drop=True)
     
-    print(f"\n  Total samples: {len(df_complete)}")
-    print(f"  Methods: {len(method_cols)}")
-    
-    if len(method_cols) < 2 or len(df_complete) < 10:
-        print(f"  Skipping - insufficient data")
-        return
-    
-    # Subsample if too many points (for visualization performance)
-    if len(df_complete) > 5000:
-        # Get unique configurations (all are amos2022, so stratify by config)
-        configs = df_complete['config'].unique()
-        n_configs = len(configs)
-        samples_per_config = 5000 // n_configs
-        
-        # Target: 50/50 balance between correct and incorrect for clear visualization
-        target_incorrect_ratio = 0.5
-        
-        sampled_dfs = []
-        for config in configs:
-            df_config = df_complete[df_complete['config'] == config]
-            
-            # Count correct and incorrect for this config
-            n_correct = df_config['correct'].sum()
-            n_incorrect = (~df_config['correct']).sum()
-            
-            # If config has fewer samples than target, take all
-            if len(df_config) <= samples_per_config:
-                sampled_dfs.append(df_config)
-            else:
-                target_incorrect = int(samples_per_config * target_incorrect_ratio)
-                
-                # Take all incorrect if less than target, otherwise sample
-                if n_incorrect <= target_incorrect:
-                    df_incorrect = df_config[~df_config['correct']]
-                    n_correct_needed = samples_per_config - len(df_incorrect)
-                    df_correct_sample = df_config[df_config['correct']].sample(n=min(n_correct_needed, n_correct), random_state=42)
-                else:
-                    df_incorrect = df_config[~df_config['correct']].sample(n=target_incorrect, random_state=42)
-                    df_correct_sample = df_config[df_config['correct']].sample(n=samples_per_config-target_incorrect, random_state=42)
-                
-                sampled_dfs.append(pd.concat([df_correct_sample, df_incorrect]))
-        
-        df_complete = pd.concat(sampled_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
-    
-    # Create pairplot
-    sns.set_style("whitegrid")
-    
-    # Explicitly shuffle the dataframe to ensure random mixing of red/green points
-    df_complete = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
-    
-    # Define custom color palette (green for correct, red for incorrect)
+    # Define color palette
     palette = {'Correct': 'green', 'Incorrect': 'red'}
     
-    g = sns.pairplot(
-        df_complete,
-        vars=method_cols,
-        hue='Prediction',
-        palette=palette,
-        diag_kind='kde',
-        plot_kws={'alpha': 0.2, 's': 20, 'edgecolor': 'none'},
-        diag_kws={'linewidth': 2},
-        corner=False
-    )
-
-    # Add title
-    # g.fig.suptitle(f'AMOS2022 New Class Shift: Sample-Level Method Score Correlations\n({len(df_complete)} samples, Green=Correct, Red=Incorrect)', 
-    #               fontsize=16, fontweight='bold', y=1.0)
+    # Create figure with extended grid for padding
+    # Need grid_size = n_methods + 2 to accommodate both CS and ID distributions
+    grid_size = len(all_methods) + 2
+    fig, axes = plt.subplots(grid_size, grid_size, 
+                             figsize=(2.2*grid_size, 2.5*grid_size))
     
-    # Adjust layout
-    plt.tight_layout()
+    # Make axes array 2D if needed
+    if grid_size == 1:
+        axes = np.array([[axes]])
+    elif axes.ndim == 1:
+        axes = axes.reshape(-1, 1)
     
-    # Save figure
-    output_path = output_dir / 'sample_level_pairplot_amos2022_newclass.png'
-    g.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"\n  ✓ AMOS2022 new class shift pairplot saved to {output_path}")
+    # Plot grid with proper diagonal alignment
+    # For method at index m (0-7):
+    #   - Column in grid: m+1 (columns 1-8)
+    #   - Row m, column m+1: CS KDE (upper-right diagonal)
+    #   - Row m+1, column m+1: Blank with method name (main diagonal)
+    #   - Row m+2, column m+1: ID KDE (lower-left diagonal)
+    #   - Upper triangle (i < j, excluding KDE): CS scatter
+    #   - Lower triangle (i > j, excluding KDE): ID scatter
     
-    plt.close()
-    
-    # Create UPPER-RIGHT corner version for new_class_shift (to pair with population_shifts lower-left)
-    print(f"  Creating UPPER-RIGHT corner pairplot (same samples)...")
-    
-    # Shuffle again to ensure proper z-order mixing
-    # Use PairGrid for consistency with lower-right plots
-    df_plot = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
-
-    g_corner = sns.PairGrid(
-        df_plot,
-        vars=method_cols,
-        diag_sharey=False
-    )
-
-    # --- LOWER: scatter tout-en-un (mélangé)
-    def scatter_shuffled(x, y, **kwargs):
-        ax = plt.gca()
-        idx = x.index  # indices disponibles pour CETTE paire (en pratique = df_plot.index)
-        colors = df_plot.loc[idx, "Prediction"].map(palette).values
-
-        ax.scatter(
-            x.values,
-            y.values,
-            c=colors,
-            alpha=0.2,
-            s=20,
-            edgecolors="none",
-            rasterized=True
-        )
-
-    g_corner.map_upper(scatter_shuffled)
-
-    # --- DIAG: 2 KDE (ou +) explicitement par classe
-    def diag_kde_by_class(x, **kwargs):
-        ax = plt.gca()
-        pred = df_plot.loc[x.index, "Prediction"]
-
-        levels = pred.dropna().unique()
-        # optionnel: ordre stable si bool ou 0/1
-        try:
-            levels = np.sort(levels)
-        except Exception:
-            pass
-
-        for lvl in levels:
-            xs = x[pred == lvl]
-            if xs.size < 2:
+    for i in range(grid_size):
+        for j in range(grid_size):
+            ax = axes[i, j]
+            
+            # Column j corresponds to method index (j-1) if j in [1, 8]
+            if j < 1 or j > len(all_methods):
+                ax.axis('off')
                 continue
-            sns.kdeplot(
-                x=xs,
-                ax=ax,
-                fill=True,
-                linewidth=2,
-                color=palette.get(lvl, None),
-                alpha=0.35,
-                common_norm=False
-            )
+            
+            method_col_idx = j - 1
+            method_col = all_methods[method_col_idx]
+            
+            # Check if this is a CS KDE position: i == method_col_idx
+            if i == method_col_idx:
+                if method_col not in df_b_plot.columns:
+                    ax.axis('off')
+                    continue
+                
+                x_cs = df_b_plot[method_col]
+                pred_cs = df_b_plot['Prediction']
+                
+                for pred_class in ['Correct', 'Incorrect']:
+                    xs = x_cs[pred_cs == pred_class]
+                    if xs.size >= 2:
+                        sns.kdeplot(x=xs, ax=ax, fill=True, linewidth=2, 
+                                   color=palette[pred_class], alpha=0.35, 
+                                   common_norm=False, linestyle='-')
+                
+                ax.set_ylabel(shift_b_name, fontsize=11, fontweight='bold', rotation=270, labelpad=10)
+                ax.yaxis.set_label_position('right')
+                ax.set_yticklabels([])
+                
 
-    g_corner.map_diag(diag_kde_by_class)
+                    
+                ax.grid(True, alpha=0.2, linestyle='--')
+            
+            # Check if this is blank diagonal: i == method_col_idx + 1
+            elif i == method_col_idx + 1:
+                ax.axis('off')
+                ax.text(0.5, 0.5, method_col, 
+                       transform=ax.transAxes, 
+                       fontsize=11, fontweight='bold',
+                       ha='center', va='center')
+            
+            # Check if this is ID KDE position: i == method_col_idx + 2
+            elif i == method_col_idx + 2:
+                if method_col not in df_a_plot.columns:
+                    ax.axis('off')
+                    continue
+                
+                x_id = df_a_plot[method_col]
+                pred_id = df_a_plot['Prediction']
+                
+                for pred_class in ['Correct', 'Incorrect']:
+                    xs = x_id[pred_id == pred_class]
+                    if xs.size >= 2:
+                        sns.kdeplot(x=xs, ax=ax, fill=True, linewidth=2, 
+                                   color=palette[pred_class], alpha=0.35, 
+                                   common_norm=False, linestyle='-')
+                
+                ax.set_ylabel(shift_a_name, fontsize=11, fontweight='bold', labelpad=-7.5)
+                ax.yaxis.set_label_position('left')
+                ax.set_yticklabels([])
+                
+                if i == grid_size - 1:
+                    ax.set_xlabel(method_col, fontsize=10)
+                else:
+                    ax.set_xlabel('')
+                    ax.set_xticklabels([])
+                    
+                ax.grid(True, alpha=0.2, linestyle='--')
+            
+            # Upper triangle: CS scatter (i < method_col_idx, excluding special positions)
+            elif i < method_col_idx:
+                # Row i could be: CS KDE row (i), blank row (i+1), or ID KDE row (i+2) for method at index i
+                # We need to get the proper row method
+                
+                # Check if column i+1 exists and maps to a method
+                if i + 1 < 1 or i + 1 > len(all_methods):
+                    ax.axis('off')
+                    continue
+                
+                method_row_idx = i
+                method_row = all_methods[method_row_idx]
+                
+                if method_col not in df_b_plot.columns or method_row not in df_b_plot.columns:
+                    ax.axis('off')
+                    continue
+                
+                x = df_b_plot[method_col].values
+                y = df_b_plot[method_row].values
+                colors = df_b_plot['Prediction'].map(palette).values
+                
+                ax.scatter(x, y, c=colors, alpha=0.2, s=20, edgecolor='none', rasterized=True)
+                
+                if method_row_idx == 0:
+                    # Labels
+                    ax.set_xlabel(method_col, fontsize=10)
+                    ax.xaxis.set_label_position('top')
+                    ax.xaxis.tick_top()
+                
+                if j == len(all_methods):
+                    ax.set_ylabel(method_row, fontsize=10)
+                    ax.yaxis.set_label_position('right')
+                    ax.yaxis.tick_right()
+                else:
+                    ax.set_ylabel('')
+                    ax.set_yticklabels([])
+                    
+                ax.grid(True, alpha=0.2, linestyle='--')
+            
+            # Lower triangle: ID scatter (i > method_col_idx + 2, excluding special positions)
+            elif i > method_col_idx + 2:
+                # Map row to method: row i corresponds to method at i-2
+                method_row_idx = i - 2
+                if method_row_idx >= len(all_methods):
+                    ax.axis('off')
+                    continue
+                
+                method_row = all_methods[method_row_idx]
+                
+                if method_col not in df_a_plot.columns or method_row not in df_a_plot.columns:
+                    ax.axis('off')
+                    continue
+                
+                x = df_a_plot[method_col].values
+                y = df_a_plot[method_row].values
+                colors = df_a_plot['Prediction'].map(palette).values
+                
+                ax.scatter(x, y, c=colors, alpha=0.2, s=20, edgecolor='none', rasterized=True)
+                
+                # Labels
+                if j == 1:
+                    ax.set_ylabel(method_row, fontsize=10)
+                else:
+                    ax.set_ylabel('')
+                    ax.set_yticklabels([])
+                
+                if i == grid_size - 1:
+                    ax.set_xlabel(method_col, fontsize=10)
+                else:
+                    ax.set_xlabel('')
+                    ax.set_xticklabels([])
+                    
+                ax.grid(True, alpha=0.2, linestyle='--')
+            
+            else:
+                ax.axis('off')
+    if shift_a_name == 'ID':
+        shift_a_name_full = 'In-Distribution'
+    elif shift_a_name == 'PS':
+        shift_a_name_full = 'Population Shifts'
+    if shift_b_name == 'CS':
+        shift_b_name_full = 'Corruption Shifts'
+    elif shift_b_name == 'NCS':
+        shift_b_name_full = 'New Class Shifts'
+
+    # Add vertical axis titles instead of box legend
+    # Left side: shift A name
+    fig.text(0.125, 0.25, shift_a_name_full, 
+             transform=fig.transFigure, fontsize=18, fontweight='bold',
+             verticalalignment='center', rotation=90)
     
-    # Remove unused lower triangle axes
-    for i in range(len(method_cols)):
-        for j in range(len(method_cols)):
-            if j < i and g_corner.axes[i, j] is not None:  # Lower triangle
-                g_corner.axes[i, j].set_visible(False)
+    # Right side: shift B name (reversed)
+    fig.text(0.92, 0.75, shift_b_name_full, 
+             transform=fig.transFigure, fontsize=18, fontweight='bold',
+             verticalalignment='center', rotation=270)
     
-    # Add x-ticks on top for first row (all columns)
-    for j in range(len(method_cols)):
-        if g_corner.axes[0, j] is not None:
-            ax = g_corner.axes[0, j]
-            ax.xaxis.tick_top()
-            ax.xaxis.set_label_position('top')
-            ax.tick_params(axis='x', which='both', top=True, labeltop=True)
-    
-    # Add y-ticks on right for last column (all rows)
-    for i in range(len(method_cols)):
-        if g_corner.axes[i, -1] is not None:
-            ax = g_corner.axes[i, -1]
-            ax.yaxis.tick_right()
-            ax.yaxis.set_label_position('right')
-            ax.tick_params(axis='y', which='both', left=False, labelleft=False, right=True, labelright=True)
-    
-    # Add method labels on top of columns and right side of rows
-    for i, method in enumerate(method_cols):
-        # Top labels for each column
-        ax_top = g_corner.axes[0, i]
-        ax_top.set_title(method, fontsize=10)
+    # Make each method column share the same x-axis across both ID and CS
+    # (same limits for the same method in both shift evaluations)
+    for j in range(1, len(all_methods) + 1):
+        # Collect x-limits from all subplots in this column
+        col_xlims = []
+        for i in range(grid_size):
+            ax = axes[i, j]
+            try:
+                # Check if axis has content (collections from scatter plots or lines from KDE)
+                if len(ax.collections) > 0 or len(ax.lines) > 0:
+                    col_xlims.append(ax.get_xlim())
+            except:
+                pass
         
-        # Right labels for each row using the rightmost plot in that row
-        ax_right = g_corner.axes[i, -1]  # Rightmost column
-        ax_twin = ax_right.twinx()  # Create secondary y-axis on the right
-        ax_twin.set_ylabel(method, fontsize=10, rotation=270, labelpad=15)
-        ax_twin.set_yticks([])  # Hide ticks on the twin axis
+        if col_xlims:
+            col_xmin = min(lim[0] for lim in col_xlims)
+            col_xmax = max(lim[1] for lim in col_xlims)
+            col_xlim = (col_xmin, col_xmax)
+            
+            # Apply to all subplots in this column
+            for i in range(grid_size):
+                ax = axes[i, j]
+                try:
+                    if len(ax.collections) > 0 or len(ax.lines) > 0:
+                        ax.set_xlim(col_xlim)
+                except:
+                    pass
     
-    plt.tight_layout()
-    output_path_corner = output_dir / 'sample_level_pairplot_amos2022_newclass_corner_upperright.png'
-    g_corner.savefig(output_path_corner, dpi=300, bbox_inches='tight')
-    print(f"  ✓ Upper-right corner pairplot saved to {output_path_corner}")
+    # Adjust spacing to maximize subplot size
+    plt.subplots_adjust(left=0.08, right=0.98, bottom=0.05, top=0.98, wspace=0.15, hspace=0.15)
+    
+    output_path = output_dir / f'sample_level_pairplot_{shift_a_name}_{shift_b_name}_combined.png'
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n  ✓ Combined {shift_a_name}+{shift_b_name} pairplot saved to {output_path}")
     
     plt.close()
 
@@ -1928,20 +1787,24 @@ def main():
     # Collect all data points from pre-computed results
     data = collect_all_data_points(workspace_root)
     
-    # Create scatter plots
-    create_scatter_plot(data, output_dir)
+    # # Create scatter plots
+    # create_scatter_plot(data, output_dir)
     
     # Create per-method correlation plots
     create_per_method_correlation_plots(data, output_dir)
     
-    # Create method correlation pairplots
-    create_method_correlation_pairplots(data, output_dir)
+    # # Create method correlation pairplots
+    # create_method_correlation_pairplots(data, output_dir)
     
     # Create sample-level pairplots
     shift_dataframes = create_sample_level_pairplots(workspace_root, output_dir)
     
-    # Create dedicated amos2022 new class shift pairplot
-    create_amos2022_newclass_pairplot(workspace_root, output_dir, shift_dataframes)
+    # Create combined pairplots
+    if 'in_distribution' in shift_dataframes and 'corruption_shifts' in shift_dataframes:
+        create_combined_pairplot(shift_dataframes['in_distribution'], shift_dataframes['corruption_shifts'], output_dir, 'ID', 'CS')
+    
+    if 'population_shifts' in shift_dataframes and 'new_class_shifts' in shift_dataframes:
+        create_combined_pairplot(shift_dataframes['population_shifts'], shift_dataframes['new_class_shifts'], output_dir, 'PS', 'NCS')
     
     print("\n" + "=" * 80)
     print("✓ All plots generated successfully!")

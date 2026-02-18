@@ -871,10 +871,12 @@ class CorruptedDataset(Dataset):
             # Use index combined with global seed for deterministic per-sample selection
             # This ensures same index always gets same corruption across runs
             # CRITICAL: Combine seed with index for deterministic but varied per-sample selection
+            # Convert idx to Python int to avoid numpy int issues with random.Random()
+            idx_int = int(idx)
             if self.seed is not None:
-                sample_rng = random.Random(self.seed + idx)
+                sample_rng = random.Random(self.seed + idx_int)
             else:
-                sample_rng = random.Random(idx)
+                sample_rng = random.Random(idx_int)
             return sample_rng.choice(self.corruption_funcs)
         else:
             # Cycle through corruptions
@@ -957,7 +959,8 @@ class CorruptedDataset(Dataset):
         # Combine base seed with sample index for per-sample determinism
         # CRITICAL: Don't restore random state - let TTA augmentations progress naturally
         if self.seed is not None:
-            corruption_seed = self.seed + idx
+            # Convert idx to Python int to avoid numpy int issues
+            corruption_seed = self.seed + int(idx)
             # Save current random states (for corruption isolation)
             np_state = np.random.get_state()
             random_state = random.getstate()
