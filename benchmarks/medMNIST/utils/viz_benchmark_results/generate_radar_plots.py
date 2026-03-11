@@ -17,49 +17,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-def compute_polygon_area_polar(angles, radii):
-    """
-    Compute the area under the curve in polar coordinates using trapezoidal integration.
-    This is equivalent to "unrolling" the radar to Cartesian coordinates and computing AUC.
-    
-    Instead of polar area (which scales with r²), we compute:
-    AUC = ∫ r(θ) dθ using trapezoidal rule
-    
-    This makes the surface metric scale LINEARLY with radius, not quadratically.
-    This is order-invariant and better reflects performance across datasets.
-    
-    Args:
-        angles: List of angles in radians (should form a closed loop)
-        radii: List of radii at each angle
-    
-    Returns:
-        float: Area under the curve (AUC in unrolled Cartesian space)
-    """
-    if len(angles) != len(radii):
-        raise ValueError("Angles and radii must have the same length")
-    
-    # Ensure the polygon is closed
-    if angles[-1] != angles[0]:
-        angles = list(angles) + [angles[0]]
-        radii = list(radii) + [radii[0]]
-    
-    # Sort by angle to ensure proper integration order
-    sorted_pairs = sorted(zip(angles[:-1], radii[:-1]))  # Exclude duplicate closing point
-    sorted_angles, sorted_radii = zip(*sorted_pairs)
-    sorted_angles = list(sorted_angles) + [sorted_angles[0] + 2*np.pi]  # Close with wraparound
-    sorted_radii = list(sorted_radii) + [sorted_radii[0]]
-    
-    # Trapezoidal integration: AUC = Σ (θ_{i+1} - θ_i) * (r_i + r_{i+1}) / 2
-    auc = 0.0
-    n = len(sorted_angles) - 1
-    
-    for i in range(n):
-        theta_diff = sorted_angles[i+1] - sorted_angles[i]
-        auc += theta_diff * (sorted_radii[i] + sorted_radii[i+1]) / 2
-    
-    return abs(auc)
-
-
 def parse_results_directory(results_dir='./', metric='auroc_f'):
     """
     Parse all JSON result files in the directory.
@@ -253,22 +210,6 @@ def get_ensemble_accuracy_from_runs(comp_eval_dir, dataset_key, model_name='resn
         return ensemble_metrics.get('balanced_accuracy', 0.0)
     except:
         return 0.0
-
-
-def compute_oracle_augrc(accuracy):
-    """
-    Compute oracle AUGRC - theoretical best AUGRC given accuracy.
-    
-    Oracle rejects all incorrect predictions first, achieving zero generalized risk
-    until coverage exceeds the fraction of correct predictions.
-    
-    Args:
-        accuracy: Model accuracy (between 0 and 1)
-    
-    Returns:
-        float: Oracle AUGRC = 0.5 * (1 - accuracy)^2
-    """
-    return 0.5 * (1.0 - accuracy) ** 2
 
 
 def augrc_log_transform(value, max_display=0.30, scale_factor=50.0):
@@ -595,19 +536,20 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
                 
         elif name == 'new_class_amos2022':
             display_name = 'new class\namos2022'
-            custom_angle = angle_positive - 0.16
+            custom_angle = angle_positive -0.09
         elif name == 'new_class_midog':
             display_name = 'new class\nmidog++'
+            custom_angle = angle_positive + 0.08
         elif name == 'dermamnist-e-external':
             display_name = 'derma-e\n-external'
-            custom_angle = angle_positive - 0.1
+            custom_angle = angle_positive + 0.07
         elif name == 'dermamnist-e-id':
             #display_name = 'derma-e\n-id'
             custom_angle = angle_positive + 0.18
         elif name == 'pneumoniamnist':
             custom_angle = angle_positive + 0.35
         elif name == 'amos2022':
-            custom_angle = angle_positive - 0.25
+            custom_angle = angle_positive - 0.1
         elif name == 'organamnist':
             custom_angle = angle_positive + 0.1
         elif name == 'breastmnist':
@@ -683,13 +625,10 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
     # Get legend handles and labels to return
     handles, labels = ax.get_legend_handles_labels()
     
-    # Compute surface areas for each method (return for histogram generation)
-    # compute_polygon_area_polar is defined at the top of this file
+    # Compute mean values for each method (return for histogram generation)
+    method_means = {}
     
-    method_surfaces = {}
-    method_angles = {}  # Store valid angles for each method
-    
-    # For each method, compute radar surface coverage using theoretical metric boundaries
+    # For each method, compute mean radar value (no normalization)
     for method_idx, method_name in enumerate(all_methods):
         values = []
         for dataset_key in dataset_keys:
@@ -699,77 +638,20 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
                 val = 0.5 - val
             values.append(val)
         
-        # Filter out NaN values and their corresponding angles
+        # Filter out NaN values
         valid_indices = [i for i, v in enumerate(values) if not np.isnan(v)]
         
-        if len(valid_indices) < 3:  # Need at least 3 points for a polygon
-            method_surfaces[method_name] = 0.0
-            method_angles[method_name] = []
+        if len(valid_indices) == 0:  # Need at least 1 point
+            method_means[method_name] = 0.0
             continue
         
-        # Get filtered values and angles
+        # Get filtered values
         filtered_values = [values[i] for i in valid_indices]
-        filtered_angles = [angles[i] for i in valid_indices]
         
-        # Surface calculation uses inverted AUGRC values directly - no additional transforms needed
-        values_for_surface = filtered_values
-        
-        # Add closing point
-        values_closed = values_for_surface + [values_for_surface[0]]
-        angles_closed = filtered_angles + [filtered_angles[0]]
-        
-        # Compute area using theoretical metric boundaries (no transforms)
-        try:
-            area = compute_polygon_area_polar(angles_closed, values_closed)
-            method_surfaces[method_name] = area
-            method_angles[method_name] = filtered_angles  # Store without closing point
-            
-            # Debug for AUGRC to verify linear scaling
-            if metric == 'augrc' and shift == 'population_shift' and method_name == 'Mean_Aggregation_Ensemble':
-                avg_radius = np.mean(filtered_values)
-                print(f"  DEBUG {method_name}: avg_radius={avg_radius:.3f}, surface={area:.6f}")
-                print(f"    Expected with linear scaling: {avg_radius / 0.5:.3f}")
-        except Exception as e:
-            print(f"  ERROR computing area for {method_name}, metric={metric}: {e}")
-            method_surfaces[method_name] = 0.0
-            method_angles[method_name] = []
+        # Compute simple mean (no normalization)
+        method_means[method_name] = np.mean(filtered_values)
     
-    # Normalize each method by its own oracle (perfect method with value 1.0 for its available datasets)
-    # CRITICAL: Each method must be normalized by an oracle computed with ONLY its available angles
-    # For example, MCDropout (only DO/DADO) should have a different oracle than TTA (all setups)
-    for method_name in method_surfaces:
-        if method_surfaces[method_name] > 0 and len(method_angles[method_name]) > 0:
-            try:
-                # Get this method's angles
-                method_specific_angles = method_angles[method_name]
-                
-                # Compute oracle for THIS method using theoretical metric boundaries
-                # For AUROC_f: perfect = 1.0 (at the edge, best possible)
-                # For AUGRC: perfect = 0.5 (after inversion: 0.5 - 0.0 = 0.5, at edge)
-                if metric == 'augrc':
-                    # After inversion (0.5 - AUGRC), perfect AUGRC=0 becomes 0.5
-                    oracle_values = [0.5] * len(method_specific_angles)
-                else:
-                    # For AUROC_f, perfect is 1.0
-                    oracle_values = [1.0] * len(method_specific_angles)
-                
-                oracle_values_closed = oracle_values + [oracle_values[0]]
-                angles_closed_oracle = list(method_specific_angles) + [method_specific_angles[0]]
-                
-                oracle_surface = compute_polygon_area_polar(angles_closed_oracle, oracle_values_closed)
-                
-                # Debug oracle for AUGRC
-                if metric == 'augrc' and shift == 'population_shift' and method_name == 'Mean_Aggregation_Ensemble':
-                    print(f"    oracle_surface={oracle_surface:.6f}, ratio={method_surfaces[method_name] / oracle_surface:.3f}")
-                
-                # Normalize this method's surface by its own oracle
-                if oracle_surface > 0:
-                    method_surfaces[method_name] = method_surfaces[method_name] / oracle_surface
-            except Exception as e:
-                print(f"  ⚠ Oracle normalization failed for {method_name}: {e}")
-                pass  # Keep unnormalized surface if computation fails
-    
-    return handles, labels, method_surfaces, method_angles
+    return handles, labels, method_means, {}
 
 
 def generate_summary_table(results, output_path):

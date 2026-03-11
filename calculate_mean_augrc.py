@@ -63,6 +63,7 @@ def extract_augrc_values(json_files, root_dir):
     method_augrc_by_shift = defaultdict(lambda: defaultdict(list))
     method_auroc_values = defaultdict(list)
     method_auroc_by_shift = defaultdict(lambda: defaultdict(list))
+    error_rates_by_shift = defaultdict(list)
     
     files_with_errors = []
     files_processed = 0
@@ -80,21 +81,37 @@ def extract_augrc_values(json_files, root_dir):
             shift_type = get_shift_type(json_file, root_dir)
             shift_counts[shift_type] += 1
             
+            # Extract classification error rate
+            if 'error_rate' in data and data['error_rate'] is not None:
+                error_rates_by_shift[shift_type].append(data['error_rate'])
+            elif 'test_accuracy' in data and data['test_accuracy'] is not None:
+                error_rates_by_shift[shift_type].append(1 - data['test_accuracy'])
+            
             # Extract AUGRC and AUROC_F for each method
             methods = data['methods']
             for method_name in METHODS_TO_ANALYZE:
                 if method_name in methods:
                     method_data = methods[method_name]
-                    
-                    # Extract AUGRC
-                    if 'augrc' in method_data and method_data['augrc'] is not None:
-                        method_augrc_values[method_name].append(method_data['augrc'])
-                        method_augrc_by_shift[method_name][shift_type].append(method_data['augrc'])
-                    
-                    # Extract AUROC_F
-                    if 'auroc_f' in method_data and method_data['auroc_f'] is not None:
-                        method_auroc_values[method_name].append(method_data['auroc_f'])
-                        method_auroc_by_shift[method_name][shift_type].append(method_data['auroc_f'])
+                    if 'Mean_Aggregation' in method_name or 'Ensembling' in method_name:
+                        # Extract AUGRC
+                        if 'augrc' in method_data and method_data['augrc'] is not None:
+                            method_augrc_values[method_name].append(method_data['augrc'])
+                            method_augrc_by_shift[method_name][shift_type].append(method_data['augrc'])
+                        
+                        # Extract AUROC_F
+                        if 'auroc_f' in method_data and method_data['auroc_f'] is not None:
+                            method_auroc_values[method_name].append(method_data['auroc_f'])
+                            method_auroc_by_shift[method_name][shift_type].append(method_data['auroc_f'])
+                    else:
+                        # Extract AUGRC
+                        if 'augrc_mean' in method_data and method_data['augrc_mean'] is not None:
+                            method_augrc_values[method_name].append(method_data['augrc_mean'])
+                            method_augrc_by_shift[method_name][shift_type].append(method_data['augrc_mean'])
+                        
+                        # Extract AUROC_F
+                        if 'auroc_f_mean' in method_data and method_data['auroc_f_mean'] is not None:
+                            method_auroc_values[method_name].append(method_data['auroc_f_mean'])
+                            method_auroc_by_shift[method_name][shift_type].append(method_data['auroc_f_mean'])
             
             files_processed += 1
             
@@ -106,7 +123,7 @@ def extract_augrc_values(json_files, root_dir):
     if files_with_errors:
         print(f"Encountered errors in {len(files_with_errors)} files")
     
-    return method_augrc_values, method_augrc_by_shift, method_auroc_values, method_auroc_by_shift
+    return method_augrc_values, method_augrc_by_shift, method_auroc_values, method_auroc_by_shift, error_rates_by_shift
 
 def calculate_statistics(method_augrc_values):
     """Calculate mean and std for each method."""
@@ -288,6 +305,57 @@ def print_results_by_shift(statistics_by_shift, shift_order=['ID', 'CS', 'PS', '
             else:
                 print(f"{method_name:<35} {'N/A':<15} {'N/A':<15} {stats['count']:<10}")
 
+def print_error_rates_by_shift(error_rates_by_shift):
+    """Print mean classification error rates by shift type."""
+    shift_order = ['ID', 'CS', 'PS', 'NCS']
+    shift_names = {
+        'ID': 'In-Distribution',
+        'CS': 'Corruption Shifts',
+        'PS': 'Population Shifts',
+        'NCS': 'New Class Shifts'
+    }
+    
+    print("\n" + "="*100)
+    print("MEAN CLASSIFICATION ERROR RATE BY DISTRIBUTION SHIFT")
+    print("="*100)
+    print(f"\n{'Shift Type':<30} {'Mean Error Rate':<20} {'Std':<15} {'Count':<10}")
+    print("-"*100)
+    
+    for shift_type in shift_order:
+        if shift_type in error_rates_by_shift and len(error_rates_by_shift[shift_type]) > 0:
+            values = np.array(error_rates_by_shift[shift_type])
+            mean_err = np.mean(values)
+            std_err = np.std(values)
+            count = len(values)
+            shift_name = shift_names.get(shift_type, shift_type)
+            
+            print(f"{shift_name:<30} {mean_err:<20.6f} {std_err:<15.6f} {count:<10}")
+        else:
+            shift_name = shift_names.get(shift_type, shift_type)
+            print(f"{shift_name:<30} {'N/A':<20} {'N/A':<15} {0:<10}")
+    
+    # Calculate overall mean (weighted by sample count)
+    all_errors = []
+    for errors in error_rates_by_shift.values():
+        all_errors.extend(errors)
+    
+    # Calculate unweighted mean (simple average of shift-type means)
+    shift_means = []
+    for shift_type in shift_order:
+        if shift_type in error_rates_by_shift and len(error_rates_by_shift[shift_type]) > 0:
+            shift_means.append(np.mean(error_rates_by_shift[shift_type]))
+    
+    if all_errors:
+        overall_mean = np.mean(all_errors)
+        overall_std = np.std(all_errors)
+        overall_count = len(all_errors)
+        print("-"*100)
+        print(f"{'Overall (Weighted Mean)':<30} {overall_mean:<20.6f} {overall_std:<15.6f} {overall_count:<10}")
+        
+        if shift_means:
+            unweighted_mean = np.mean(shift_means)
+            print(f"{'Overall (Unweighted Mean)':<30} {unweighted_mean:<20.6f} {'N/A':<15} {len(shift_means):<10}")
+
 def main():
     print(f"Searching for JSON files in: {RESULTS_DIR}")
     
@@ -297,7 +365,7 @@ def main():
     
     # Extract AUGRC and AUROC_F values
     print("Extracting AUGRC and AUROC_F values...")
-    method_augrc_values, method_augrc_by_shift, method_auroc_values, method_auroc_by_shift = extract_augrc_values(json_files, RESULTS_DIR)
+    method_augrc_values, method_augrc_by_shift, method_auroc_values, method_auroc_by_shift, error_rates_by_shift = extract_augrc_values(json_files, RESULTS_DIR)
     
     # Calculate overall statistics for AUGRC
     augrc_statistics = calculate_statistics(method_augrc_values)
@@ -330,6 +398,7 @@ def main():
     # Print results
     print_combined_results(augrc_statistics, auroc_statistics)
     print_combined_results_by_shift(augrc_by_shift, auroc_by_shift)
+    print_error_rates_by_shift(error_rates_by_shift)
     
     # Save results to file
     output_file = "/mnt/data/psteinmetz/computer_vision_code/code/UQ_Toolbox/mean_augrc_auroc_results.txt"
@@ -402,6 +471,47 @@ def main():
                 else:
                     count = augrc_stats.get('count', 0) if augrc_stats else auroc_stats.get('count', 0)
                     f.write(f"{method_name:<30} {'N/A':<15} {'N/A':<15} {'N/A':<15} {'N/A':<15} {count:<10}\n")
+        
+        # Add error rates by shift
+        f.write("\n\n" + "="*100 + "\n")
+        f.write("MEAN CLASSIFICATION ERROR RATE BY DISTRIBUTION SHIFT\n")
+        f.write("="*100 + "\n\n")
+        f.write(f"{'Shift Type':<30} {'Mean Error Rate':<20} {'Std':<15} {'Count':<10}\n")
+        f.write("-"*100 + "\n")
+        
+        for shift_type in ['ID', 'CS', 'PS', 'NCS']:
+            if shift_type in error_rates_by_shift and len(error_rates_by_shift[shift_type]) > 0:
+                values = np.array(error_rates_by_shift[shift_type])
+                mean_err = np.mean(values)
+                std_err = np.std(values)
+                count = len(values)
+                shift_name = shift_names.get(shift_type, shift_type)
+                f.write(f"{shift_name:<30} {mean_err:<20.6f} {std_err:<15.6f} {count:<10}\n")
+            else:
+                shift_name = shift_names.get(shift_type, shift_type)
+                f.write(f"{shift_name:<30} {'N/A':<20} {'N/A':<15} {0:<10}\n")
+        
+        # Overall mean error rate
+        all_errors = []
+        for errors in error_rates_by_shift.values():
+            all_errors.extend(errors)
+        
+        if all_errors:
+            overall_mean = np.mean(all_errors)
+            overall_std = np.std(all_errors)
+            overall_count = len(all_errors)
+            f.write("-"*100 + "\n")
+            f.write(f"{'Overall (Weighted Mean)':<30} {overall_mean:<20.6f} {overall_std:<15.6f} {overall_count:<10}\n")
+            
+            # Calculate unweighted mean
+            shift_means = []
+            for shift_type in ['ID', 'CS', 'PS', 'NCS']:
+                if shift_type in error_rates_by_shift and len(error_rates_by_shift[shift_type]) > 0:
+                    shift_means.append(np.mean(error_rates_by_shift[shift_type]))
+            
+            if shift_means:
+                unweighted_mean = np.mean(shift_means)
+                f.write(f"{'Overall (Unweighted Mean)':<30} {unweighted_mean:<20.6f} {'N/A':<15} {len(shift_means):<10}\n")
     
     print(f"\nResults saved to: {output_file}")
 

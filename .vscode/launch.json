@@ -3,13 +3,12 @@
     "configurations": [
 
         {
-            "name": "run_medmnist_benchmark.py",
+            "name": "plot_unified_results.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/benchmarks/medMNIST/run_medmnist_benchmark.py",
+            "program": "${workspaceFolder}/benchmarks/medMNIST/utils/viz_benchmark_results/plot_unified_results.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["--flag", "breastmnist", "--model", "resnet18", "--methods", "TTA", "--per-fold-eval", "--gpu", "0", "--corruption-severity", "3", "--corrupt-test"],
             "justMyCode": false,
             
         }
