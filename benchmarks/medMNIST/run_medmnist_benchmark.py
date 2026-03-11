@@ -25,13 +25,13 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Subset
 
 # Import FailCatcher library
-import FailCatcher
-from FailCatcher import failure_detection
-from FailCatcher import UQ_toolbox as uq
+import ToolBox
+from ToolBox import failure_detection
+from ToolBox import UQ_toolbox as uq
 
 # Import medMNIST-specific utilities
-from benchmarks.medMNIST.utils import train_models_load_datasets as tr
-from benchmarks.medMNIST.utils import dataset_utils
+from Benchmarks.medMNIST.utils import train_models_load_datasets as tr
+from Benchmarks.medMNIST.utils import dataset_utils
 
 
 def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
@@ -63,7 +63,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     """
     print(f"\n{'='*80}")
     print(f"MedMNIST Benchmark: {flag}")
-    print(f"Using FailCatcher v{FailCatcher.__version__}")
+    print(f"Using FailCatcher v{ToolBox.__version__}")
     if new_class_shift:
         print(f"New Class Shift: Evaluating unseen classes (artificial test set)")
         print(f"  Test = New classes (failures) + Unanimous correct predictions (known classes)")
