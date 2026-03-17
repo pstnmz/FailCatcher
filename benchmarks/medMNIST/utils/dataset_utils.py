@@ -598,7 +598,7 @@ def subsample_dataset_failure_aware(dataset, models, device, max_samples=None,
         - Sample 1200 correct predictions (60% of final set)
     """
     # Import here to avoid circular dependency
-    from FailCatcher import UQ_toolbox as uq
+    from ToolBox import UQ_toolbox as uq
     
     if max_samples is None or len(dataset) <= max_samples:
         # No subsampling needed - compute indices on full dataset

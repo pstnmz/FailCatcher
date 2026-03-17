@@ -44,7 +44,7 @@ Example:
 import os
 import numpy as np
 import torch
-from typing import List, Callable, Optional, Dict, Any, Tuple
+from typing import List, Callable, Optional, Dict, Any, Tuple, Union
 from torch.utils.data import DataLoader
 import time
 
@@ -125,121 +125,6 @@ class FailureDetector:
         self._predictions_per_fold = {}  # Store per-fold predictions for accurate ROC curves
         self._results = {}
     
-    def normalize_uncertainties(self, method_names: Optional[List[str]] = None, inplace: bool = True):
-        """
-        Normalize uncertainties to [0, 1] range using min-max scaling.
-        
-        By default, only normalizes KNN-based methods which use raw Euclidean distances.
-        Other methods (MSR, Ensemble STD, TTA, GPS) are probability-based and already 
-        on comparable scales.
-        
-        KNN methods need normalization because:
-        - KNN_Raw: arbitrary Euclidean distances in latent space (scale depends on PCA dims)
-        - KNN_SHAP: distances in SHAP-selected feature space
-        
-        Note: AUROC is rank-based and invariant to monotonic transformations,
-        so normalization doesn't affect AUROC values - only visual comparisons.
-        
-        Args:
-            method_names: List of method names to normalize 
-                         (default: auto-detect KNN methods ['KNN_Raw', 'KNN_SHAP'])
-            inplace: If True, replace original uncertainties. If False, store in 
-                    self._uncertainties_normalized (default: True for KNN)
-        
-        Returns:
-            dict: Normalized uncertainties {method_name: normalized_array}
-        
-        Example:
-            >>> detector.run_knn_raw(...)
-            >>> detector.normalize_uncertainties()  # Auto-normalizes KNN methods
-        """
-        if not self._uncertainties:
-            raise ValueError("No uncertainties computed yet. Run UQ methods first.")
-        
-        if method_names is None:
-            # By default, only normalize KNN methods (distance-based, not probability-based)
-            knn_methods = ['KNN_Raw', 'KNN_SHAP', 'KNN_Latent']
-            method_names = [k for k in self._uncertainties.keys() 
-                           if any(knn in k for knn in knn_methods) and
-                           not (k.endswith('_per_fold') or 
-                                k.endswith('_ensemble') or
-                                k.endswith('_per_fold_internal'))]
-            
-            if not method_names:
-                print("  ℹ️  No KNN methods found - nothing to normalize")
-                return {}
-        
-        normalized = {}
-        
-        for method_name in method_names:
-            if method_name not in self._uncertainties:
-                print(f"  ⚠️  Method '{method_name}' not found, skipping")
-                continue
-            
-            uncertainties = self._uncertainties[method_name]
-            
-            # Check if this is averaged or per-fold data
-            per_fold_key = f'{method_name}_per_fold'
-            
-            if per_fold_key in self._uncertainties:
-                # Per-fold data exists: normalize each fold independently for fair ensembling
-                per_fold_unc = self._uncertainties[per_fold_key]  # [num_folds, N]
-                normalized_per_fold = []
-                
-                for fold_idx in range(per_fold_unc.shape[0]):
-                    fold_unc = per_fold_unc[fold_idx]
-                    u_min = np.min(fold_unc)
-                    u_max = np.max(fold_unc)
-                    
-                    if u_max - u_min < 1e-10:
-                        normalized_fold = np.full_like(fold_unc, 0.5)
-                    else:
-                        normalized_fold = (fold_unc - u_min) / (u_max - u_min)
-                    
-                    normalized_per_fold.append(normalized_fold)
-                
-                normalized[per_fold_key] = np.array(normalized_per_fold)  # [num_folds, N]
-                
-                # Re-average the normalized per-fold values for the main uncertainty
-                normalized[method_name] = np.mean(normalized[per_fold_key], axis=0)  # [N]
-                
-            else:
-                # No per-fold data: simple min-max on the single array
-                u_min = np.min(uncertainties)
-                u_max = np.max(uncertainties)
-                
-                if u_max - u_min < 1e-10:
-                    print(f"  ⚠️  {method_name}: constant uncertainties, setting to 0.5")
-                    normalized[method_name] = np.full_like(uncertainties, 0.5)
-                else:
-                    normalized[method_name] = (uncertainties - u_min) / (u_max - u_min)
-            
-            # Ensemble baseline (if exists) - normalize independently
-            ensemble_key = f'{method_name}_ensemble'
-            if ensemble_key in self._uncertainties:
-                ensemble_unc = self._uncertainties[ensemble_key]
-                e_min = np.min(ensemble_unc)
-                e_max = np.max(ensemble_unc)
-                if e_max - e_min >= 1e-10:
-                    normalized[ensemble_key] = (ensemble_unc - e_min) / (e_max - e_min)
-                else:
-                    normalized[ensemble_key] = np.full_like(ensemble_unc, 0.5)
-        
-        # Store or replace
-        if inplace:
-            for k, v in normalized.items():
-                self._uncertainties[k] = v
-            print(f"✓ Normalized {len(method_names)} method(s): {method_names}")
-            # Print range to verify normalization worked
-            for method_name in method_names:
-                unc = self._uncertainties[method_name]
-                print(f"  {method_name}: range [{np.min(unc):.4f}, {np.max(unc):.4f}]")
-        else:
-            self._uncertainties_normalized = normalized
-            print(f"✓ Normalized {len(method_names)} methods → stored in _uncertainties_normalized")
-        
-        return normalized
-    
     def set_per_fold_predictions(
         self,
         per_fold_predictions: np.ndarray
@@ -295,6 +180,329 @@ class FailureDetector:
             'per_fold_correct_idx': per_fold_correct_idx,
             'per_fold_incorrect_idx': per_fold_incorrect_idx
         }
+
+    def run_zscore_aggregation(
+        self,
+        method_names: Optional[List[str]] = None,
+        score_dict: Optional[Dict[str, np.ndarray]] = None,
+        means: Optional[Union[List[Any], Dict[str, Any]]] = None,
+        stds: Optional[Union[List[Any], Dict[str, Any]]] = None,
+        use_test_distribution: bool = True,
+        aggregation_name: str = 'ZScore_Aggregation',
+        mode: str = 'ensemble',
+        predictions: Optional[np.ndarray] = None,
+        labels: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Aggregate multiple uncertainty scores by z-scoring each score and averaging.
+
+                Two normalization source modes are supported:
+        - use_test_distribution=True: compute mean/std directly from each score array.
+        - use_test_distribution=False: use externally provided means/stds.
+
+                Aggregation modes:
+                - mode='ensemble': build one score per method using method_ensemble when available,
+                    otherwise mean(method_per_fold), otherwise method main score.
+                - mode='per_fold': aggregate each fold separately (z-score + average over methods),
+                    then average folds for the main score.
+
+        The aggregated score and its metrics are stored in self._uncertainties and
+        self._results under aggregation_name, so save_results() persists them in
+        both NPZ and JSON outputs.
+        """
+        timer = Timer(f"{aggregation_name} computation")
+
+        with timer:
+            source_scores = self._uncertainties if score_dict is None else score_dict
+
+            if mode not in ['ensemble', 'per_fold']:
+                raise ValueError("mode must be either 'ensemble' or 'per_fold'")
+
+            if method_names is None:
+                method_names = []
+                for key, value in source_scores.items():
+                    if not isinstance(value, np.ndarray):
+                        continue
+                    if key.endswith('_per_fold') or key.endswith('_ensemble') or key.endswith('_per_fold_internal'):
+                        continue
+                    if mode == 'ensemble' and value.ndim == 1:
+                        method_names.append(key)
+                    elif mode == 'per_fold' and (value.ndim == 1 or f'{key}_per_fold' in source_scores):
+                        method_names.append(key)
+
+            if not method_names:
+                raise ValueError("No methods provided for z-score aggregation")
+
+            eps = 1e-10
+
+            if mode == 'ensemble':
+                ordered_scores = []
+                for name in method_names:
+                    ensemble_key = f'{name}_ensemble'
+                    per_fold_key = f'{name}_per_fold'
+
+                    if ensemble_key in source_scores:
+                        arr = np.asarray(source_scores[ensemble_key])
+                    elif per_fold_key in source_scores:
+                        arr = np.asarray(source_scores[per_fold_key]).mean(axis=0)
+                    elif name in source_scores:
+                        arr = np.asarray(source_scores[name])
+                    else:
+                        raise ValueError(f"Method '{name}' not found in provided scores")
+
+                    if arr.ndim != 1:
+                        raise ValueError(
+                            f"Method '{name}' must resolve to 1D scores [N], got shape {arr.shape}"
+                        )
+                    ordered_scores.append(arr)
+
+                n_samples = len(ordered_scores[0])
+                for idx, arr in enumerate(ordered_scores):
+                    if len(arr) != n_samples:
+                        raise ValueError(
+                            f"All score arrays must have same length. "
+                            f"'{method_names[idx]}' has length {len(arr)} != {n_samples}"
+                        )
+
+                resolved_means = []
+                resolved_stds = []
+                if use_test_distribution:
+                    for arr in ordered_scores:
+                        resolved_means.append(float(np.mean(arr)))
+                        resolved_stds.append(float(np.std(arr)))
+                else:
+                    if means is None or stds is None:
+                        raise ValueError(
+                            "means and stds must be provided when use_test_distribution=False"
+                        )
+
+                    if isinstance(means, dict):
+                        resolved_means = [float(means[name]) for name in method_names]
+                    else:
+                        if len(means) != len(method_names):
+                            raise ValueError("means length must match method_names length")
+                        resolved_means = [float(v) for v in means]
+
+                    if isinstance(stds, dict):
+                        resolved_stds = [float(stds[name]) for name in method_names]
+                    else:
+                        if len(stds) != len(method_names):
+                            raise ValueError("stds length must match method_names length")
+                        resolved_stds = [float(v) for v in stds]
+
+                zscored = []
+                for arr, mu, sigma in zip(ordered_scores, resolved_means, resolved_stds):
+                    if abs(sigma) < eps:
+                        z_arr = np.zeros_like(arr, dtype=float)
+                    else:
+                        z_arr = (arr - mu) / sigma
+                    zscored.append(z_arr)
+
+                zscored = np.stack(zscored, axis=0)  # [num_methods, N]
+                aggregated_for_metrics = np.mean(zscored, axis=0)  # [N]
+                aggregated_scores = aggregated_for_metrics
+
+            else:
+                # per_fold mode
+                num_folds = None
+                ordered_scores = []  # each entry [M, N]
+
+                for name in method_names:
+                    per_fold_key = f'{name}_per_fold'
+
+                    if per_fold_key in source_scores:
+                        arr = np.asarray(source_scores[per_fold_key])  # [M, N]
+                    else:
+                        raise ValueError(
+                            f"Method '{name}' has no per-fold scores ('{per_fold_key}'). "
+                            "Per-fold aggregation only supports methods with explicit per-fold outputs."
+                        )
+
+                    if arr.ndim != 2:
+                        raise ValueError(
+                            f"Method '{name}' must resolve to per-fold [M, N], got shape {arr.shape}"
+                        )
+
+                    if num_folds is None:
+                        num_folds = arr.shape[0]
+                    elif arr.shape[0] != num_folds:
+                        raise ValueError(
+                            f"All methods must have same fold count. "
+                            f"'{name}' has {arr.shape[0]} folds != {num_folds}"
+                        )
+
+                    ordered_scores.append(arr)
+
+                n_samples = ordered_scores[0].shape[1]
+                for idx, arr in enumerate(ordered_scores):
+                    if arr.shape[1] != n_samples:
+                        raise ValueError(
+                            f"All score arrays must have same sample count. "
+                            f"'{method_names[idx]}' has {arr.shape[1]} != {n_samples}"
+                        )
+
+                # Means/stds per method and per fold: [num_methods, M]
+                resolved_means = []
+                resolved_stds = []
+
+                if use_test_distribution:
+                    for arr in ordered_scores:
+                        resolved_means.append(np.mean(arr, axis=1))
+                        resolved_stds.append(np.std(arr, axis=1))
+                else:
+                    if means is None or stds is None:
+                        raise ValueError(
+                            "means and stds must be provided when use_test_distribution=False"
+                        )
+
+                    def _resolve_external(values, name, idx):
+                        if isinstance(values, dict):
+                            raw = values[name]
+                        else:
+                            if len(values) != len(method_names):
+                                raise ValueError("External values length must match method_names")
+                            raw = values[idx]
+
+                        raw_arr = np.asarray(raw, dtype=float)
+                        if raw_arr.ndim == 0:
+                            return np.full((num_folds,), float(raw_arr))
+                        if raw_arr.ndim == 1 and len(raw_arr) == num_folds:
+                            return raw_arr
+                        raise ValueError(
+                            f"External values for '{name}' must be scalar or length-{num_folds}"
+                        )
+
+                    for idx, name in enumerate(method_names):
+                        resolved_means.append(_resolve_external(means, name, idx))
+                        resolved_stds.append(_resolve_external(stds, name, idx))
+
+                # Z-score each method for each fold independently, then average methods
+                zscored = []
+                for arr, mu_vec, sd_vec in zip(ordered_scores, resolved_means, resolved_stds):
+                    z_arr = np.zeros_like(arr, dtype=float)
+                    for fold_idx in range(num_folds):
+                        sigma = float(sd_vec[fold_idx])
+                        if abs(sigma) < eps:
+                            z_arr[fold_idx] = 0.0
+                        else:
+                            z_arr[fold_idx] = (arr[fold_idx] - float(mu_vec[fold_idx])) / sigma
+                    zscored.append(z_arr)
+
+                zscored = np.stack(zscored, axis=0)  # [num_methods, M, N]
+                aggregated_per_fold = np.mean(zscored, axis=0)  # [M, N]
+                aggregated_scores = np.mean(aggregated_per_fold, axis=0)  # [N]
+                aggregated_for_metrics = aggregated_per_fold
+
+        # Resolve labels/predictions from cache when not explicitly provided
+        if labels is None or predictions is None:
+            if self._test_predictions_cache is None:
+                raise ValueError(
+                    "predictions/labels not provided and test prediction cache is empty"
+                )
+            if labels is None:
+                labels = self._test_predictions_cache['y_true']
+            if predictions is None:
+                predictions = self._test_predictions_cache['y_pred']
+
+        correct_idx = np.where(predictions == labels)[0]
+        incorrect_idx = np.where(predictions != labels)[0]
+
+        # Per-fold metrics require per-fold predictions for fold-wise AUROC/AURC/AUGRC.
+        # Reuse cached per-fold predictions if available.
+        predictions_per_fold = None
+        if mode == 'per_fold':
+            if self._per_fold_predictions_cache is not None:
+                predictions_per_fold = self._per_fold_predictions_cache
+            elif self._test_predictions_cache is not None:
+                cached_pf = self._test_predictions_cache.get('per_fold_predictions')
+                if cached_pf is not None:
+                    predictions_per_fold = cached_pf
+
+        metrics = self._compute_metrics(
+            aggregated_for_metrics,
+            correct_idx,
+            incorrect_idx,
+            predictions,
+            labels,
+            predictions_per_fold=predictions_per_fold,
+            ensemble_uncertainties=aggregated_scores if mode == 'per_fold' else None
+        )
+        metrics['time_seconds'] = timer.elapsed
+        metrics['aggregation_sources'] = method_names
+        metrics['aggregation_mode'] = mode
+
+        if mode == 'ensemble':
+            metrics['zscore_means'] = {
+                name: float(mu) for name, mu in zip(method_names, resolved_means)
+            }
+            metrics['zscore_stds'] = {
+                name: float(sd) for name, sd in zip(method_names, resolved_stds)
+            }
+        else:
+            metrics['zscore_means'] = {
+                name: [float(v) for v in mu_vec]
+                for name, mu_vec in zip(method_names, resolved_means)
+            }
+            metrics['zscore_stds'] = {
+                name: [float(v) for v in sd_vec]
+                for name, sd_vec in zip(method_names, resolved_stds)
+            }
+
+        self._uncertainties[aggregation_name] = aggregated_scores
+        if mode == 'per_fold':
+            self._uncertainties[f'{aggregation_name}_per_fold'] = aggregated_for_metrics
+            self._uncertainties[f'{aggregation_name}_ensemble'] = aggregated_scores
+        self._results[aggregation_name] = metrics
+
+        return aggregated_for_metrics, metrics
+
+    def run_zscore_aggregation_per_fold(
+        self,
+        method_names: Optional[List[str]] = None,
+        score_dict: Optional[Dict[str, np.ndarray]] = None,
+        means: Optional[Union[List[Any], Dict[str, Any]]] = None,
+        stds: Optional[Union[List[Any], Dict[str, Any]]] = None,
+        use_test_distribution: bool = True,
+        aggregation_name: str = 'ZScore_Aggregation_per_fold',
+        predictions: Optional[np.ndarray] = None,
+        labels: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Dedicated per-fold z-score aggregation entrypoint."""
+        return self.run_zscore_aggregation(
+            method_names=method_names,
+            score_dict=score_dict,
+            means=means,
+            stds=stds,
+            use_test_distribution=use_test_distribution,
+            aggregation_name=aggregation_name,
+            mode='per_fold',
+            predictions=predictions,
+            labels=labels
+        )
+
+    def run_zscore_aggregation_ensemble(
+        self,
+        method_names: Optional[List[str]] = None,
+        score_dict: Optional[Dict[str, np.ndarray]] = None,
+        means: Optional[Union[List[Any], Dict[str, Any]]] = None,
+        stds: Optional[Union[List[Any], Dict[str, Any]]] = None,
+        use_test_distribution: bool = True,
+        aggregation_name: str = 'ZScore_Aggregation_ensemble',
+        predictions: Optional[np.ndarray] = None,
+        labels: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Dedicated ensemble z-score aggregation entrypoint."""
+        return self.run_zscore_aggregation(
+            method_names=method_names,
+            score_dict=score_dict,
+            means=means,
+            stds=stds,
+            use_test_distribution=use_test_distribution,
+            aggregation_name=aggregation_name,
+            mode='ensemble',
+            predictions=predictions,
+            labels=labels
+        )
     
     def _get_per_fold_predictions(self, batch_size):
         """
@@ -346,15 +554,21 @@ class FailureDetector:
         y_scores: np.ndarray,
         y_true: np.ndarray,
         indiv_scores: Optional[np.ndarray] = None,
+        logits: Optional[np.ndarray] = None,
+        indiv_logits: Optional[np.ndarray] = None,
         per_fold_evaluation: bool = True
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run Maximum Softmax Response (MSR).
         
         Args:
-            y_scores: Ensemble probability scores [N, num_classes]
+            y_scores: Ensemble probability scores [N, num_classes].
+                     If logits is provided, this is ignored for uncertainty computation.
             y_true: True labels [N]
             indiv_scores: Optional individual model scores [num_models, N, num_classes]
+            logits: Optional ensemble logits [N, C] for TRUE ensemble evaluation
+                   (average logits before softmax/sigmoid)
+            indiv_logits: Optional per-fold logits [num_models, N, C]
             per_fold_evaluation: If True and indiv_scores provided, compute per-fold metrics.
                                 If False, use ensemble predictions (legacy behavior)
         
@@ -363,14 +577,43 @@ class FailureDetector:
                 If per_fold_evaluation=True and indiv_scores provided: uncertainties is [num_folds, N]
                 Otherwise: uncertainties is [N]
         """
+        # Use logits when available to enforce true ensembling:
+        # average logits first, then apply softmax/sigmoid.
+        scores_for_msr = y_scores
+        indiv_scores_for_msr = indiv_scores
+
+        if logits is not None:
+            if logits.ndim == 1 or (logits.ndim == 2 and logits.shape[1] == 1):
+                logits_1d = np.asarray(logits).ravel()
+                probs_pos = 1.0 / (1.0 + np.exp(-np.clip(logits_1d, -60.0, 60.0)))
+                scores_for_msr = np.stack([1.0 - probs_pos, probs_pos], axis=1)
+            else:
+                logits_2d = np.asarray(logits)
+                shifted = logits_2d - np.max(logits_2d, axis=1, keepdims=True)
+                exp_logits = np.exp(shifted)
+                scores_for_msr = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+        if indiv_logits is not None:
+            if indiv_logits.ndim != 3:
+                raise ValueError(f"indiv_logits must be 3D [num_models, N, C], got shape {indiv_logits.shape}")
+            if indiv_logits.shape[2] == 1:
+                logits_pos = np.asarray(indiv_logits)[:, :, 0]
+                probs_pos = 1.0 / (1.0 + np.exp(-np.clip(logits_pos, -60.0, 60.0)))
+                indiv_scores_for_msr = np.stack([1.0 - probs_pos, probs_pos], axis=2)
+            else:
+                logits_3d = np.asarray(indiv_logits)
+                shifted = logits_3d - np.max(logits_3d, axis=2, keepdims=True)
+                exp_logits = np.exp(shifted)
+                indiv_scores_for_msr = exp_logits / np.sum(exp_logits, axis=2, keepdims=True)
+
         timer = Timer("MSR computation")
         with timer:
-            if indiv_scores is not None and per_fold_evaluation:
+            if indiv_scores_for_msr is not None and per_fold_evaluation:
                 # Compute MSR per-fold
                 uncertainties_per_fold = []
                 predictions_per_fold = []
-                for fold_idx in range(indiv_scores.shape[0]):
-                    fold_scores = indiv_scores[fold_idx]  # [N, num_classes]
+                for fold_idx in range(indiv_scores_for_msr.shape[0]):
+                    fold_scores = indiv_scores_for_msr[fold_idx]  # [N, num_classes]
                     fold_uncertainties = uq.distance_to_hard_labels_computation(fold_scores)
                     fold_predictions = np.argmax(fold_scores, axis=1)
                     uncertainties_per_fold.append(fold_uncertainties)
@@ -379,7 +622,7 @@ class FailureDetector:
                 predictions_per_fold = np.array(predictions_per_fold)  # [num_folds, N]
             else:
                 # Ensemble-based: single uncertainty from ensemble
-                uncertainties = uq.distance_to_hard_labels_computation(y_scores)
+                uncertainties = uq.distance_to_hard_labels_computation(scores_for_msr)
                 predictions_per_fold = None
         
         # Use cached predictions if available
@@ -388,14 +631,14 @@ class FailureDetector:
             incorrect_idx = self._test_predictions_cache['incorrect_idx']
             y_pred = self._test_predictions_cache['y_pred']
         else:
-            y_pred = np.argmax(y_scores, axis=1)
+            y_pred = np.argmax(scores_for_msr, axis=1)
             correct_idx = np.where(y_pred == y_true)[0]
             incorrect_idx = np.where(y_pred != y_true)[0]
         
         # Compute TRUE ensemble uncertainties BEFORE metrics (needed for correct JSON values)
         ensemble_uncertainties = None
         if uncertainties.ndim == 2:
-            ensemble_uncertainties = uq.distance_to_hard_labels_computation(y_scores)  # [N]
+            ensemble_uncertainties = uq.distance_to_hard_labels_computation(scores_for_msr)  # [N]
         
         metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx, y_pred, y_true, 
                                        predictions_per_fold=predictions_per_fold,
@@ -1302,7 +1545,7 @@ class FailureDetector:
                 knn_method.fit(self.models, train_loaders, self.device)
                 
                 # Step 2: Extract and transform calibration features + store training features
-                from FailCatcher.methods.latent import extract_latent_space_and_compute_shap_importance, get_layer_from_model
+                from ToolBox.methods.latent import extract_latent_space_and_compute_shap_importance, get_layer_from_model
                 
                 calib_features_transformed = []
                 train_features_transformed = []  # Store for grid search
@@ -1577,6 +1820,20 @@ class FailureDetector:
         """Compute all evaluation metrics."""
         # Check if uncertainties are per-fold [num_folds, N] or averaged [N]
         if uncertainties.ndim == 2:
+            # Ensure per-fold predictions exist for fold-wise metrics.
+            if predictions_per_fold is None:
+                if self._per_fold_predictions_cache is not None:
+                    predictions_per_fold = self._per_fold_predictions_cache
+                elif self._test_predictions_cache is not None:
+                    cached_pf = self._test_predictions_cache.get('per_fold_predictions')
+                    if cached_pf is not None:
+                        predictions_per_fold = cached_pf
+
+            if predictions_per_fold is None:
+                # Conservative fallback to keep execution alive; fold-level metrics will
+                # effectively mirror ensemble predictions when true per-fold preds are unavailable.
+                predictions_per_fold = np.tile(predictions[None, :], (uncertainties.shape[0], 1))
+
             # Get per-fold correct/incorrect indices from cache if available
             per_fold_correct_idx = None
             per_fold_incorrect_idx = None

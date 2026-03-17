@@ -83,7 +83,9 @@ ALL_METHODS = [
     'GPS', 
     'KNN_Raw', 
     #'KNN_SHAP', 
-    'MCDropout'
+    'MCDropout',
+    'ZScore_Aggregation_per_fold',
+    'ZScore_Aggregation_ensemble'
 ]
 
 # Setup constraints: which methods work with which setups

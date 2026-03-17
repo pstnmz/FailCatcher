@@ -1248,7 +1248,7 @@ def load_models(flag, device, waugmentation=False, size=224, model_backbone='res
             model_path = Path(models_base_dir) / f'{size}*{size}' / model_filename
         else:
             project_root = _get_project_root()
-            model_path = project_root / 'benchmarks' / 'medMNIST' / 'models' / f'{size}*{size}' / model_filename
+            model_path = project_root / 'medMNIST' / 'models' / f'{size}*{size}' / model_filename
         model_path = str(model_path)
         
         # Load the state dictionary

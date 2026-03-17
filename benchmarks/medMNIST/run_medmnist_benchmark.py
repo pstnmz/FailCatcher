@@ -553,44 +553,61 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     # This is especially important when running multiple UQ methods
     detector.set_per_fold_predictions(per_fold_predictions)
     print("  ✓ Pre-cached per-fold predictions - vanilla inference will be skipped")
-    
-    # Adaptive batch size for KNN methods based on model architecture
-    # KNN requires full forward passes on large datasets which can OOM
-    knn_batch_size = min(batch_size, 3000)  # Conservative default for all models
-    knn_test_loader = test_loader
-    
-    # TTA/GPS batch size - also needs reduction for ViT on large datasets
-    tta_gps_batch_size = batch_size
-    if model_backbone == 'vit_b_16' and batch_size > 3000:
-        tta_gps_batch_size = 3000
-        print(f"  ℹ️  Using reduced batch size {tta_gps_batch_size} for TTA/GPS with ViT (avoids OOM)")
-    
-    # Further reduce for ViT models which consume significantly more memory
-    if model_backbone == 'vit_b_16':
-        knn_batch_size = min(batch_size, 4000)  # Reduce to 4000 for ViT to avoid OOM
-        print(f"  ℹ️  Using reduced batch size {knn_batch_size} for KNN with ViT (avoids OOM)")
-    elif knn_batch_size < batch_size:
-        print(f"  ℹ️  Using reduced batch size {knn_batch_size} for KNN (avoids OOM on large datasets)")
-    
-    # Create reduced batch size test loader if needed
-    if knn_batch_size < batch_size:
-        knn_test_loader = DataLoader(
-            test_dataset, batch_size=knn_batch_size, shuffle=False,
-            num_workers=4, pin_memory=True
-        )
-    
-    # Create CV train loaders for KNN methods
-    cv_gen = dataset_utils.create_cv_generator(n_splits=5, seed=42, batch_size=knn_batch_size)
-    train_loaders = cv_gen(study_dataset, models, knn_batch_size)
-    
-    # Create KNN-specific calibration loader with reduced batch size (for hyperparameter tuning)
-    if knn_batch_size < batch_size:
-        knn_calib_loader = DataLoader(
-            calib_dataset, batch_size=knn_batch_size, shuffle=False,
-            num_workers=4, pin_memory=True
-        )
-    else:
-        knn_calib_loader = calib_loader  # Use original loader if batch size is same
+
+    # Separate detector for calibration-only uncertainty statistics.
+    # We do NOT save calibration uncertainties; we only persist mean/std summaries.
+    calib_detector = failure_detection.FailureDetector(
+        models=models,
+        study_dataset=study_dataset,
+        calib_dataset=calib_dataset,
+        test_dataset=calib_dataset,
+        device=device,
+        num_classes=len(info['label'])
+    )
+    calib_detector.set_test_predictions(
+        y_scores_calib, y_true_calib, y_pred_calib,
+        correct_idx_calib, incorrect_idx_calib,
+        per_fold_correct_idx_calib, per_fold_incorrect_idx_calib
+    )
+    calib_detector.set_per_fold_predictions(per_fold_predictions_calib)
+
+    calibration_zscore_stats = {}
+
+    def _store_calibration_stats(method_key: str):
+        """Store mean/std stats from calibration uncertainties for later z-score normalization."""
+        method_stats = {}
+
+        per_fold_key = f'{method_key}_per_fold'
+        ensemble_key = f'{method_key}_ensemble'
+
+        if per_fold_key in calib_detector._uncertainties:
+            per_fold_vals = np.asarray(calib_detector._uncertainties[per_fold_key])
+            if per_fold_vals.ndim == 2:
+                method_stats['per_fold'] = [
+                    {
+                        'fold': int(fold_idx),
+                        'mean': float(np.mean(per_fold_vals[fold_idx])),
+                        'std': float(np.std(per_fold_vals[fold_idx]))
+                    }
+                    for fold_idx in range(per_fold_vals.shape[0])
+                ]
+
+        if ensemble_key in calib_detector._uncertainties:
+            ensemble_vals = np.asarray(calib_detector._uncertainties[ensemble_key])
+            method_stats['ensemble'] = {
+                'mean': float(np.mean(ensemble_vals)),
+                'std': float(np.std(ensemble_vals))
+            }
+        elif method_key in calib_detector._uncertainties:
+            base_vals = np.asarray(calib_detector._uncertainties[method_key])
+            if base_vals.ndim == 1:
+                method_stats['ensemble'] = {
+                    'mean': float(np.mean(base_vals)),
+                    'std': float(np.std(base_vals))
+                }
+
+        if method_stats:
+            calibration_zscore_stats[method_key] = method_stats
     
     # ========================================================================
     # RUN UQ METHODS using FailCatcher API
@@ -604,6 +621,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         uncertainties, metrics = detector.run_msr(
             y_scores, y_true, 
             indiv_scores=indiv_scores if per_fold_eval else None,
+            logits=logits,
+            indiv_logits=indiv_logits if per_fold_eval else None,
             per_fold_evaluation=per_fold_eval
         )
         results['MSR'] = metrics
@@ -612,6 +631,16 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                   f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
         else:
             print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        # Calibration-distribution uncertainty stats (means/stds only)
+        calib_detector.run_msr(
+            y_scores_calib, y_true_calib,
+            indiv_scores=indiv_scores_calib if per_fold_eval else None,
+            logits=logits_calib,
+            indiv_logits=indiv_logits_calib if per_fold_eval else None,
+            per_fold_evaluation=per_fold_eval
+        )
+        _store_calibration_stats('MSR')
     
     if 'MSR_calibrated' in methods:
         print(f"\n🔍 Running MSR-{calib_method}...")
@@ -635,6 +664,21 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                   f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
         else:
             print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        # Calibration-distribution uncertainty stats (means/stds only)
+        calib_detector.run_msr_calibrated(
+            y_scores_calib, y_true_calib, y_scores_calib, y_true_calib,
+            logits_calib, logits_calib,
+            indiv_logits_test=indiv_logits_calib if (per_fold_eval and indiv_logits_calib is not None) else None,
+            indiv_logits_calib=indiv_logits_calib if (per_fold_eval and indiv_logits_calib is not None) else None,
+            indiv_scores_test=indiv_scores_calib if per_fold_eval else None,
+            indiv_scores_calib=indiv_scores_calib if per_fold_eval else None,
+            method=calib_method,
+            per_fold_evaluation=per_fold_eval,
+            auto_tune_platt=True,
+            verbose_tuning=False
+        )
+        _store_calibration_stats('MSR_calibrated')
     
     if 'MLS' in methods:
         print("\n🔍 Running MLS (Maximum Logit Score)...")
@@ -651,14 +695,29 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                   f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
         else:
             print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        calib_detector.run_mls(
+            logits_calib, y_true_calib,
+            indiv_logits=indiv_logits_calib if per_fold_eval else None,
+            per_fold_evaluation=per_fold_eval
+        )
+        _store_calibration_stats('MLS')
     
     if 'Ensembling' in methods:
         print("\n🔍 Running Ensemble STD...")
         uncertainties, metrics = detector.run_ensemble(indiv_scores, y_true)
         results['Ensemble'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        calib_detector.run_ensemble(indiv_scores_calib, y_true_calib)
+        _store_calibration_stats('Ensembling')
     
     if 'TTA' in methods:
+        # TTA/GPS batch size - also needs reduction for ViT on large datasets
+        tta_gps_batch_size = batch_size
+        if model_backbone == 'vit_b_16' and batch_size > 3000:
+            tta_gps_batch_size = 3000
+            print(f"  ℹ️  Using reduced batch size {tta_gps_batch_size} for TTA/GPS with ViT (avoids OOM)")
         print("\n🔍 Running TTA...")
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
@@ -672,6 +731,16 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         )
         results['TTA'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        calib_detector.run_tta(
+            calib_dataset_tta, y_true_calib,
+            image_size=image_size,
+            batch_size=tta_gps_batch_size,
+            nb_augmentations=5,
+            per_fold_evaluation=per_fold_eval,
+            seed=42
+        )
+        _store_calibration_stats('TTA')
     
     if 'TTA_calib' in methods:
         print("\n🔍 Running TTA Calibration Caching (BetterRandAugment)...")
@@ -748,15 +817,46 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
 
     if 'GPS' in methods:
         print("\n🔍 Running GPS...")
+    
+        # TTA/GPS batch size - also needs reduction for ViT on large datasets
+        tta_gps_batch_size = batch_size
+        if model_backbone == 'vit_b_16' and batch_size > 3000:
+            tta_gps_batch_size = 3000
+            print(f"  ℹ️  Using reduced batch size {tta_gps_batch_size} for TTA/GPS with ViT (avoids OOM)")
         
         # CRITICAL: Reset test_dataset_tta transform to original state
         # TTA may have modified it, and GPS needs clean dataset
         test_dataset_tta.transform = transform_tta
+
+        # Resolve GPS cache root. Prefer current output dir, but fall back to the
+        # medMNIST benchmark results cache location when it already exists.
+        gps_cache_root_candidates = [
+            os.path.join(output_dir, 'gps_augment_cache'),
+            str(workspace_root / 'Benchmarks' / 'medMNIST' / 'results' / 'gps_augment_cache'),
+        ]
+        # Keep order while removing duplicates
+        gps_cache_root_candidates = list(dict.fromkeys(gps_cache_root_candidates))
         
         setup_name = setup if setup else 'standard'
         # Include sample count in folder name if subsampling occurs
         folder_suffix = f'_N{gps_calib_samples}' if gps_calib_samples is not None else ''
-        aug_folder = os.path.join(output_dir, 'gps_augment_cache', f'{gps_cache_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}')
+        aug_folder_name = f'{gps_cache_flag}_{model_backbone}_{setup_name}_calibration_set{folder_suffix}'
+        aug_folder = os.path.join(gps_cache_root_candidates[0], aug_folder_name)
+
+        if 'TTA_calib' not in methods:
+            for candidate_root in gps_cache_root_candidates:
+                candidate_folder = os.path.join(candidate_root, aug_folder_name)
+                if os.path.isdir(candidate_folder):
+                    aug_folder = candidate_folder
+                    break
+
+            if not os.path.isdir(aug_folder):
+                checked_paths = [os.path.join(root, aug_folder_name) for root in gps_cache_root_candidates]
+                raise FileNotFoundError(
+                    "GPS augmentation cache folder not found. "
+                    "Run with TTA_calib first or point --output-dir to a results folder containing gps_augment_cache. "
+                    f"Checked: {checked_paths}"
+                )
         
         # If TTA_calib was run, use the subsampled indices
         # Otherwise, compute them now (GPS can run independently of TTA_calib)
@@ -792,14 +892,58 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             incorrect_idx_calib=gps_incorrect_idx,
             image_size=image_size,
             batch_size=tta_gps_batch_size,
-            cache_dir=os.path.join(output_dir, 'gps_augment_cache'),
+            cache_dir=os.path.dirname(aug_folder),
             per_fold_evaluation=per_fold_eval
         )
         results['GPS'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        calib_detector.run_gps(
+            calib_dataset_tta, y_true_calib,
+            aug_folder=aug_folder,
+            correct_idx_calib=gps_correct_idx,
+            incorrect_idx_calib=gps_incorrect_idx,
+            image_size=image_size,
+            batch_size=tta_gps_batch_size,
+            cache_dir=os.path.dirname(aug_folder),
+            per_fold_evaluation=per_fold_eval
+        )
+        _store_calibration_stats('GPS')
     
     if 'KNN_Raw' in methods:
         print("\n🔍 Running KNN-Raw...")
+
+        # Adaptive batch size for KNN methods based on model architecture
+        # KNN requires full forward passes on large datasets which can OOM
+        knn_batch_size = min(batch_size, 3000)  # Conservative default for all models
+        knn_test_loader = test_loader
+        # Further reduce for ViT models which consume significantly more memory
+        if model_backbone == 'vit_b_16':
+            knn_batch_size = min(batch_size, 4000)  # Reduce to 4000 for ViT to avoid OOM
+            print(f"  ℹ️  Using reduced batch size {knn_batch_size} for KNN with ViT (avoids OOM)")
+        elif knn_batch_size < batch_size:
+            print(f"  ℹ️  Using reduced batch size {knn_batch_size} for KNN (avoids OOM on large datasets)")
+        
+        # Create reduced batch size test loader if needed
+        if knn_batch_size < batch_size:
+            knn_test_loader = DataLoader(
+                test_dataset, batch_size=knn_batch_size, shuffle=False,
+                num_workers=4, pin_memory=True
+            )
+        
+        # Create CV train loaders for KNN methods
+        cv_gen = dataset_utils.create_cv_generator(n_splits=5, seed=42, batch_size=knn_batch_size)
+        train_loaders = cv_gen(study_dataset, models, knn_batch_size)
+        
+        # Create KNN-specific calibration loader with reduced batch size (for hyperparameter tuning)
+        if knn_batch_size < batch_size:
+            knn_calib_loader = DataLoader(
+                calib_dataset, batch_size=knn_batch_size, shuffle=False,
+                num_workers=4, pin_memory=True
+            )
+        else:
+            knn_calib_loader = calib_loader  # Use original loader if batch size is same
+            
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
         
@@ -833,6 +977,20 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                   f"AUGRC: {metrics['augrc_mean']:.6f}±{metrics['augrc_std']:.6f}")
         else:
             print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        k_for_calib = metrics['k_selected'] if 'k_selected' in metrics else (5 if k is None else k)
+        calib_detector.run_knn_raw(
+            test_loader=knn_calib_loader,
+            train_loaders=train_loaders,
+            y_true=y_true_calib,
+            layer_name='avgpool',
+            k=k_for_calib,
+            per_fold_evaluation=per_fold_eval,
+            k_grid=None,
+            calib_loader=None,
+            y_true_calib=None
+        )
+        _store_calibration_stats('KNN_Raw')
     
     if 'KNN_SHAP' in methods:
         print("\n🔍 Running KNN-SHAP...")
@@ -857,6 +1015,22 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         )
         results['KNN_SHAP'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        calib_detector.run_knn_shap(
+            calib_loader=calib_loader,
+            test_loader=knn_calib_loader,
+            train_loaders=train_loaders,
+            y_true=y_true_calib,
+            flag=f"{flag}_calib",
+            layer_name='avgpool',
+            k=5,
+            n_shap_features=50,
+            cache_dir=os.path.join(output_dir, 'shap_cache'),
+            parallel=parallel_mode,
+            n_jobs=n_jobs,
+            per_fold_evaluation=per_fold_eval
+        )
+        _store_calibration_stats('KNN_SHAP')
     
     # ========================================================================
     # MC DROPOUT - RUN LAST TO AVOID INTERFERING WITH OTHER METHODS
@@ -876,6 +1050,104 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         )
         results['MCDropout'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
+
+        calib_detector.run_mcdropout(
+            calib_dataset, y_true_calib,
+            batch_size=batch_size,
+            num_samples=30,
+            per_fold_evaluation=per_fold_eval
+        )
+        _store_calibration_stats('MCDropout')
+
+    # ========================================================================
+    # Z-SCORE AGGREGATION METHODS (CALLABLE VIA --methods)
+    # ========================================================================
+    aggregation_candidates = [
+        'MSR', 'MSR_calibrated', 'MLS', 'Ensembling',
+        'GPS', 'KNN_Raw', 'MCDropout'
+    ]
+    aggregation_methods_ensemble = [
+        name for name in aggregation_candidates
+        if name in detector._uncertainties
+    ]
+    aggregation_methods_per_fold = [
+        name for name in aggregation_candidates
+        if f'{name}_per_fold' in detector._uncertainties
+    ]
+
+    # Build calibration-based normalization maps to avoid data leakage.
+    # Expected structure in calibration_zscore_stats:
+    #   calibration_zscore_stats[method]['ensemble'] -> {'mean': float, 'std': float}
+    #   calibration_zscore_stats[method]['per_fold'] -> list[{fold, mean, std}]
+    calib_means_ensemble = {}
+    calib_stds_ensemble = {}
+    calib_means_per_fold = {}
+    calib_stds_per_fold = {}
+
+    for method_name, method_stats in calibration_zscore_stats.items():
+        ensemble_stats = method_stats.get('ensemble')
+        if isinstance(ensemble_stats, dict) and 'mean' in ensemble_stats and 'std' in ensemble_stats:
+            calib_means_ensemble[method_name] = float(ensemble_stats['mean'])
+            calib_stds_ensemble[method_name] = float(ensemble_stats['std'])
+
+        per_fold_stats = method_stats.get('per_fold')
+        if isinstance(per_fold_stats, list) and len(per_fold_stats) > 0:
+            sorted_folds = sorted(per_fold_stats, key=lambda x: int(x.get('fold', 0)))
+            calib_means_per_fold[method_name] = [float(x['mean']) for x in sorted_folds]
+            calib_stds_per_fold[method_name] = [float(x['std']) for x in sorted_folds]
+
+    aggregation_methods_ensemble_calib = [
+        name for name in aggregation_methods_ensemble
+        if name in calib_means_ensemble and name in calib_stds_ensemble
+    ]
+    aggregation_methods_per_fold_calib = [
+        name for name in aggregation_methods_per_fold
+        if name in calib_means_per_fold and name in calib_stds_per_fold
+    ]
+
+    if 'ZScore_Aggregation_per_fold' in methods:
+        if not per_fold_eval:
+            print("\nℹ️  Skipping ZScore_Aggregation_per_fold (requires --per-fold-eval)")
+        elif len(aggregation_methods_per_fold_calib) < 2:
+            print("\nℹ️  Skipping ZScore_Aggregation_per_fold (need at least 2 methods with calibration mean/std)")
+        else:
+            print("\n🔍 Running ZScore_Aggregation_per_fold...")
+            print(f"  Sources: {aggregation_methods_per_fold_calib}")
+            _, agg_pf_metrics = detector.run_zscore_aggregation_per_fold(
+                method_names=aggregation_methods_per_fold_calib,
+                means=calib_means_per_fold,
+                stds=calib_stds_per_fold,
+                use_test_distribution=False,
+                aggregation_name='ZScore_Aggregation_per_fold'
+            )
+            results['ZScore_Aggregation_per_fold'] = agg_pf_metrics
+            if 'auroc_f_mean' in agg_pf_metrics:
+                print(
+                    f"  AUROC: {agg_pf_metrics['auroc_f_mean']:.4f}±{agg_pf_metrics['auroc_f_std']:.4f}, "
+                    f"AUGRC: {agg_pf_metrics['augrc_mean']:.6f}±{agg_pf_metrics['augrc_std']:.6f}"
+                )
+            else:
+                print(f"  AUROC: {agg_pf_metrics['auroc_f']:.4f}, AUGRC: {agg_pf_metrics['augrc']:.6f}")
+
+    if 'ZScore_Aggregation_ensemble' in methods:
+        if len(aggregation_methods_ensemble_calib) < 2:
+            print("\nℹ️  Skipping ZScore_Aggregation_ensemble (need at least 2 methods with calibration mean/std)")
+        else:
+            print("\n🔍 Running ZScore_Aggregation_ensemble...")
+            print(f"  Sources: {aggregation_methods_ensemble_calib}")
+            _, agg_ens_metrics = detector.run_zscore_aggregation_ensemble(
+                method_names=aggregation_methods_ensemble_calib,
+                means=calib_means_ensemble,
+                stds=calib_stds_ensemble,
+                use_test_distribution=False,
+                aggregation_name='ZScore_Aggregation_ensemble'
+            )
+            results['ZScore_Aggregation_ensemble'] = agg_ens_metrics
+            print(f"  AUROC: {agg_ens_metrics['auroc_f']:.4f}, AUGRC: {agg_ens_metrics['augrc']:.6f}")
+
+    if calibration_zscore_stats:
+        detector._results['Calibration_ZScore_Stats'] = calibration_zscore_stats
+        print("\n💾 Stored calibration z-score stats (means/stds only) for later aggregation.")
     
     # ========================================================================
     # SAVE RESULTS AND FIGURES (via FailureDetector)
@@ -965,11 +1237,11 @@ if __name__ == '__main__':
     parser.add_argument(
         '--methods', nargs='+',
         default=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'KNN_Raw', 'KNN_SHAP', 'MCDropout'],
-        choices=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP', 'MCDropout'],
+        choices=['MSR', 'MSR_calibrated', 'MLS', 'Ensembling', 'TTA', 'GPS', 'TTA_calib', 'KNN_Raw', 'KNN_SHAP', 'MCDropout', 'ZScore_Aggregation_per_fold', 'ZScore_Aggregation_ensemble'],
         help='UQ methods to run (MCDropout runs last to avoid interference with other methods)'
     )
     parser.add_argument(
-        '--output-dir', type=str, default='./uq_benchmark_results',
+        '--output-dir', type=str, default='./Benchmarks/medMNIST/results',
         help='Output directory for results'
     )
     parser.add_argument(
