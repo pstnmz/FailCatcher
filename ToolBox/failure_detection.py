@@ -563,11 +563,10 @@ class FailureDetector:
         
         Args:
             y_scores: Ensemble probability scores [N, num_classes].
-                     If logits is provided, this is ignored for uncertainty computation.
+                     MSR is computed directly from these probabilities.
             y_true: True labels [N]
             indiv_scores: Optional individual model scores [num_models, N, num_classes]
-            logits: Optional ensemble logits [N, C] for TRUE ensemble evaluation
-                   (average logits before softmax/sigmoid)
+            logits: Optional ensemble logits [N, C] (kept for API compatibility)
             indiv_logits: Optional per-fold logits [num_models, N, C]
             per_fold_evaluation: If True and indiv_scores provided, compute per-fold metrics.
                                 If False, use ensemble predictions (legacy behavior)
@@ -577,34 +576,10 @@ class FailureDetector:
                 If per_fold_evaluation=True and indiv_scores provided: uncertainties is [num_folds, N]
                 Otherwise: uncertainties is [N]
         """
-        # Use logits when available to enforce true ensembling:
-        # average logits first, then apply softmax/sigmoid.
+        # MSR policy: use averaged softmax/sigmoid scores directly.
+        # Keep logits arguments for backward-compatible call sites.
         scores_for_msr = y_scores
         indiv_scores_for_msr = indiv_scores
-
-        if logits is not None:
-            if logits.ndim == 1 or (logits.ndim == 2 and logits.shape[1] == 1):
-                logits_1d = np.asarray(logits).ravel()
-                probs_pos = 1.0 / (1.0 + np.exp(-np.clip(logits_1d, -60.0, 60.0)))
-                scores_for_msr = np.stack([1.0 - probs_pos, probs_pos], axis=1)
-            else:
-                logits_2d = np.asarray(logits)
-                shifted = logits_2d - np.max(logits_2d, axis=1, keepdims=True)
-                exp_logits = np.exp(shifted)
-                scores_for_msr = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
-
-        if indiv_logits is not None:
-            if indiv_logits.ndim != 3:
-                raise ValueError(f"indiv_logits must be 3D [num_models, N, C], got shape {indiv_logits.shape}")
-            if indiv_logits.shape[2] == 1:
-                logits_pos = np.asarray(indiv_logits)[:, :, 0]
-                probs_pos = 1.0 / (1.0 + np.exp(-np.clip(logits_pos, -60.0, 60.0)))
-                indiv_scores_for_msr = np.stack([1.0 - probs_pos, probs_pos], axis=2)
-            else:
-                logits_3d = np.asarray(indiv_logits)
-                shifted = logits_3d - np.max(logits_3d, axis=2, keepdims=True)
-                exp_logits = np.exp(shifted)
-                indiv_scores_for_msr = exp_logits / np.sum(exp_logits, axis=2, keepdims=True)
 
         timer = Timer("MSR computation")
         with timer:
@@ -789,6 +764,8 @@ class FailureDetector:
         from .methods.distance import posthoc_calibration
         from .core.utils import apply_calibration
         
+        calibrated_scores_per_fold = []
+
         timer = Timer(f"MSR-{method} calibration")
         with timer:
             if per_fold_evaluation and method == 'temperature' and indiv_logits_test is not None and indiv_logits_calib is not None:
@@ -812,7 +789,12 @@ class FailureDetector:
                     if fold_scores_test is None:
                         # Compute from logits if not provided
                         import torch
-                        fold_scores_test = torch.softmax(torch.from_numpy(fold_logits_test), dim=1).numpy()
+                        logits_tensor = torch.from_numpy(fold_logits_test)
+                        if logits_tensor.ndim == 1 or (logits_tensor.ndim == 2 and logits_tensor.shape[1] == 1):
+                            probs_pos = torch.sigmoid(logits_tensor.reshape(-1, 1)).numpy().ravel()
+                            fold_scores_test = np.stack([1.0 - probs_pos, probs_pos], axis=1)
+                        else:
+                            fold_scores_test = torch.softmax(logits_tensor, dim=1).numpy()
                     
                     # Apply calibration
                     calibrated_scores = apply_calibration(
@@ -821,6 +803,10 @@ class FailureDetector:
                     
                     # Compute uncertainty and predictions
                     fold_uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
+                    if calibrated_scores.ndim == 1:
+                        calibrated_scores_per_fold.append(np.stack([1.0 - calibrated_scores, calibrated_scores], axis=1))
+                    else:
+                        calibrated_scores_per_fold.append(calibrated_scores)
                     # Handle both binary (1D) and multiclass (2D) calibrated scores
                     if calibrated_scores.ndim == 1:
                         # Binary: calibrated_scores is [N] (prob of positive class)
@@ -861,6 +847,11 @@ class FailureDetector:
                     
                     # Compute uncertainty from calibrated scores
                     fold_uncertainties = uq.distance_to_hard_labels_computation(calibrated_scores)
+
+                    if calibrated_scores.ndim == 1:
+                        calibrated_scores_per_fold.append(np.stack([1.0 - calibrated_scores, calibrated_scores], axis=1))
+                    else:
+                        calibrated_scores_per_fold.append(calibrated_scores)
                     
                     # Use ORIGINAL predictions, NOT from calibrated scores
                     # Calibration should only affect confidence scores, not predictions
@@ -908,26 +899,28 @@ class FailureDetector:
         # Compute TRUE ensemble uncertainties BEFORE metrics (needed for correct JSON values)
         ensemble_uncertainties = None
         if uncertainties.ndim == 2:
-            # Compute ensemble calibration
-            from .methods.distance import posthoc_calibration
-            from .core.utils import apply_calibration
-            
-            if method == 'temperature':
-                if logits_calib is None:
-                    raise ValueError("Temperature scaling requires ensemble logits")
-                _, calib_model = posthoc_calibration(
-                    logits_calib, y_true_calib, method,
-                    auto_tune_platt=auto_tune_platt, verbose=verbose_tuning
-                )
-                calibrated_ensemble = apply_calibration(y_scores_test, calib_model, method, logits=logits_test)
+            if per_fold_evaluation and len(calibrated_scores_per_fold) > 0:
+                # Average calibrated fold probabilities first, then compute MSR.
+                calibrated_ensemble = np.mean(np.stack(calibrated_scores_per_fold, axis=0), axis=0)
+                ensemble_uncertainties = uq.distance_to_hard_labels_computation(calibrated_ensemble)
             else:
-                _, calib_model = posthoc_calibration(
-                    y_scores_calib, y_true_calib, method,
-                    auto_tune_platt=auto_tune_platt, verbose=verbose_tuning
-                )
-                calibrated_ensemble = apply_calibration(y_scores_test, calib_model, method)
-            
-            ensemble_uncertainties = uq.distance_to_hard_labels_computation(calibrated_ensemble)
+                # Fallback for non-per-fold mode.
+                if method == 'temperature':
+                    if logits_calib is None:
+                        raise ValueError("Temperature scaling requires ensemble logits")
+                    _, calib_model = posthoc_calibration(
+                        logits_calib, y_true_calib, method,
+                        auto_tune_platt=auto_tune_platt, verbose=verbose_tuning
+                    )
+                    calibrated_ensemble = apply_calibration(y_scores_test, calib_model, method, logits=logits_test)
+                else:
+                    _, calib_model = posthoc_calibration(
+                        y_scores_calib, y_true_calib, method,
+                        auto_tune_platt=auto_tune_platt, verbose=verbose_tuning
+                    )
+                    calibrated_ensemble = apply_calibration(y_scores_test, calib_model, method)
+                
+                ensemble_uncertainties = uq.distance_to_hard_labels_computation(calibrated_ensemble)
         
         metrics = self._compute_metrics(uncertainties, correct_idx, incorrect_idx,
                                        y_pred_calibrated, y_true_test,
