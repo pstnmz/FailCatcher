@@ -38,7 +38,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                            batch_size=4000, image_size=224, gpu_id=0, per_fold_eval=True,
                            model_backbone='resnet18', setup='', gps_calib_samples=None,
                            min_failure_ratio=0.3, corruption_severity=0,
-                           corrupt_test=False, corrupt_calib=False, new_class_shift=False):
+                           corrupt_test=False, corrupt_calib=False, new_class_shift=False,
+                           concurrent_processes=1, max_loader_workers=16):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -60,6 +61,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         corrupt_calib: If True, apply corruption to calibration set (requires corruption_severity > 0)
         new_class_shift: If True, create artificial test set with new classes (failures) + unanimous correct predictions
                         Only supported for AMOS2022 dataset
+        concurrent_processes: Number of benchmark processes running simultaneously on this host
+        max_loader_workers: Per-process hard cap for DataLoader workers
     """
     print(f"\n{'='*80}")
     print(f"MedMNIST Benchmark: {flag}")
@@ -93,6 +96,32 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     
     # Setup
     device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
+
+    # Process-aware CPU throttling to avoid oversubscription when multiple benchmarks run in parallel.
+    cpu_total = os.cpu_count() or 1
+    concurrent_processes = max(1, int(concurrent_processes))
+    cpu_budget = max(1, cpu_total // concurrent_processes)
+    max_loader_workers = max(1, int(max_loader_workers))
+    shared_loader_workers = min(max_loader_workers, max(4, (cpu_budget * 3) // 4))
+    loader_pin_memory = device.type == 'cuda'
+
+    # Limit intra-op/inter-op CPU threading per process.
+    torch_threads = max(1, min(16, cpu_budget // 2))
+    try:
+        torch.set_num_threads(torch_threads)
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # set_num_interop_threads can fail if called after parallel work started.
+        pass
+
+    print(
+        f"🧠 CPU budget: total={cpu_total}, concurrent_processes={concurrent_processes}, "
+        f"per_process_budget≈{cpu_budget}"
+    )
+    print(
+        f"  Worker config: shared_loader_workers={shared_loader_workers}, "
+        f"max_loader_workers={max_loader_workers}, torch_threads={torch_threads}"
+    )
     
     # Parse dermamnist-e variants
     base_flag = flag
@@ -159,7 +188,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                 # Rebuild test loader with corrupted dataset
                 test_loader = DataLoader(
                     test_dataset, batch_size=batch_size, shuffle=False, 
-                    num_workers=4, pin_memory=True
+                    num_workers=shared_loader_workers, pin_memory=loader_pin_memory
                 )
             if corrupt_calib:
                 print(f"  → Corrupting calibration set (severity={corruption_severity}/5)")
@@ -173,7 +202,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                 # Rebuild calib loader with corrupted dataset
                 calib_loader = DataLoader(
                     calib_dataset, batch_size=batch_size, shuffle=False, 
-                    num_workers=4, pin_memory=True
+                    num_workers=shared_loader_workers, pin_memory=loader_pin_memory
                 )
     elif base_flag == 'amos2022':
         # Load datasets and models of organamnist and amos2022 as test set
@@ -214,7 +243,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             )
             # Rebuild test loader
             test_loader = torch.utils.data.DataLoader(
-                test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=shared_loader_workers,
+                pin_memory=loader_pin_memory,
             )
     elif base_flag == 'midog':
         # Load PathMNIST models and calibration data, use MIDOG as OOD test set
@@ -806,8 +839,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             std=std,
             use_monai_cache=True,
             cache_rate=1.0,  # Full cache in RAM for speed
-            cache_num_workers=8,
-            dataloader_workers=6,  # More workers with persistent mode for speed
+            cache_num_workers=max(2, min(8, shared_loader_workers // 2)),
+            dataloader_workers=max(2, min(6, shared_loader_workers // 2)),  # Keep conservative for parallel runs
             dataloader_prefetch=2  # Conservative prefetch to avoid OOM
         )
         print(f"  ✓ Augmentation predictions cached in: {aug_folder}")
@@ -928,7 +961,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         if knn_batch_size < batch_size:
             knn_test_loader = DataLoader(
                 test_dataset, batch_size=knn_batch_size, shuffle=False,
-                num_workers=4, pin_memory=True
+                num_workers=shared_loader_workers, pin_memory=loader_pin_memory
             )
         
         # Create CV train loaders for KNN methods
@@ -939,7 +972,7 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         if knn_batch_size < batch_size:
             knn_calib_loader = DataLoader(
                 calib_dataset, batch_size=knn_batch_size, shuffle=False,
-                num_workers=4, pin_memory=True
+                num_workers=shared_loader_workers, pin_memory=loader_pin_memory
             )
         else:
             knn_calib_loader = calib_loader  # Use original loader if batch size is same
@@ -1042,11 +1075,25 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         print("\n🔍 Running MC Dropout (running last to avoid interference)...")
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f"  Mode: {mode_str} evaluation")
+
+        mcd_num_workers = shared_loader_workers
+        mcd_pin_memory = loader_pin_memory
+        mcd_persistent_workers = mcd_num_workers > 0
+        mcd_prefetch_factor = 2 if mcd_num_workers > 0 else None
+        print(
+            f"  DataLoader: workers={mcd_num_workers}, pin_memory={mcd_pin_memory}, "
+            f"persistent_workers={mcd_persistent_workers}, prefetch_factor={mcd_prefetch_factor}"
+        )
+
         uncertainties, metrics = detector.run_mcdropout(
             test_dataset, y_true,
             batch_size=batch_size,
             num_samples=30,
-            per_fold_evaluation=per_fold_eval
+            per_fold_evaluation=per_fold_eval,
+            num_workers=mcd_num_workers,
+            pin_memory=mcd_pin_memory,
+            persistent_workers=mcd_persistent_workers,
+            prefetch_factor=mcd_prefetch_factor
         )
         results['MCDropout'] = metrics
         print(f"  AUROC: {metrics['auroc_f']:.4f}, AUGRC: {metrics['augrc']:.6f}")
@@ -1055,7 +1102,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
             calib_dataset, y_true_calib,
             batch_size=batch_size,
             num_samples=30,
-            per_fold_evaluation=per_fold_eval
+            per_fold_evaluation=per_fold_eval,
+            num_workers=mcd_num_workers,
+            pin_memory=mcd_pin_memory,
+            persistent_workers=mcd_persistent_workers,
+            prefetch_factor=mcd_prefetch_factor
         )
         _store_calibration_stats('MCDropout')
 
@@ -1290,6 +1341,14 @@ if __name__ == '__main__':
         '--new-class-shift', action='store_true', default=False,
         help='Evaluate new class shift (AMOS and MIDOG only): Create artificial test sets with new classes (failures) + unanimous correct predictions (known classes)'
     )
+    parser.add_argument(
+        '--concurrent-processes', type=int, default=3,
+        help='Number of benchmark processes running simultaneously on this host (used to throttle CPU threads/workers per process).'
+    )
+    parser.add_argument(
+        '--max-loader-workers', type=int, default=32,
+        help='Hard cap for DataLoader workers per process (default: 32).'
+    )
     
     args = parser.parse_args()
     
@@ -1324,5 +1383,7 @@ if __name__ == '__main__':
         corruption_severity=args.corruption_severity,
         corrupt_test=args.corrupt_test,
         corrupt_calib=args.corrupt_calib,
-        new_class_shift=args.new_class_shift
+        new_class_shift=args.new_class_shift,
+        concurrent_processes=args.concurrent_processes,
+        max_loader_workers=args.max_loader_workers
     )

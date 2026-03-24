@@ -1004,7 +1004,11 @@ class FailureDetector:
         y_true: np.ndarray,
         batch_size: int = 256,
         num_samples: int = 5,
-        per_fold_evaluation: bool = True
+        per_fold_evaluation: bool = True,
+        num_workers: int = 0,
+        pin_memory: bool = False,
+        persistent_workers: bool = False,
+        prefetch_factor: Optional[int] = None
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Run Monte Carlo Dropout uncertainty quantification.
@@ -1019,6 +1023,10 @@ class FailureDetector:
             num_samples: Number of MC dropout samples per model (default: 5)
             per_fold_evaluation: If True, compute per-model uncertainty then average (per-fold evaluation)
                                 If False, average models first then compute uncertainty (ensemble evaluation)
+            num_workers: Number of DataLoader workers
+            pin_memory: Whether to enable pinned host memory for faster host->device copies
+            persistent_workers: Keep workers alive across iterations (only effective when num_workers > 0)
+            prefetch_factor: Number of batches prefetched per worker (only effective when num_workers > 0)
         
         Returns:
             tuple: (uncertainties, metrics_dict)
@@ -1026,11 +1034,22 @@ class FailureDetector:
                 Otherwise: uncertainties is [N]
         """
         from torch.utils.data import DataLoader
+
+        loader_kwargs = {
+            'batch_size': batch_size,
+            'shuffle': False,
+            'num_workers': num_workers,
+            'pin_memory': pin_memory,
+        }
+        if num_workers > 0:
+            loader_kwargs['persistent_workers'] = persistent_workers
+            if prefetch_factor is not None:
+                loader_kwargs['prefetch_factor'] = prefetch_factor
         
         timer = Timer(f"MC Dropout computation ({num_samples} samples)")
         with timer:
             mcdropout = uq.MCDropoutMethod(num_samples=num_samples)
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            test_loader = DataLoader(test_dataset, **loader_kwargs)
             
             # Always compute per-model uncertainties first
             per_fold_uncertainties = mcdropout.compute(
@@ -1056,7 +1075,7 @@ class FailureDetector:
             incorrect_idx = self._test_predictions_cache['incorrect_idx']
             y_pred = self._test_predictions_cache['y_pred']
         else:
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            test_loader = DataLoader(test_dataset, **loader_kwargs)
             y_scores = self._get_ensemble_predictions(test_loader)
             y_pred = np.argmax(y_scores, axis=1)
             correct_idx = np.where(y_pred == y_true)[0]
