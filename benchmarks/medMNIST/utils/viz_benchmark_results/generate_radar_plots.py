@@ -240,7 +240,7 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
     
     Args:
         ax: Matplotlib polar axis to plot on
-        model_results: dict mapping dataset_key -> method -> metric_value (includes pre-computed Mean_Aggregation)
+        model_results: dict mapping dataset_key -> method -> metric_value (includes pre-computed ZScore aggregation methods)
         model_name: Name of the model (e.g., 'resnet18', 'vit_b_16')
         runs_dir: Path to runs directory (for ensemble balanced accuracy)
         metric: Metric to plot - 'auroc_f' or 'augrc'
@@ -289,15 +289,16 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         print(f"No data for {model_name}, skipping radar plot")
         return
     
-    # Mean_Aggregation and Mean_Aggregation_Ensemble are now loaded from JSON files
-    # (pre-computed by precompute_mean_aggregation.py)
-    print(f"  Using pre-computed Mean_Aggregation values from JSON files")
+    # ZScore aggregation methods are loaded from JSON files.
+    print(f"  Using ZScore aggregation values from JSON files")
     
     # Get all unique methods across datasets
     all_methods = set()
     for dataset_data in model_results.values():
         all_methods.update(dataset_data.keys())
     all_methods = sorted(all_methods)
+    all_methods.append(all_methods.pop(7))
+    all_methods.insert(7, all_methods.pop(8))
     
     print(f"\nCreating radar plot for {model_name}")
     print(f"  Datasets: {num_datasets}")
@@ -403,16 +404,16 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
         # Complete the circle for display
         values_display += values_display[:1]
         
-        # Plot Mean_Aggregation with lightning icon, others with lines
-        if method_name == 'Mean_Aggregation':
+        # Plot ZScore_Aggregation_per_fold with lightning icon, others with lines
+        if method_name == 'ZScore_Aggregation_per_fold':
             # Plot lightning bolt markers without connecting lines
             ax.scatter(angles[:-1], values_display[:-1], s=270, marker='*', 
                        color='red', label=method_name,# + ' (MSR - MSR_calibrated - MLS - GPS - KNN_Raw - MC_Dropout)', 
                         alpha=0.9, zorder=99,edgecolors='black', linewidths=0.5)
-        elif method_name == 'Mean_Aggregation_Ensemble':
-            # Red star marker for Mean Aggregation + Ensemble
+        elif method_name == 'ZScore_Aggregation_ensemble':
+            # Red star marker for ZScore aggregation + ensemble
             ax.scatter(angles[:-1], values_display[:-1], s=300, marker='$\u26A1$', 
-                       color=colors[method_idx], label='Mean Agg + Ens',
+                       color=colors[method_idx], label='ZScore Agg + Ens',
                        alpha=0.9, zorder=100, edgecolors='black', linewidths=0.5)
         else:
             if method_name == "MSR_calibrated":
@@ -423,27 +424,6 @@ def create_radar_plot_on_axis(ax, model_results, model_name, runs_dir=None, metr
             ax.plot(angles, values_display, 'o-', linewidth=1.5, label=method_name, 
                     color=colors[method_idx], markersize=7, markeredgewidth=1,
                     markeredgecolor='white', alpha=0.85)
-    
-    # # Add ensemble balanced accuracy scatter overlay
-    # if runs_dir:
-    #     accuracy_values = []
-    #     accuracy_angles = []
-    #     # runs_dir parameter is already comp_eval_dir passed from main
-    #     for idx, dataset_key in enumerate(dataset_keys):
-    #         accuracy = get_ensemble_accuracy_from_runs(runs_dir, dataset_key, model_name, shift)
-    #         # Only include if valid (non-zero) accuracy
-    #         if accuracy > 0:
-    #             accuracy_values.append(accuracy)
-    #             accuracy_angles.append(angles[idx])
-        
-        # # Plot as distinct scatter points (only if we have valid data)
-        # if accuracy_values and 'auroc' in metric:
-        #     ax.scatter(accuracy_angles, accuracy_values, s=200, c='red', marker='*', 
-        #                edgecolors='black', linewidths=2, zorder=100, 
-        #                label='Ensemble Balanced Accuracy', alpha=1.0)
-        #     print(f"  Added {len(accuracy_values)} accuracy markers")
-        # else:
-        #     print("  No valid accuracy values found")
     
     # Set labels - setup names only (increased font size for readability)
     ax.set_xticks(angles[:-1])
@@ -862,7 +842,7 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
                     
                     import sys
                     sys.path.insert(0, str(results_dir.parent))
-                    from FailCatcher.evaluation.evaluation import compute_augrc
+                    from ToolBox.evaluation.evaluation import compute_augrc
                     
                     result, _ = compute_augrc(aggregated, predictions, labels,
                                              correct_idx=correct_idx, incorrect_idx=incorrect_idx)
@@ -954,7 +934,7 @@ def compute_mean_aggregation_metric(results_dir, dataset_key, model_name, metric
                     
                     import sys
                     sys.path.insert(0, str(results_dir.parent))
-                    from FailCatcher.evaluation.evaluation import compute_augrc
+                    from ToolBox.evaluation.evaluation import compute_augrc
                     
                     predictions = per_fold_predictions[fold_idx]
                     labels = y_true
@@ -1318,9 +1298,9 @@ def main(aggregation='mean', shift='corruption_shifts'):
                 ax.set_title(f'{model_display} - PS + NCS\\nPer-fold {aggregation.capitalize()} AUROC F',
                             fontsize=16, fontweight='bold', pad=40, x=-0.1, ha='left')
         
-        # Move "Mean_Aggregation" to bottom of legend
-        if 'Mean_Aggregation' in all_labels:
-            idx = all_labels.index('Mean_Aggregation')
+        # Move "ZScore_Aggregation_per_fold" to bottom of legend
+        if 'ZScore_Aggregation_per_fold' in all_labels:
+            idx = all_labels.index('ZScore_Aggregation_per_fold')
             all_labels.append(all_labels.pop(idx))
             all_handles.append(all_handles.pop(idx))
         
@@ -1506,13 +1486,13 @@ def create_rank_radar_plot_on_axis(ax, ranked_results, model_name, aggregation='
         values += values[:1]
         
         # Plot based on method type
-        if method_name == 'Mean_Aggregation':
+        if method_name == 'ZScore_Aggregation_per_fold':
             ax.scatter(angles[:-1], values[:-1], s=270, marker='*', 
                        color='red', label=method_name, alpha=0.6, zorder=99,
                        edgecolors='black', linewidths=0.5)
-        elif method_name == 'Mean_Aggregation_Ensemble':
+        elif method_name == 'ZScore_Aggregation_ensemble':
             ax.scatter(angles[:-1], values[:-1], s=300, marker='$\u26A1$', 
-                       color=colors[method_idx], label='Mean Agg + Ens',
+                       color=colors[method_idx], label='ZScore Agg + Ens',
                        alpha=0.9, zorder=100, edgecolors='black', linewidths=0.5)
         else:
             display_name = method_name

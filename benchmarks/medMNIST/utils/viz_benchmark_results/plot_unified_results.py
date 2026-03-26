@@ -15,11 +15,6 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
-# Add project root to path
-project_root = Path(__file__).resolve().parents[4]
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
 # Import functions from existing scripts
 from generate_radar_plots import create_radar_plot_on_axis, parse_results_directory
 
@@ -303,8 +298,8 @@ def create_radar_figure(results_auroc, results_augrc, metric='auroc_f', aggregat
     # Add legend
     if all_handles and all_labels:
         # Move "Mean_Aggregation" to bottom of legend
-        if 'Mean_Aggregation' in all_labels:
-            idx = all_labels.index('Mean_Aggregation')
+        if 'ZScore_Aggregation_per_fold' in all_labels:
+            idx = all_labels.index('ZScore_Aggregation_per_fold')
             all_labels.append(all_labels.pop(idx))
             all_handles.append(all_handles.pop(idx))
         
@@ -313,7 +308,7 @@ def create_radar_figure(results_auroc, results_augrc, metric='auroc_f', aggregat
                            .replace('Ensembling', 'DE')
                            .replace('MCDropout', 'MCD')
                            .replace('MSR_calibrated', 'MSR-S')
-                           .replace('Mean_Aggregation', 'Mean Agg')
+                           .replace('ZScore_Aggregation_per_fold', 'Mean Agg')
                       for label in all_labels]
         
         fig.legend(all_handles, all_labels, loc='center', ncol=2,
@@ -450,8 +445,8 @@ def create_combined_radar_histogram_figure_id_cs(results_auroc, results_augrc, a
         'MCDropout': 4,
         'KNN_Raw': 3,
         'Ensembling': 2,
-        'Mean_Aggregation': 1,
-        'Mean_Aggregation_Ensemble': 0
+        'ZScore_Aggregation_per_fold': 1,
+        'ZScore_Aggregation_ensemble': 0
     }
     
     # Get all methods across all shifts for color mapping
@@ -460,15 +455,16 @@ def create_combined_radar_histogram_figure_id_cs(results_auroc, results_augrc, a
         for model_data in shift_data.values():
             all_methods_set.update(model_data.get(metric, {}).keys())
     
-    # Sort methods ALPHABETICALLY for consistent color mapping
+    # Sort methods for color mapping
     all_methods_sorted_for_colors = sorted(all_methods_set)
-    
+    all_methods_sorted_for_colors.append(all_methods_sorted_for_colors.pop(7))
+    all_methods_sorted_for_colors.insert(7, all_methods_sorted_for_colors.pop(8))
     # Create color mapping matching radar plots
     colors_tab20 = plt.cm.tab20(np.linspace(0, 1, len(all_methods_sorted_for_colors)))
     method_colors = {method: colors_tab20[i] for i, method in enumerate(all_methods_sorted_for_colors)}
     
     # Override Mean_Aggregation to red
-    method_colors['Mean_Aggregation'] = 'red'
+    method_colors['ZScore_Aggregation_per_fold'] = 'red'
     
     # Create histogram for each shift (one per row, in column 1 - middle)
     for shift_key, shift_name, shift_label, row in shift_configs:
@@ -644,8 +640,8 @@ def create_combined_radar_histogram_figure_id_cs(results_auroc, results_augrc, a
                            .replace('Ensembling', 'DE')
                            .replace('MCDropout', 'MCD')
                            .replace('MSR_calibrated', 'MSR-S')
-                           .replace('Mean_Aggregation_Ensemble', 'Mean Agg + Ens')
-                           .replace('Mean_Aggregation', 'Mean Agg')
+                           .replace('ZScore Agg + Ens', 'Mean Agg + Ens')
+                           .replace('ZScore_Aggregation_per_fold', 'Mean Agg')
                       for label in all_labels]
         
         # Manually reorder for ncol=5 column-wise filling
@@ -787,8 +783,8 @@ def create_combined_radar_histogram_figure_ncs_ps(results_auroc, results_augrc, 
         'MCDropout': 4,
         'KNN_Raw': 3,
         'Ensembling': 2,
-        'Mean_Aggregation': 1,
-        'Mean_Aggregation_Ensemble': 0
+        'ZScore_Aggregation_per_fold': 1,
+        'ZScore_Aggregation_ensemble': 0
     }
     
     # Get all methods across all shifts for color mapping
@@ -800,13 +796,15 @@ def create_combined_radar_histogram_figure_ncs_ps(results_auroc, results_augrc, 
     
     # Sort methods ALPHABETICALLY for consistent color mapping
     all_methods_sorted_for_colors = sorted(all_methods_set)
+    all_methods_sorted_for_colors.append(all_methods_sorted_for_colors.pop(7))
+    all_methods_sorted_for_colors.insert(7, all_methods_sorted_for_colors.pop(8))
     
     # Create color mapping matching radar plots
     colors_tab20 = plt.cm.tab20(np.linspace(0, 1, len(all_methods_sorted_for_colors)))
     method_colors = {method: colors_tab20[i] for i, method in enumerate(all_methods_sorted_for_colors)}
     
     # Override Mean_Aggregation to red
-    method_colors['Mean_Aggregation'] = 'red'
+    method_colors['ZScore_Aggregation_per_fold'] = 'red'
     
     # Get population shift data (which contains both PS and NCS)
     shift_data = all_means.get('population', {})
@@ -982,8 +980,8 @@ def create_combined_radar_histogram_figure_ncs_ps(results_auroc, results_augrc, 
                            .replace('Ensembling', 'DE')
                            .replace('MCDropout', 'MCD')
                            .replace('MSR_calibrated', 'MSR-S')
-                           .replace('Mean_Aggregation_Ensemble', 'Mean Agg + Ens')
-                           .replace('Mean_Aggregation', 'Mean Agg')
+                           .replace('ZScore Agg + Ens', 'Mean Agg + Ens')
+                           .replace('ZScore_Aggregation_per_fold', 'Mean Agg')
                       for label in all_labels]
         
         # Manually reorder for ncol=5 column-wise filling
@@ -1147,7 +1145,7 @@ def main(aggregation='mean'):
     # Get paths
     script_dir = Path(__file__).parent
     workspace_root = script_dir.parent.parent.parent.parent
-    results_dir = workspace_root / 'uq_benchmark_results'
+    results_dir = workspace_root / 'Benchmarks' / 'medMNIST' / 'results'
     
     # Define all results directories
     results_dirs = {

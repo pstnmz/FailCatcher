@@ -6,7 +6,7 @@
             "name": "plot_unified_results.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/benchmarks/medMNIST/utils/viz_benchmark_results/plot_unified_results.py",
+            "program": "${workspaceFolder}/Benchmarks/medMNIST/utils/viz_benchmark_results/plot_unified_results.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false,
