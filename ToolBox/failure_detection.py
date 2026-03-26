@@ -404,8 +404,18 @@ class FailureDetector:
             if predictions is None:
                 predictions = self._test_predictions_cache['y_pred']
 
-        correct_idx = np.where(predictions == labels)[0]
-        incorrect_idx = np.where(predictions != labels)[0]
+        # Prefer cached correctness indices when available. This is required for
+        # new_class_shift, where labels may be binary failure flags while
+        # predictions are multiclass IDs.
+        correct_idx = None
+        incorrect_idx = None
+        if self._test_predictions_cache is not None:
+            correct_idx = self._test_predictions_cache.get('correct_idx')
+            incorrect_idx = self._test_predictions_cache.get('incorrect_idx')
+
+        if correct_idx is None or incorrect_idx is None:
+            correct_idx = np.where(predictions == labels)[0]
+            incorrect_idx = np.where(predictions != labels)[0]
 
         # Per-fold metrics require per-fold predictions for fold-wise AUROC/AURC/AUGRC.
         # Reuse cached per-fold predictions if available.
