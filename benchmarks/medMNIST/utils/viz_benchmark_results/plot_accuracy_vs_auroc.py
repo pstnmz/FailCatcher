@@ -6,8 +6,8 @@ For each fold, configuration, dataset, and method, plot:
 - Y-axis: AUROC_f of the method on that fold
 
 Loads pre-computed results from:
-- comprehensive_evaluation_results/*.json (classification metrics including balanced accuracy)
-- uq_benchmark_results/all_metrics_*.npz (AUROC_f values)
+- Benchmarks/medMNIST/results/classification_results/*.json (classification metrics including balanced accuracy)
+- Benchmarks/medMNIST/results/full_results/all_metrics_*.npz (AUROC_f values)
 """
 
 import numpy as np
@@ -16,7 +16,6 @@ from pathlib import Path
 import json
 from collections import defaultdict
 import warnings
-from sklearn.metrics import roc_auc_score
 import seaborn as sns
 import pandas as pd
 warnings.filterwarnings('ignore')
@@ -64,27 +63,6 @@ def load_comprehensive_metrics(json_file):
     except Exception as e:
         print(f"Failed to load {json_file}: {e}")
         return None
-
-
-def compute_auroc_f_from_scores(scores, y_true, y_pred):
-    """
-    Compute AUROC_f from uncertainty scores and predictions.
-    
-    Args:
-        scores: uncertainty scores (higher = more uncertain)
-        y_true: true labels
-        y_pred: predicted labels
-    
-    Returns:
-        AUROC_f value
-    """
-    # Create failure labels (1 = incorrect, 0 = correct)
-    failures = (y_true != y_pred).astype(int)
-    
-    try:
-        return roc_auc_score(failures, scores)
-    except:
-        return np.nan
 
 
 def find_cache_file(cache_dir, dataset, model, config, shift_name):
@@ -136,7 +114,6 @@ def load_cache_data(cache_file):
 def load_uq_metrics(json_file):
     """
     Load UQ metrics from JSON file.
-    Also loads Mean_Aggregation data from corresponding NPZ file.
     
     Returns:
         dict of method_name -> {per_fold: [...], ensemble: scalar}
@@ -160,27 +137,6 @@ def load_uq_metrics(json_file):
                 # Get ensemble AUROC_f (top-level auroc_f is the ensemble result)
                 if 'auroc_f' in method_results:
                     methods_data[method_name]['ensemble'] = method_results['auroc_f']
-        
-        # Load Mean_Aggregation data from NPZ file
-        if 'metrics_file' in data:
-            npz_file = data['metrics_file']
-            if Path(npz_file).exists():
-                try:
-                    npz_data = np.load(npz_file, allow_pickle=True)
-                    
-                    # Mean_Aggregation: per-fold scores (shape: [n_folds, n_samples])
-                    if 'Mean_Aggregation' in npz_data:
-                        mean_agg_scores = npz_data['Mean_Aggregation']
-                        # Compute AUROC_f per fold
-                        methods_data['Mean_Aggregation'] = {'per_fold': []}
-                        
-                    # Mean_Aggregation_Ensemble: ensemble scores (shape: [n_samples])
-                    if 'Mean_Aggregation_Ensemble' in npz_data:
-                        methods_data['Mean_Aggregation_Ensemble'] = {'ensemble': None}
-                        # Will compute AUROC_f when we have correct/incorrect indices
-                        
-                except Exception as e:
-                    print(f"Warning: Could not load NPZ file {npz_file}: {e}")
         
         return methods_data
     except Exception as e:
@@ -251,8 +207,8 @@ def collect_all_data_points(workspace_root):
             'ensemble': list of data dicts
         }
     """
-    comprehensive_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'utils' / 'comprehensive_evaluation_results'
-    uq_results_dir = workspace_root / 'uq_benchmark_results' / 'jsons_results'
+    comprehensive_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'results' / 'classification_results'
+    uq_results_dir = workspace_root / 'benchmarks' / 'medMNIST' / 'results' / 'jsons_results'
     
     per_fold_data = []
     ensemble_data = []
@@ -333,45 +289,6 @@ def collect_all_data_points(workspace_root):
             if not uq_metrics:
                 continue
             
-            # Load cache file for computing Mean_Aggregation AUROC_f
-            # Use mapped dataset name for cache files (for population shifts)
-            cache_dataset = uq_dataset if shift_name == 'population' else dataset
-            cache_file = find_cache_file(uq_shift_dir.parent / 'cache', cache_dataset, model, config, shift_name)
-            if cache_file and cache_file.exists():
-                cache_data = load_cache_data(cache_file)
-                
-                # Compute Mean_Aggregation AUROC_f if available
-                if 'Mean_Aggregation' in uq_metrics and cache_data is not None:
-                    # Find the corresponding all_metrics NPZ file
-                    npz_pattern = uq_json_file.name.replace('uq_benchmark_', 'all_metrics_').replace('.json', '.npz')
-                    npz_file = uq_shift_dir / npz_pattern
-                    
-                    if npz_file.exists():
-                        try:
-                            npz_data = np.load(npz_file, allow_pickle=True)
-                            if 'Mean_Aggregation' in npz_data and cache_data['per_fold_predictions'] is not None:
-                                mean_agg_scores_all_folds = npz_data['Mean_Aggregation']  # shape: (n_folds, n_samples)
-                                
-                                # Compute per-fold AUROC_f
-                                per_fold_auroc = []
-                                for fold_idx in range(len(cache_data['per_fold_predictions'])):
-                                    y_true = cache_data['y_true']
-                                    y_pred = cache_data['per_fold_predictions'][fold_idx]
-                                    scores = mean_agg_scores_all_folds[fold_idx]
-                                    auroc = compute_auroc_f_from_scores(scores, y_true, y_pred)
-                                    per_fold_auroc.append(auroc)
-                                
-                                uq_metrics['Mean_Aggregation']['per_fold'] = per_fold_auroc
-                            
-                            if 'Mean_Aggregation_Ensemble' in npz_data and cache_data['y_pred'] is not None:
-                                ensemble_scores = npz_data['Mean_Aggregation_Ensemble']  # shape: (n_samples,)
-                                y_true = cache_data['y_true']
-                                y_pred = cache_data['y_pred']
-                                auroc = compute_auroc_f_from_scores(ensemble_scores, y_true, y_pred)
-                                uq_metrics['Mean_Aggregation_Ensemble']['ensemble'] = auroc
-                        except Exception as e:
-                            pass
-            
             # Process per-fold data
             num_folds = len(class_metrics['per_fold_acc'])
             
@@ -442,8 +359,11 @@ def create_scatter_plot(data, output_dir):
     name_mapping = {
         'MSR_calibrated': 'MSR-S',
         'KNN_Raw': 'KNN',
+        'Ensembling': 'DE',
         'MCDropout': 'MCD',
-        'Mean_Aggregation': 'Mean Agg'
+        'ZScore Agg + Ens': 'Mean Agg + Ens',
+        'ZScore_Aggregation_per_fold': 'Mean Agg',
+        'ZScore_Aggregation_ensemble': 'Mean Agg + Ens'
     }
     
     for d in all_data:
@@ -458,7 +378,7 @@ def create_scatter_plot(data, output_dir):
     
     # Extract unique methods - reorder for display but keep color mapping consistent
     all_methods = set(d['method'] for d in all_data)
-    mean_agg_methods = ['Mean Agg', 'Mean_Aggregation_Ensemble']
+    mean_agg_methods = ['Mean Agg', 'Mean Agg + Ens']
     regular_methods = sorted([m for m in all_methods if m not in mean_agg_methods])
     methods = regular_methods + [m for m in mean_agg_methods if m in all_methods]
     
@@ -474,7 +394,7 @@ def create_scatter_plot(data, output_dir):
             ax.scatter(x, y, s=150, marker='*', c='red',
                       label='Mean Agg', alpha=0.8, edgecolors='darkred', linewidths=0.5)
             continue
-        elif method == 'Mean_Aggregation_Ensemble':
+        elif method == 'Mean Agg + Ens':
             # Lightning bolt for Mean Aggregation + Ensemble
             ax.scatter(x, y, s=150, marker='$⚡$', c='orange',
                       label='Mean Agg+Ens', alpha=0.8, edgecolors='black', linewidths=0.3)
@@ -536,8 +456,11 @@ def create_scatter_by_shift(data, output_dir):
     name_mapping = {
         'MSR_calibrated': 'MSR-S',
         'KNN_Raw': 'KNN',
+        'Ensembling': 'DE',
         'MCDropout': 'MCD',
-        'Mean_Aggregation': 'Mean Agg'
+        'ZScore Agg + Ens': 'Mean Agg + Ens',
+        'ZScore_Aggregation_per_fold': 'Mean Agg',
+        'ZScore_Aggregation_ensemble': 'Mean Agg + Ens'
     }
     
     for d in all_data:
@@ -567,7 +490,7 @@ def create_scatter_by_shift(data, output_dir):
     
     # Extract unique methods - reorder for display but keep color mapping consistent
     all_methods = set(d['method'] for d in all_data)
-    mean_agg_methods = ['Mean Agg', 'Mean_Aggregation_Ensemble']
+    mean_agg_methods = ['Mean Agg', 'Mean Agg + Ens']
     regular_methods = sorted([m for m in all_methods if m not in mean_agg_methods])
     methods = regular_methods + [m for m in mean_agg_methods if m in all_methods]
 
@@ -591,7 +514,7 @@ def create_scatter_by_shift(data, output_dir):
                 ax.scatter(x, y, s=150, marker='*', c='red',
                           label='Mean Agg', alpha=0.8, edgecolors='darkred', linewidths=0.5)
                 continue
-            elif method == 'Mean_Aggregation_Ensemble':
+            elif method == 'Mean Agg + Ens':
                 # Lightning bolt for Mean Aggregation + Ensemble
                 ax.scatter(x, y, s=150, marker='$⚡$', c='orange',
                           label='Mean Agg+Ens', alpha=0.8, edgecolors='black', linewidths=0.3)
@@ -662,8 +585,11 @@ def create_per_method_correlation_plots(data, output_dir):
     name_mapping = {
         'MSR_calibrated': 'MSR-S',
         'KNN_Raw': 'KNN',
+        'Ensembling': 'DE',
         'MCDropout': 'MCD',
-        'Mean_Aggregation': 'Mean Agg'
+        'ZScore Agg + Ens': 'Mean Agg + Ens',
+        'ZScore_Aggregation_per_fold': 'Mean Agg',
+        'ZScore_Aggregation_ensemble': 'Mean Agg + Ens'
     }
     
     for d in all_data:
@@ -686,7 +612,7 @@ def create_per_method_correlation_plots(data, output_dir):
     method_colors = dict(zip(methods_for_colors, colors))
     
     # Reorder methods for display (Mean Agg methods at end) but keep color mapping
-    mean_agg_methods = ['Mean Agg', 'Mean_Aggregation_Ensemble']
+    mean_agg_methods = ['Mean Agg', 'Mean Agg + Ens']
     regular_methods = sorted([m for m in all_methods if m not in mean_agg_methods])
     methods = regular_methods + [m for m in mean_agg_methods if m in all_methods]
     
@@ -728,7 +654,7 @@ def create_per_method_correlation_plots(data, output_dir):
         
         # Get methods available for this shift
         shift_methods = [m for m in methods if any(d['method'] == m for d in shift_data)]
-        
+        shift_methods = ['MSR', 'MSR-S', 'MLS', 'TTA', 'GPS', 'MCD', 'KNN', 'DE', 'Mean Agg', 'Mean Agg + Ens']
         for method_idx, method in enumerate(shift_methods):
             row_in_shift = method_idx // n_cols
             col = method_idx % n_cols
@@ -745,13 +671,10 @@ def create_per_method_correlation_plots(data, output_dir):
             # Plot scatter with special handling for Mean Agg methods
             if method == 'Mean Agg':
                 ax.scatter(x, y, s=150, marker='*', c='red',
-                          alpha=0.8, edgecolors='darkred', linewidths=0.5)
-            elif method == 'Mean_Aggregation_Ensemble':
+                          alpha=0.7, edgecolors='darkred', linewidths=0.5)
+            elif method == 'Mean Agg + Ens':
                 ax.scatter(x, y, s=150, marker='$⚡$', c='orange',
-                          alpha=0.8, edgecolors='black', linewidths=0.3)
-            elif method == 'DE':
-                ax.scatter(x, y, c=[method_colors[method]], marker='s', s=100,
-                          alpha=0.7, edgecolors='white', linewidths=1)
+                          alpha=0.7, edgecolors='black', linewidths=0.5)
             else:
                 ax.scatter(x, y, c=[method_colors[method]], marker='o', s=50,
                           alpha=0.7, edgecolors='white', linewidths=0.5)
@@ -837,12 +760,15 @@ def create_method_correlation_pairplots(data, output_dir):
     name_mapping = {
         'MSR_calibrated': 'MSR-S',
         'KNN_Raw': 'KNN',
+        'Ensembling': 'DE',
         'MCDropout': 'MCD',
-        'Mean_Aggregation': 'Mean Agg'
+        'ZScore Agg + Ens': 'Mean Agg + Ens',
+        'ZScore_Aggregation_per_fold': 'Mean Agg',
+        'ZScore_Aggregation_ensemble': 'Mean Agg + Ens'
     }
     
     # Define ensemble methods (these should only correlate with other ensemble results)
-    ensemble_methods = ['DE', 'Mean_Aggregation_Ensemble']
+    ensemble_methods = ['DE', 'Mean Agg + Ens']
     
     # Process each shift type separately
     shift_info = [
@@ -943,12 +869,12 @@ def create_sample_level_pairplots(workspace_root, output_dir):
     name_mapping = {
         'MSR_calibrated': 'MSR-S',
         'KNN_Raw': 'KNN',
+        'Ensembling': 'DE',
         'MCDropout': 'MCD',
-        'Mean_Aggregation': 'Mean Agg'
+        'ZScore Agg + Ens': 'Mean Agg + Ens',
+        'ZScore_Aggregation_per_fold': 'Mean Agg',
+        'ZScore_Aggregation_ensemble': 'Mean Agg + Ens'
     }
-    
-    # Define ensemble methods to exclude
-    ensemble_methods = ['DE', 'Mean_Aggregation_Ensemble']
     
     # Dictionary to store complete dataframes for paired limit computation
     # Keys: shift_dir_name, Values: df_complete
@@ -970,7 +896,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
     for shift_dir_name, shift_title in shift_info:
         print(f"\n{shift_title}: Loading sample-level scores...")
         
-        uq_shift_dir = workspace_root / 'uq_benchmark_results' / 'full_results' / shift_dir_name
+        uq_shift_dir = workspace_root / 'Benchmarks' / 'medMNIST' / 'results' / 'full_results' / shift_dir_name
         
         if not uq_shift_dir.exists():
             print(f"  Directory not found: {uq_shift_dir}")
@@ -981,7 +907,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         sample_scores = defaultdict(dict)
         
         # Find all NPZ files
-        npz_files = list(uq_shift_dir.glob('all_metrics_*.npz'))
+        npz_files = sorted(uq_shift_dir.glob('all_metrics_*.npz'), key=lambda p: p.name)
         print(f"  Found {len(npz_files)} NPZ files")
         
         for npz_file in npz_files:
@@ -1023,6 +949,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
                         shift_name_short = 'new_class_shift'
                     else:
                         shift_name_short = shift_dir_name.replace('_shifts', '')
+
                     cache_file = find_cache_file(cache_dir, dataset, model, config, shift_name_short)
                     
                     if not cache_file or not cache_file.exists():
@@ -1040,55 +967,33 @@ def create_sample_level_pairplots(workspace_root, output_dir):
                     binary_gt = cache_data.get('binary_gt', None)
                     
                     # Process each method in NPZ file
-                    for method_name in npz_data.keys():
+                    for method_name in sorted(npz_data.keys()):
                         # Keep _per_fold variants and Mean_Aggregation (which is per-fold but without suffix)
-                        if not method_name.endswith('_per_fold') and method_name != 'Mean_Aggregation':
+                        if npz_data[method_name].shape[0] != 5:
                             continue
                         
                         # Remove _per_fold suffix for display name
                         base_method_name = method_name.replace('_per_fold', '')
                         
-                        if base_method_name in ['Mean_Aggregation_Ensemble', 'DE']:  # Skip ensemble
-                            continue
-                        
                         display_name = name_mapping.get(base_method_name, base_method_name)
-                        if display_name in ensemble_methods:
-                            continue
                         
                         scores = npz_data[method_name]
-                        
-                        # Check shape
-                        if scores.ndim == 2:  # (n_folds, n_samples)
-                            for fold_idx in range(n_folds):
-                                fold_scores = scores[fold_idx]
-                                y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
-                                # Use minimum length to avoid index errors
-                                n_samples_safe = min(len(fold_scores), len(y_pred_fold), len(y_true))
-                                for sample_idx in range(n_samples_safe):
-                                    key = (dataset, model, config, fold_idx, sample_idx)
-                                    sample_scores[key][display_name] = fold_scores[sample_idx]
-                                    # Add correctness label if not already present
-                                    if 'correct' not in sample_scores[key]:
-                                        # For new_class_shift: use binary_gt (0=correct, 1=failure)
-                                        if binary_gt is not None:
-                                            sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
-                                        else:
-                                            sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
-                        elif scores.ndim == 1:  # (n_samples,) - method that doesn't use folds
-                            for fold_idx in range(n_folds):
-                                y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
-                                # Use minimum length to avoid index errors
-                                n_samples_safe = min(len(scores), len(y_pred_fold), len(y_true))
-                                for sample_idx in range(n_samples_safe):
-                                    key = (dataset, model, config, fold_idx, sample_idx)
-                                    sample_scores[key][display_name] = scores[sample_idx]
-                                    # Add correctness label if not already present
-                                    if 'correct' not in sample_scores[key]:
-                                        # For new_class_shift: use binary_gt (0=correct, 1=failure)
-                                        if binary_gt is not None:
-                                            sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
-                                        else:
-                                            sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
+    
+                        for fold_idx in range(n_folds):
+                            fold_scores = scores[fold_idx]
+                            y_pred_fold = cache_data['per_fold_predictions'][fold_idx]
+                            # Use minimum length to avoid index errors
+                            n_samples_safe = min(len(fold_scores), len(y_pred_fold), len(y_true))
+                            for sample_idx in range(n_samples_safe):
+                                key = (dataset, model, config, fold_idx, sample_idx)
+                                sample_scores[key][display_name] = fold_scores[sample_idx]
+                                # Add correctness label if not already present
+                                if 'correct' not in sample_scores[key]:
+                                    # For new_class_shift: use binary_gt (0=correct, 1=failure)
+                                    if binary_gt is not None:
+                                        sample_scores[key]['correct'] = (binary_gt[sample_idx] == 0)
+                                    else:
+                                        sample_scores[key]['correct'] = (y_true[sample_idx] == y_pred_fold[sample_idx])
                 
                 except Exception as e:
                     print(f"  Warning: Failed to process {npz_file.name}: {e}")
@@ -1100,7 +1005,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         
         # Convert to DataFrame
         rows = []
-        for (dataset, model, config, fold, sample_idx), method_dict in sample_scores.items():
+        for (dataset, model, config, fold, sample_idx), method_dict in sorted(sample_scores.items()):
             row = {'dataset': dataset, 'model': model, 'config': config, 'fold': fold, 'sample_idx': sample_idx}
             row.update(method_dict)
             rows.append(row)
@@ -1110,31 +1015,21 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         # Get method columns
         method_cols = [col for col in df.columns 
                       if col not in ['dataset', 'model', 'config', 'fold', 'sample_idx', 'correct']]
-        
+        print(method_cols)
         # Only keep methods with sufficient data
         method_cols = [col for col in method_cols if df[col].notna().sum() > 100]
-        
-        # Sort alphabetically, but put Mean Agg at the end
-        method_cols = sorted(method_cols)
-        if 'Mean Agg' in method_cols:
-            method_cols.remove('Mean Agg')
-            method_cols.append('Mean Agg')
-        
-        # Remove samples with missing values in any method
-        # Keep 'correct', 'dataset', 'config' columns for hue parameter and stratification
-        df_complete = df[method_cols + ['correct', 'dataset', 'config', 'fold']].dropna()
-        
-        # Z-score normalization per fold and per method to handle scale differences
+        method_cols = ['MSR', 'MSR-S', 'MLS', 'TTA', 'GPS', 'MCD', 'KNN', 'ZScore_Aggregation']
+        # Remove samples with missing values in any method.
+        # Keep metadata columns needed for grouped normalization and later stratification.
+        df_complete = df[method_cols + ['correct', 'dataset', 'model', 'config', 'fold']].dropna()
+
+        # Z-score normalization per method within each (dataset, model, config, fold) group.
+        group_cols = ['dataset', 'model', 'config', 'fold']
         for method in method_cols:
-            for fold in df_complete['fold'].unique():
-                mask = df_complete['fold'] == fold
-                scores = df_complete.loc[mask, method]
-                mean = scores.mean()
-                std = scores.std()
-                if std > 0:
-                    df_complete.loc[mask, method] = (scores - mean) / std
-                else:
-                    df_complete.loc[mask, method] = 0.0
+            grouped = df_complete.groupby(group_cols, sort=True)[method]
+            means = grouped.transform('mean')
+            stds = grouped.transform('std')
+            df_complete[method] = np.where(stds > 0, (df_complete[method] - means) / stds, 0.0)
         
         # Convert correct boolean to string labels for better legend
         df_complete['Prediction'] = df_complete['correct'].map({True: 'Correct', False: 'Incorrect'})
@@ -1144,20 +1039,22 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         if len(method_cols) < 2 or len(df_complete) < 10:
             print(f"  Skipping - insufficient data")
             continue
-        
+        df_complete = df_complete.rename(columns={'ZScore_Aggregation': 'Mean Agg'})
         # Subsample if too many points (for visualization performance)
-        if len(df_complete) > 5000:
+        if len(df_complete) > 10000:
             # Get unique datasets
-            datasets = df_complete['dataset'].unique()
+            datasets = sorted(df_complete['dataset'].unique())
             n_datasets = len(datasets)
-            samples_per_dataset = 5000 // n_datasets
+            samples_per_dataset = 10000 // n_datasets
             
             # Target: 50/50 balance between correct and incorrect for clear visualization
             target_incorrect_ratio = 0.5
             
             sampled_dfs = []
             for dataset in datasets:
-                df_dataset = df_complete[df_complete['dataset'] == dataset]
+                df_dataset = df_complete[df_complete['dataset'] == dataset].sort_values(
+                    by=['dataset', 'config', 'fold'], kind='mergesort'
+                )
                 
                 # Count correct and incorrect for this dataset
                 n_correct = df_dataset['correct'].sum()
@@ -1193,7 +1090,8 @@ def create_sample_level_pairplots(workspace_root, output_dir):
         
         # Define custom color palette (green for correct, red for incorrect)
         palette = {'Correct': 'green', 'Incorrect': 'red'}
-        
+        method_cols = ['MSR', 'MSR-S', 'MLS', 'TTA', 'GPS', 'MCD', 'KNN', 'Mean Agg']
+
         g = sns.pairplot(
             df_complete,
             vars=method_cols,
@@ -1204,10 +1102,7 @@ def create_sample_level_pairplots(workspace_root, output_dir):
             diag_kws={'linewidth': 2},
             corner=False
         )
-        
-        # Add title
-        # g.fig.suptitle(f'{shift_title}: Sample-Level Method Score Correlations\n({len(df_complete)} samples)', 
-        #               fontsize=16, fontweight='bold', y=1.0)
+    
         
         # Adjust layout
         plt.tight_layout()
@@ -1280,17 +1175,16 @@ def create_sample_level_pairplots(workspace_root, output_dir):
             
             # Use PairGrid for consistency with lower-right plots
             df_plot = df_complete.sample(frac=1, random_state=42).reset_index(drop=True)
-
+            print(method_cols)
             g_corner = sns.PairGrid(
                 df_plot,
                 vars=method_cols,
                 diag_sharey=False
             )
 
-            # --- LOWER: scatter tout-en-un (mélangé)
             def scatter_shuffled(x, y, **kwargs):
                 ax = plt.gca()
-                idx = x.index  # indices disponibles pour CETTE paire (en pratique = df_plot.index)
+                idx = x.index  
                 colors = df_plot.loc[idx, "Prediction"].map(palette).values
 
                 ax.scatter(
@@ -1305,13 +1199,12 @@ def create_sample_level_pairplots(workspace_root, output_dir):
 
             g_corner.map_lower(scatter_shuffled)
 
-            # --- DIAG: 2 KDE (ou +) explicitement par classe
             def diag_kde_by_class(x, **kwargs):
                 ax = plt.gca()
                 pred = df_plot.loc[x.index, "Prediction"]
 
                 levels = pred.dropna().unique()
-                # optionnel: ordre stable si bool ou 0/1
+                
                 try:
                     levels = np.sort(levels)
                 except Exception:
@@ -1380,10 +1273,9 @@ def create_sample_level_pairplots(workspace_root, output_dir):
                 diag_sharey=False
             )
 
-            # --- UPPER: scatter tout-en-un (mélangé)
             def scatter_shuffled(x, y, **kwargs):
                 ax = plt.gca()
-                idx = x.index  # indices disponibles pour CETTE paire (en pratique = df_plot.index)
+                idx = x.index  
                 colors = df_plot.loc[idx, "Prediction"].map(palette).values
 
                 ax.scatter(
@@ -1398,7 +1290,6 @@ def create_sample_level_pairplots(workspace_root, output_dir):
 
             g_corner.map_upper(scatter_shuffled)
 
-            # --- DIAG: 2 KDE (ou +) explicitement par classe
             def diag_kde_by_class(x, **kwargs):
                 ax = plt.gca()
                 pred = df_plot.loc[x.index, "Prediction"]
