@@ -1238,7 +1238,7 @@ def extract_latent_space_and_compute_shap_importance(
         return features, labels, success_flags, predictions
 
 
-def compute_analytic_shap_values(features, classifierheadwrapper, max_background_samples=1000, batch_size=5000, background=None):
+def compute_analytic_shap_values(features, classifierheadwrapper, max_background_samples=1000, batch_size=5000, background=None, random_state=42):
     """
     SHAP importance for an affine classifier head using ``shap.LinearExplainer``.
 
@@ -1254,6 +1254,9 @@ def compute_analytic_shap_values(features, classifierheadwrapper, max_background
             If None (default), a subset of `features` itself is used as background
             (legacy behavior). Pass a disjoint set (e.g. held-out calibration features)
             to avoid self-referential background when `features` = samples being explained.
+        random_state: Seed for the background subsample below. Uses its own RandomState
+            (not the global np.random) so results are reproducible regardless of whether
+            the caller seeded np.random globally.
 
     Returns:
         np.ndarray: [N, F, C] SHAP values (C=1 for a single-logit binary head)
@@ -1270,15 +1273,20 @@ def compute_analytic_shap_values(features, classifierheadwrapper, max_background
     else:
         background = features.numpy()
     if len(background) > max_background_samples:
-        indices = np.random.choice(len(background), max_background_samples, replace=False)
+        rng = np.random.RandomState(random_state)
+        indices = rng.choice(len(background), max_background_samples, replace=False)
         background = background[indices]
 
+    np.random.seed(random_state)
     linear_head = classifierheadwrapper.get_linear()
     model_coefficients = linear_head.weight.detach().cpu().numpy()
     model_intercept = linear_head.bias.detach().cpu().numpy()
+    # LinearExplainer wraps a raw background array in maskers.Independent(max_samples=100)
+    # by default, silently re-subsampling regardless of max_background_samples above.
+    masker = shap.maskers.Independent(background, max_samples=len(background))
     explainer = shap.LinearExplainer(
         (model_coefficients, model_intercept),
-        background
+        masker
     )
     
     # Process features in batches to avoid OOM on large datasets
