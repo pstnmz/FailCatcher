@@ -42,6 +42,7 @@ from ToolBox.methods.latent import (
     get_layer_from_model,
     ClassifierHeadWrapper,
     compute_analytic_shap_values,
+    select_features_by_mass,
 )
 
 DEFAULT_SHAP_CACHE_DIR = str(WORKSPACE_ROOT / 'uq_benchmark_results' / 'shap_cache')
@@ -182,23 +183,10 @@ def save_raw_results(raw_dir, namespace, fold_idx, bg_size, corruption_suffix=''
     return path
 
 
-def select_features_by_mass(shap_values, labels_calib, class_idx, mass_threshold):
-    """Minimal top-k feature indices whose cumulative |SHAP| importance covers
-    >= mass_threshold of this class's total mass (adaptive, vs. the fixed top-50 elsewhere)."""
-    if shap_values.ndim == 3:
-        class_shap = shap_values[:, :, class_idx]
-    else:
-        class_shap = shap_values[labels_calib == class_idx, :]
-    mean_abs = np.mean(np.abs(class_shap), axis=0)
-    order = np.argsort(mean_abs)[::-1]
-    sorted_vals = mean_abs[order]
-    total = sorted_vals.sum()
-    if total <= 0:
-        return order[:1], 1
-    cumulative = np.cumsum(sorted_vals) / total
-    k = int(np.searchsorted(cumulative, mass_threshold) + 1)
-    k = max(1, min(k, len(order)))
-    return order[:k], k
+# select_features_by_mass moved to ToolBox.methods.latent (imported above), so
+# compute_calibration_centered_auroc.py / compute_calibration_class_auroc.py and this module
+# share one implementation instead of duplicating it.
+
 
 
 # ============================================================================

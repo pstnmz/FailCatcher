@@ -151,6 +151,8 @@ def generate_command(
     max_loader_workers: int = 48,
     concurrent_processes: int = 1,
     shap_only: bool = False,
+    knn_shap_mass_threshold: float = None,
+    knn_shap_calibrate_auroc: bool = False,
     **kwargs
 ) -> str:
     """
@@ -227,6 +229,11 @@ def generate_command(
     if shap_only:
         cmd_parts.append("--shap-only")
 
+    if knn_shap_mass_threshold is not None and 'KNN_SHAP' in methods:
+        cmd_parts.append(f"--knn-shap-mass-threshold {knn_shap_mass_threshold}")
+    if knn_shap_calibrate_auroc and 'KNN_SHAP' in methods:
+        cmd_parts.append("--knn-shap-calibrate-auroc")
+
     # Worker / parallelism hints
     cmd_parts.append(f"--max-loader-workers {max_loader_workers}")
     if concurrent_processes > 1:
@@ -253,7 +260,9 @@ def generate_all_commands(
     run_mode: str = 'both',
     max_loader_workers: int = 48,
     concurrent_processes: int = 1,
-    shap_only: bool = False
+    shap_only: bool = False,
+    knn_shap_mass_threshold: float = None,
+    knn_shap_calibrate_auroc: bool = False
 ) -> List[Dict]:
     """
     Generate all benchmark commands for specified configurations.
@@ -297,7 +306,9 @@ def generate_all_commands(
                     run_mode=run_mode,
                     max_loader_workers=max_loader_workers,
                     concurrent_processes=concurrent_processes,
-                    shap_only=shap_only
+                    shap_only=shap_only,
+                    knn_shap_mass_threshold=knn_shap_mass_threshold,
+                    knn_shap_calibrate_auroc=knn_shap_calibrate_auroc
                 )
                 
                 commands.append({
@@ -402,7 +413,10 @@ def main():
     parser.add_argument(
         '--datasets', nargs='+',
         default=DATASETS_ID + DATASETS_EXTERNAL,
-        choices=DATASETS_ID + DATASETS_EXTERNAL,
+        choices=DATASETS_ID + DATASETS_EXTERNAL + [
+            dataset for dataset in DATASETS_NEW_CLASS_SHIFT
+            if dataset not in DATASETS_ID + DATASETS_EXTERNAL
+        ],
         help='Datasets to benchmark (default: all)'
     )
     parser.add_argument(
@@ -503,6 +517,16 @@ def main():
              '--run-mode calib_only.'
     )
     parser.add_argument(
+        '--knn-shap-mass-threshold', type=float, default=None,
+        help='Cumulative SHAP importance mass (0-1) for KNN_SHAP feature selection, replacing '
+             'the fixed top-50 cutoff (default: None -> run_medmnist_benchmark default of 0.8).'
+    )
+    parser.add_argument(
+        '--knn-shap-calibrate-auroc', action='store_true', default=False,
+        help="Center each predicted class's KNN_SHAP distances by the calibration-set "
+             'success/failure AUROC-F midpoint.'
+    )
+    parser.add_argument(
         '--dry-run', action='store_true',
         help='Print commands without executing them'
     )
@@ -551,7 +575,9 @@ def main():
         run_mode=args.run_mode,
         max_loader_workers=args.max_loader_workers,
         concurrent_processes=args.concurrent_processes,
-        shap_only=args.shap_only
+        shap_only=args.shap_only,
+        knn_shap_mass_threshold=args.knn_shap_mass_threshold,
+        knn_shap_calibrate_auroc=args.knn_shap_calibrate_auroc
     )
     
     if not commands:

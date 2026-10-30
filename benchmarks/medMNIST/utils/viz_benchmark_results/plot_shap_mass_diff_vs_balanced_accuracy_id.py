@@ -62,14 +62,16 @@ def build_plot_dataframe(csv_path):
     return pd.DataFrame(rows)
 
 
-def plot_all_backbones(plot_df, output_dir):
+def plot_all_backbones(plot_df, output_dir, x_col='balanced_accuracy', x_label='balanced_accuracy',
+                       log_x=False, title='SHAP-mass AUROC-F gain vs balanced accuracy (ID, all setups/folds)',
+                       filename='mass_diff_vs_balanced_accuracy_id.png'):
     backbones = sorted(plot_df['backbone'].unique())
     datasets = sorted(plot_df['flag'].unique())
     cmap = plt.get_cmap('tab10')
     colors = {flag: cmap(i % 10) for i, flag in enumerate(datasets)}
 
     fig, axes = plt.subplots(len(backbones), len(MASS_THRESHOLDS),
-                              figsize=(4 * len(MASS_THRESHOLDS), 4 * len(backbones)),
+                              figsize=(4 * len(MASS_THRESHOLDS), 5.5 * len(backbones)),
                               sharey='row', sharex=True)
     for row, backbone in enumerate(backbones):
         backbone_df = plot_df[plot_df['backbone'] == backbone]
@@ -78,20 +80,22 @@ def plot_all_backbones(plot_df, output_dir):
             mass_df = backbone_df[backbone_df['mass'] == mass]
             for flag in datasets:
                 flag_df = mass_df[mass_df['flag'] == flag]
-                ax.scatter(flag_df['balanced_accuracy'], flag_df['diff'], label=flag,
+                ax.scatter(flag_df[x_col], flag_df['diff'], label=flag,
                            color=colors[flag], alpha=0.7, s=25)
             ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+            if log_x:
+                ax.set_xscale('log')
             if row == 0:
-                ax.set_title(f'mass{mass}')
+                ax.set_title(f'mass{mass}', fontsize=14)
             if row == len(backbones) - 1:
-                ax.set_xlabel('balanced_accuracy')
-        axes[row, 0].set_ylabel(f'{backbone}\nauroc_massX - auroc_all')
-    axes[0, -1].legend(loc='upper left', bbox_to_anchor=(1.02, 1.0), fontsize='small')
-    fig.suptitle('SHAP-mass AUROC-F gain vs balanced accuracy (ID, all setups/folds)')
+                ax.set_xlabel(x_label, fontsize=14)
+        axes[row, 0].set_ylabel(f'{backbone}\nAUROC-F SHAP selected - AUROC-F all features', fontsize=14)
+    axes[-1, -1].legend(loc='best', fontsize=10, ncol=2, columnspacing=0.6, handletextpad=0.2, borderpad=0.3)
+    fig.suptitle(title, fontsize=18)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / 'mass_diff_vs_balanced_accuracy_id.png'
+    out_path = output_dir / filename
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f'Saved {out_path}')

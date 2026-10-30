@@ -60,6 +60,7 @@ from .methods.latent import (
     feature_engineering_pipeline,
     analyze_hyperplane_distance,
     compute_knn_distances_to_train_data,
+    select_features_by_mass,
 )
 
 # Greedy search
@@ -148,6 +149,7 @@ __all__ = [
     "feature_engineering_pipeline",
     "analyze_hyperplane_distance",
     "compute_knn_distances_to_train_data",
+    "select_features_by_mass",
     # Search
     "perform_greedy_policy_search",
     "select_greedily_on_ens",

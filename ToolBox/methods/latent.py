@@ -98,6 +98,35 @@ def get_layer_from_model(model, layer_name='avgpool'):
     )
     
     
+def select_features_by_mass(shap_values, labels, class_idx, mass_threshold):
+    """Minimal top-k feature indices whose cumulative |SHAP| importance covers
+    >= mass_threshold of this class's total mass (adaptive, vs. a fixed top-k cutoff).
+
+    Args:
+        shap_values: [N, F, C] or [N, F] SHAP values array
+        labels: [N] labels used to select this class's rows when shap_values is 2D
+        class_idx: Class to select features for
+        mass_threshold: Cumulative importance fraction to cover (0-1)
+
+    Returns:
+        (indices, k): sorted (descending importance) feature indices and their count
+    """
+    if shap_values.ndim == 3:
+        class_shap = shap_values[:, :, class_idx]
+    else:
+        class_shap = shap_values[labels == class_idx, :]
+    mean_abs = np.mean(np.abs(class_shap), axis=0)
+    order = np.argsort(mean_abs)[::-1]
+    sorted_vals = mean_abs[order]
+    total = sorted_vals.sum()
+    if total <= 0:
+        return order[:1], 1
+    cumulative = np.cumsum(sorted_vals) / total
+    k = int(np.searchsorted(cumulative, mass_threshold) + 1)
+    k = max(1, min(k, len(order)))
+    return order[:k], k
+
+
 # ============================================================================
 # PARALLEL WORKER FUNCTIONS (must be at module level for pickling)
 # ============================================================================
@@ -108,14 +137,40 @@ def get_layer_from_model(model, layer_name='avgpool'):
 _shap_worker_datasets = {}
 
 
-def _init_shap_pool_worker(train_dataset, calib_dataset, test_dataset=None):
+def _shm_budgeted_loader_settings(dataset, index, batch_size, num_workers, n_procs, shm_fraction=0.5):
+    """Pick (batch_size, num_workers, prefetch_factor) so the batches that n_procs concurrent
+    DataLoaders can hold in flight (num_workers * prefetch_factor each) fit in shm_fraction of
+    the currently free /dev/shm. Returns the inputs unchanged (prefetch 2) if shm is not measurable."""
+    if num_workers == 0:
+        return batch_size, 0, None
+    try:
+        stat = os.statvfs('/dev/shm')
+    except OSError:
+        return batch_size, num_workers, 2
+    item = dataset[index]
+    sample = item['image'] if isinstance(item, dict) else item[0]
+    sample_bytes = sample.element_size() * sample.nelement() if torch.is_tensor(sample) else np.asarray(sample).nbytes
+    budget_per_proc = stat.f_bavail * stat.f_frsize * shm_fraction / max(1, n_procs)
+    slots = int(budget_per_proc // (batch_size * sample_bytes))
+    if slots < 1:
+        # ponytail: even one in-flight batch per process exceeds the budget -> shrink the batch.
+        return max(1, int(budget_per_proc // sample_bytes)), 1, 1
+    workers = min(num_workers, slots)
+    return batch_size, workers, max(1, min(2, slots // workers))
+
+
+def _init_shap_pool_worker(train_dataset, calib_dataset, test_dataset=None, gpu_queue=None):
     """ProcessPoolExecutor initializer: stashes shared dataset objects as process globals."""
     _shap_worker_datasets['train'] = train_dataset
     _shap_worker_datasets['calib'] = calib_dataset
     _shap_worker_datasets['test'] = test_dataset
+    # One GPU per pool process: folds are handed to whichever process frees up first, so a
+    # per-fold GPU assignment could put two concurrent folds on the same GPU.
+    if gpu_queue is not None:
+        _shap_worker_datasets['gpu_id'] = gpu_queue.get()
 
 
-def _fit_fold_worker_multigpu(fold_idx, model, train_loader_meta, calib_loader_meta, device_str, flag, gpu_id, cache_dir=None, shap_only=False, num_workers=0):
+def _fit_fold_worker_multigpu(fold_idx, model, train_loader_meta, calib_loader_meta, device_str, flag, gpu_id, cache_dir=None, shap_only=False, num_workers=0, mass_threshold=None, calibrate_with_auroc=False, k=5, layer_name='avgpool'):
     """
     Worker function for parallel fold fitting with explicit GPU assignment.
     
@@ -155,6 +210,7 @@ def _fit_fold_worker_multigpu(fold_idx, model, train_loader_meta, calib_loader_m
     # Bind this worker to the assigned physical GPU.
     # Note: setting CUDA_VISIBLE_DEVICES inside a spawned process is too late
     # once CUDA is initialized; direct set_device avoids accidental GPU 0 usage.
+    gpu_id = _shap_worker_datasets.get('gpu_id', gpu_id)
     torch.cuda.set_device(gpu_id)
     device = torch.device(f'cuda:{gpu_id}')
     
@@ -163,24 +219,30 @@ def _fit_fold_worker_multigpu(fold_idx, model, train_loader_meta, calib_loader_m
     # DataLoader workers (num_workers) so image decode/transform isn't serialized on one
     # thread while the GPU idles.
     train_subset = Subset(_shap_worker_datasets['train'], train_loader_meta['indices'])
-    train_loader = DataLoader(
-        train_subset,
-        batch_size=train_loader_meta['batch_size'],
-        shuffle=train_loader_meta.get('shuffle', False),
-        num_workers=num_workers,
-        pin_memory=True
-        # Not persistent_workers - this loader is iterated at most once per worker call, so
-        # keeping the pool alive afterward would only hold fds/shared memory longer than needed.
-    )
-    
     calib_subset = Subset(_shap_worker_datasets['calib'], calib_loader_meta['indices'])
-    calib_loader = DataLoader(
-        calib_subset,
-        batch_size=calib_loader_meta['batch_size'],
-        shuffle=calib_loader_meta.get('shuffle', False),
-        num_workers=num_workers,
-        pin_memory=True
-    )
+
+    def _build_loaders(nw):
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=train_loader_meta['batch_size'],
+            shuffle=train_loader_meta.get('shuffle', False),
+            num_workers=nw,
+            prefetch_factor=train_loader_meta.get('prefetch_factor') if nw > 0 else None,
+            pin_memory=True
+            # Not persistent_workers - this loader is iterated at most once per worker call, so
+            # keeping the pool alive afterward would only hold fds/shared memory longer than needed.
+        )
+        calib_loader = DataLoader(
+            calib_subset,
+            batch_size=calib_loader_meta['batch_size'],
+            shuffle=calib_loader_meta.get('shuffle', False),
+            num_workers=nw,
+            prefetch_factor=calib_loader_meta.get('prefetch_factor') if nw > 0 else None,
+            pin_memory=True
+        )
+        return train_loader, calib_loader
+
+    train_loader, calib_loader = _build_loaders(num_workers)
     
     print(f" Worker {fold_idx}: Using GPU {gpu_id}")
     
@@ -194,12 +256,14 @@ def _fit_fold_worker_multigpu(fold_idx, model, train_loader_meta, calib_loader_m
     
     # Create a temporary method instance for this fold
     temp_method = KNNLatentSHAPMethod(
-        layer_name='avgpool',
-        k=5,
+        layer_name=layer_name,
+        k=k,
         n_shap_features=50,
         cache_dir=cache_dir,
         max_background_samples=max_bg_samples,
-        shap_only=shap_only
+        shap_only=shap_only,
+        mass_threshold=mass_threshold,
+        calibrate_with_auroc=calibrate_with_auroc
     )
     
     # Fit this fold
@@ -242,18 +306,24 @@ def _compute_fold_worker_multigpu(fold_idx, model, model_knns, test_loader_meta,
     import gc
     from torch.utils.data import DataLoader, Subset
 
+    gpu_id = _shap_worker_datasets.get('gpu_id', gpu_id)
     torch.cuda.set_device(gpu_id)
     device = torch.device(f'cuda:{gpu_id}')
 
     test_subset = Subset(_shap_worker_datasets['test'], test_loader_meta['indices'])
-    test_loader = DataLoader(
-        test_subset,
-        batch_size=test_loader_meta['batch_size'],
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
-        # Not persistent_workers - iterated once per worker call, see _fit_fold_worker_multigpu.
-    )
+
+    def _build_test_loader(nw):
+        return DataLoader(
+            test_subset,
+            batch_size=test_loader_meta['batch_size'],
+            shuffle=False,
+            num_workers=nw,
+            prefetch_factor=test_loader_meta.get('prefetch_factor') if nw > 0 else None,
+            pin_memory=True
+            # Not persistent_workers - iterated once per worker call, see _fit_fold_worker_multigpu.
+        )
+
+    test_loader = _build_test_loader(num_workers)
 
     model = model.to(device)
     model.eval()
@@ -492,21 +562,39 @@ class KNNLatentSHAPMethod(UQMethod):
     **Critical Process:**
     For EACH model with its CV training split:
       1. Compute SHAP on TRAINING samples (background = held-out calibration data)
-         → select top-k features per class
+         → select top-k (or SHAP-mass-threshold) features per class
       2. Fit per-class standardization + PCA + KNN, all on TRAINING data
       3. For each test sample:
          - Get predicted class
          - Transform latent features into that class's SHAP-selected subspace
-         - Compute (unnormalized) KNN distance to training samples of that class
+         - Compute KNN distance to training samples of that class, optionally shifted by a
+           per-class scalar offset that maximizes the calibration-set pooled AUROC-F
+           (calibrate_with_auroc)
       4. Average distances across all models
     """
     def __init__(self, layer_name='avgpool', k=5, n_shap_features=50, 
                  max_background_samples=1000, cache_dir=None, parallel=False, n_jobs=None,
-                 shap_only=False, shap_batch_size=5000):
+                 shap_only=False, shap_batch_size=5000, mass_threshold=None,
+                 calibrate_with_auroc=False):
+        """
+        Args:
+            n_shap_features: Fixed top-k feature count per class (used only when
+                mass_threshold is None).
+            mass_threshold: If set (0-1), select the minimal top-k features per class whose
+                cumulative |SHAP| importance covers this fraction of the class's total mass,
+                instead of a fixed top-k count. Takes priority over n_shap_features.
+            calibrate_with_auroc: If True, shift each predicted class's KNN distances by a
+                per-class scalar offset chosen (via block-coordinate-ascent grid search) to
+                maximize the pooled calibration-set AUROC-F, fit in the same per-class subspace
+                used for the test set. Requires >=2 predicted classes with a success/failure
+                split on the calibration set; falls back to offset=0.0 (no shift) otherwise.
+        """
         super().__init__("KNN-Latent-SHAP")
         self.layer_name = layer_name
         self.k = k
         self.n_shap_features = n_shap_features
+        self.mass_threshold = mass_threshold
+        self.calibrate_with_auroc = calibrate_with_auroc
         self.max_background = max_background_samples
         self.cache_dir = cache_dir
         self.parallel = parallel 
@@ -648,6 +736,15 @@ class KNNLatentSHAPMethod(UQMethod):
         # len(models) submitted fold tasks.
         train_dataset = self._extract_loader_params(train_loaders[0])['dataset']
         calib_dataset = calib_loader_params['dataset']
+        # Train and calib loaders run one after the other inside a worker, so one budget covers both.
+        first_train_meta = self._extract_loader_params(train_loaders[0])
+        shm_batch_size, per_worker_num_workers, prefetch_factor = _shm_budgeted_loader_settings(
+            train_dataset, first_train_meta['indices'][0],
+            max(first_train_meta['batch_size'], calib_loader_params['batch_size']),
+            per_worker_num_workers, max_concurrent
+        )
+        print(f" Shared-memory budget: batch_size<={shm_batch_size}, workers={per_worker_num_workers}, "
+              f"prefetch_factor={prefetch_factor} (x{max_concurrent} concurrent workers)")
         
         fold_args = []
         for fold_idx, (model, train_loader) in enumerate(zip(models, train_loaders)):
@@ -659,16 +756,26 @@ class KNNLatentSHAPMethod(UQMethod):
             # the dataset itself is shipped once via the pool initializer, not per fold)
             train_loader_meta = {k: v for k, v in self._extract_loader_params(train_loader).items() if k != 'dataset'}
             calib_loader_meta = {k: v for k, v in calib_loader_params.items() if k != 'dataset'}
+            for meta in (train_loader_meta, calib_loader_meta):
+                meta['batch_size'] = min(meta['batch_size'], shm_batch_size)
+                meta['prefetch_factor'] = prefetch_factor
             
-            fold_args.append((fold_idx, model_cpu, train_loader_meta, calib_loader_meta, device_str, flag, gpu_id, self.cache_dir, self.shap_only, per_worker_num_workers))
-            print(f" Fold {fold_idx} → GPU {gpu_id}")
+            fold_args.append((fold_idx, model_cpu, train_loader_meta, calib_loader_meta, device_str, flag, gpu_id, self.cache_dir, self.shap_only, per_worker_num_workers, self.mass_threshold, self.calibrate_with_auroc, self.k, self.layer_name))
+        print(f" {len(models)} folds on {max_concurrent} GPU worker(s), one GPU per worker")
         
+        # Parent's cached allocator blocks otherwise starve the worker sharing its GPU.
+        torch.cuda.empty_cache()
         fitted_models = [None] * len(models)
         
+        ctx = mp.get_context('spawn')
+        gpu_queue = ctx.Queue()
+        for gpu in range(max_concurrent):
+            gpu_queue.put(gpu)
         with ProcessPoolExecutor(
             max_workers=max_concurrent,
+            mp_context=ctx,
             initializer=_init_shap_pool_worker,
-            initargs=(train_dataset, calib_dataset)
+            initargs=(train_dataset, calib_dataset, None, gpu_queue)
         ) as executor:
             future_to_fold = {
                 executor.submit(_fit_fold_worker_multigpu, *args): args[0]
@@ -783,6 +890,22 @@ class KNNLatentSHAPMethod(UQMethod):
             print(f" Step 2: Reusing cached training features")
 
         # =====================================================================
+        # Step 2b: Predicted classes for the calibration set (needed for the AUROC-offset
+        # calibration below). Derived analytically from the cached penultimate features via
+        # the model's affine classifier head - no extra forward pass over calib_loader needed.
+        # =====================================================================
+        predicted_calib = None
+        if self.calibrate_with_auroc:
+            with torch.no_grad():
+                calib_logits = classifierhead(features_calib.to(device))
+                if calib_logits.shape[1] == 1:
+                    predicted_calib = (torch.sigmoid(calib_logits).squeeze(1) > 0.5).long().cpu().numpy()
+                else:
+                    predicted_calib = calib_logits.argmax(dim=1).cpu().numpy()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+
+        # =====================================================================
         # Step 3: Analytic SHAP importance on TRAINING samples, using CALIBRATION
         # data as the background distribution (disjoint from the explained samples,
         # so no self-reference leakage) + top-k feature selection per class
@@ -808,15 +931,18 @@ class KNNLatentSHAPMethod(UQMethod):
 
         selected_features_per_class = []
         for class_idx in range(num_classes):
-            if shap_values.ndim == 3:
-                class_shap_values = shap_values[:, :, class_idx]
+            if self.mass_threshold is not None:
+                top_idx, _ = select_features_by_mass(shap_values, labels_train, class_idx, self.mass_threshold)
             else:
-                class_shap_values = shap_values[labels_train == class_idx, :]
+                if shap_values.ndim == 3:
+                    class_shap_values = shap_values[:, :, class_idx]
+                else:
+                    class_shap_values = shap_values[labels_train == class_idx, :]
 
-            mean_abs = np.mean(np.abs(class_shap_values), axis=0)
-            top_k = min(self.n_shap_features, len(mean_abs))
-            top_idx = np.argpartition(mean_abs, -top_k)[-top_k:]
-            top_idx = top_idx[np.argsort(mean_abs[top_idx])[::-1]]
+                mean_abs = np.mean(np.abs(class_shap_values), axis=0)
+                top_k = min(self.n_shap_features, len(mean_abs))
+                top_idx = np.argpartition(mean_abs, -top_k)[-top_k:]
+                top_idx = top_idx[np.argsort(mean_abs[top_idx])[::-1]]
             selected_features_per_class.append([f"Feature_{i}" for i in top_idx.tolist()])
 
         if self.num_classes is None:
@@ -840,6 +966,12 @@ class KNNLatentSHAPMethod(UQMethod):
             features_train.numpy(),
             columns=[f"Feature_{i}" for i in range(features_train.shape[1])]
         )
+        calib_df = None
+        if self.calibrate_with_auroc:
+            calib_df = pd.DataFrame(
+                features_calib.numpy(),
+                columns=[f"Feature_{i}" for i in range(features_calib.shape[1])]
+            )
 
         # =====================================================================
         # Step 4: Fit per-class standardization + PCA + KNN, all on TRAIN data
@@ -873,7 +1005,19 @@ class KNNLatentSHAPMethod(UQMethod):
                 'pca': pca,
                 'selected_features': selected_features,
                 'n_samples': len(train_pca),
+                'offset': 0.0,
             })
+
+        # Calibration-set AUROC-F offset calibration: jointly (across all predicted classes)
+        # pick additive per-class offsets maximizing the pooled calibration AUROC-F, using the
+        # exact per-class subspaces just fitted above. A class with no calibration
+        # successes/failures (or other numerical edge cases) must not abort the whole fold -
+        # skip calibration for this fold (offsets stay 0.0) and keep going.
+        if self.calibrate_with_auroc:
+            try:
+                self._fit_auroc_offsets(model_knns, calib_df, predicted_calib, labels_calib)
+            except Exception as e:
+                print(f"  [WARNING] AUROC-offset calibration failed ({e}), skipping (all offsets stay 0.0)")
 
         # Cache only the expensive-to-recompute feature extractions; SHAP importance
         # and feature selection are recomputed fresh (cheap) on every load.
@@ -888,6 +1032,90 @@ class KNNLatentSHAPMethod(UQMethod):
             )
         
         return model_knns
+
+    @staticmethod
+    def _knn_distance_for_class(fitted, df, mask):
+        """Project df[mask] through one class's fitted scaler+PCA+KNN subspace and return the
+        mean distance to its k nearest training neighbors."""
+        x = fitted['scaler'].transform(df[mask][fitted['selected_features']].values)
+        x = fitted['pca'].transform(x)
+        return fitted['knn'].kneighbors(x)[0].mean(axis=1)
+
+    def _fit_auroc_offsets(self, model_knns, calib_df, predicted_calib, labels_calib,
+                           n_passes=5, coarse_grid=41, fine_grid=41, fine_halfwidth_frac=0.1):
+        """Block-coordinate ascent: find per-class additive offsets b_c maximizing the pooled
+        calibration-set AUROC-F, s(x) = d(x) + b_{predicted class}(x). Shifting every sample of
+        a class by the same scalar cannot change the within-class ranking (only where that
+        class's block sits relative to the others), so this cycles through classes and, for
+        each, grid-searches (coarse then a finer pass centered on the coarse optimum) the single
+        b_c that maximizes the pooled AUROC-F with all other offsets held fixed, repeating until
+        no class improves. One class's offset is pinned at 0 throughout (only relative offsets
+        matter for AUROC). Mutates each class dict's 'offset' in place; leaves them at 0.0 if
+        the calibration set doesn't have enough predicted classes / success-failure split.
+        """
+        from sklearn.metrics import roc_auc_score
+
+        classes = [c for c in range(len(model_knns))
+                   if model_knns[c] is not None and (predicted_calib == c).sum() > 0]
+        if len(classes) < 2:
+            print("  [WARNING] AUROC-offset calibration needs >=2 predicted classes on the "
+                  "calibration set, skipping (all offsets stay 0.0)")
+            return
+
+        distances = np.zeros(len(predicted_calib), dtype=float)
+        labels = np.zeros(len(predicted_calib), dtype=int)
+        for c in classes:
+            mask = predicted_calib == c
+            distances[mask] = self._knn_distance_for_class(model_knns[c], calib_df, mask)
+            labels[mask] = (labels_calib[mask] != c).astype(int)
+
+        if len(np.unique(labels)) < 2:
+            print("  [WARNING] Calibration set has no success/failure split across predicted "
+                  "classes, skipping AUROC-offset calibration")
+            return
+
+        ref_class = classes[0]
+        offsets = {c: 0.0 for c in classes}
+        per_sample_offset = np.zeros(len(predicted_calib), dtype=float)
+        scale = float(np.std(distances)) or 1.0
+        lo, hi = -4 * scale, 4 * scale
+
+        def pooled_auroc():
+            return roc_auc_score(labels, distances + per_sample_offset)
+
+        best_auroc = pooled_auroc()
+        for _ in range(n_passes):
+            improved = False
+            for c in classes:
+                if c == ref_class:
+                    continue
+                mask = predicted_calib == c
+                best_b, best_score = offsets[c], best_auroc
+
+                for b in np.linspace(lo, hi, coarse_grid):
+                    per_sample_offset[mask] = b
+                    score = pooled_auroc()
+                    if score > best_score:
+                        best_score, best_b = score, b
+
+                half_width = (hi - lo) * fine_halfwidth_frac
+                for b in np.linspace(best_b - half_width, best_b + half_width, fine_grid):
+                    per_sample_offset[mask] = b
+                    score = pooled_auroc()
+                    if score > best_score:
+                        best_score, best_b = score, b
+
+                per_sample_offset[mask] = best_b
+                offsets[c] = best_b
+                if best_score > best_auroc + 1e-12:
+                    best_auroc = best_score
+                    improved = True
+            if not improved:
+                break
+
+        print(f"  AUROC-offset calibration: pooled calib AUROC-F = {best_auroc:.4f}")
+        for c, b in offsets.items():
+            model_knns[c]['offset'] = float(b)
     
     @staticmethod
     def _distances_from_fitted(model, model_knns, data_loader, device, layer, num_classes, model_idx):
@@ -900,15 +1128,20 @@ class KNNLatentSHAPMethod(UQMethod):
             model, data_loader, device, layer, importance=False
         )
 
-        # Ensure proper types
+        # Ensure proper types. Binary head returns a 1D array of P(class=1) (round to 0/1);
+        # multiclass returns [N, C] softmax probs, so argmax must run on the raw probabilities,
+        # not on probabilities rounded to 0/1 first (which can collapse ties/near-ties to class 0).
         labels_test = np.array(labels_test, dtype=int)
-        predicted_classes = np.round(predicted_classes).astype(int)
-
-        print(f"\n  Model {model_idx+1}: Processing {len(predicted_classes)} test samples")
+        predicted_classes = np.asarray(predicted_classes)
         if predicted_classes.ndim > 1:
             predicted_classes = np.argmax(predicted_classes, axis=1)
+        else:
+            predicted_classes = np.round(predicted_classes).astype(int)
+
+        print(f"\n  Model {model_idx+1}: Processing {len(predicted_classes)} test samples")
         print(f" Predicted classes: {np.bincount(predicted_classes)}")
-        print(f" True classes: {np.bincount(labels_test)}")
+        true_class_labels, true_class_counts = np.unique(labels_test, return_counts=True)
+        print(f" True classes: {dict(zip(true_class_labels.tolist(), true_class_counts.tolist()))}")
 
         test_df = pd.DataFrame(
             features_test.numpy(),
@@ -942,7 +1175,7 @@ class KNNLatentSHAPMethod(UQMethod):
 
             # KNN distances
             distances, _ = fitted['knn'].kneighbors(test_pca)
-            avg_distances = distances.mean(axis=1)
+            avg_distances = distances.mean(axis=1) + fitted.get('offset', 0.0)
 
             # Debug
             class_labels = labels_test[class_mask]
@@ -996,6 +1229,14 @@ class KNNLatentSHAPMethod(UQMethod):
         # Dataset is identical across all folds - drop it from the per-task args (shipped once
         # via the pool initializer instead of re-pickled on every submitted fold task).
         test_loader_meta = {k: v for k, v in test_loader_params.items() if k != 'dataset'}
+        test_loader_meta['batch_size'], per_worker_num_workers, test_loader_meta['prefetch_factor'] = \
+            _shm_budgeted_loader_settings(
+                test_dataset, test_loader_meta['indices'][0], test_loader_meta['batch_size'],
+                per_worker_num_workers, max_concurrent
+            )
+        print(f" Shared-memory budget: batch_size={test_loader_meta['batch_size']}, "
+              f"workers={per_worker_num_workers}, prefetch_factor={test_loader_meta['prefetch_factor']} "
+              f"(x{max_concurrent} concurrent workers)")
 
         fold_args = []
         for fold_idx, model in enumerate(models):
@@ -1005,14 +1246,20 @@ class KNNLatentSHAPMethod(UQMethod):
                 fold_idx, model_cpu, self.fitted_models[fold_idx],
                 test_loader_meta, gpu_id, self.layer_name, self.num_classes, per_worker_num_workers
             ))
-            print(f" Fold {fold_idx} → GPU {gpu_id}")
+        print(f" {len(models)} folds on {max_concurrent} GPU worker(s), one GPU per worker")
 
+        torch.cuda.empty_cache()
         all_distances = [None] * len(models)
 
+        ctx = mp.get_context('spawn')
+        gpu_queue = ctx.Queue()
+        for gpu in range(max_concurrent):
+            gpu_queue.put(gpu)
         with ProcessPoolExecutor(
             max_workers=max_concurrent,
+            mp_context=ctx,
             initializer=_init_shap_pool_worker,
-            initargs=(None, None, test_dataset)
+            initargs=(None, None, test_dataset, gpu_queue)
         ) as executor:
             future_to_fold = {
                 executor.submit(_compute_fold_worker_multigpu, *args): args[0]

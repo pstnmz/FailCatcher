@@ -40,7 +40,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                            min_failure_ratio=0.3, corruption_severity=0,
                            corrupt_test=False, corrupt_calib=False, new_class_shift=False,
                            concurrent_processes=1, max_loader_workers=16,
-                           run_mode='both', shap_only=False):
+                           run_mode='both', shap_only=False,
+                           knn_shap_mass_threshold=0.8, knn_shap_calibrate_auroc=False):
     """
     Run UQ benchmark on a medMNIST dataset using FailCatcher library.
     
@@ -72,6 +73,11 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         shap_only: If True (only meaningful when 'KNN_SHAP' is in methods), only compute and
                   cache SHAP values (skip train-feature extraction, KNN fitting, compute() and
                   metrics). Useful for pre-warming SHAP caches across many datasets cheaply.
+        knn_shap_mass_threshold: Cumulative SHAP importance mass (0-1) used to select each
+                  class's KNN feature subspace, replacing the old fixed top-50 cutoff.
+        knn_shap_calibrate_auroc: If True, center each predicted class's KNN-SHAP distances by
+                  the calibration-set success/failure AUROC-F midpoint (see
+                  ToolBox.methods.latent.KNNLatentSHAPMethod).
     """
     print(f"\n{'='*80}")
     print(f"MedMNIST Benchmark: {flag}")
@@ -352,10 +358,9 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
     # Add new class shift to cache key
     new_class_suffix = "_new_class_shift" if new_class_shift else ""
 
-    # Use the same cache namespace components for KNN-SHAP artifacts so
-    # standard/DA/DO/DADO and resnet/vit runs never reuse each other's SHAP cache.
+    # KNN-SHAP feature caches depend on source train/calib data, not the test-shift mode.
     knn_shap_cache_namespace = (
-        f"{flag}_{model_backbone}{setup_suffix}{corruption_suffix}{new_class_suffix}"
+        f"{flag}_{model_backbone}{setup_suffix}{corruption_suffix}"
     )
     
     calib_cache_path = os.path.join(cache_dir, f'{flag}_{model_backbone}{setup_suffix}{corruption_suffix}{new_class_suffix}_calib_results.npz')
@@ -1195,11 +1200,12 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
         print("\nRunning KNN-SHAP...")
         mode_str = "per-fold" if per_fold_eval else "ensemble"
         print(f" Mode: {mode_str} evaluation")
-        parallel_mode = torch.cuda.device_count() >= 3
-        n_jobs = 3 if parallel_mode else 1
+        visible_gpu_count = torch.cuda.device_count()
+        parallel_mode = visible_gpu_count >= 2
+        n_jobs = min(3, visible_gpu_count) if parallel_mode else 1
         
         if parallel_mode:
-            print(f" Parallel GPU mode: {n_jobs} folds on {torch.cuda.device_count()} GPUs")
+            print(f" Parallel GPU mode: {n_jobs} folds on {visible_gpu_count} GPUs")
             print(f" DataLoader workers: {shared_loader_workers} (optimized for multi-GPU feature extraction)")
         
         if run_test:
@@ -1211,7 +1217,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                 flag=knn_shap_cache_namespace,
                 layer_name='avgpool',
                 k=10,
-                n_shap_features=50,
+                mass_threshold=knn_shap_mass_threshold,
+                calibrate_with_auroc=knn_shap_calibrate_auroc,
                 cache_dir=os.path.join(output_dir, 'shap_cache'),
                 parallel=parallel_mode,
                 n_jobs=n_jobs,
@@ -1233,7 +1240,8 @@ def run_medmnist_benchmark(flag, methods, output_dir='./uq_benchmark_results',
                 flag=knn_shap_cache_namespace,
                 layer_name='avgpool',
                 k=5,
-                n_shap_features=50,
+                mass_threshold=knn_shap_mass_threshold,
+                calibrate_with_auroc=knn_shap_calibrate_auroc,
                 cache_dir=os.path.join(output_dir, 'shap_cache'),
                 parallel=parallel_mode,
                 n_jobs=n_jobs,
@@ -1575,6 +1583,16 @@ if __name__ == '__main__':
              "extraction, KNN fitting, and metrics. Useful for pre-warming SHAP caches cheaply. "
              "Typically combined with --run-mode calib_only."
     )
+    parser.add_argument(
+        '--knn-shap-mass-threshold', type=float, default=0.8,
+        help="Cumulative SHAP importance mass (0-1) used to select each class's KNN_SHAP feature "
+             "subspace, replacing the old fixed top-50 cutoff (default: 0.8)."
+    )
+    parser.add_argument(
+        '--knn-shap-calibrate-auroc', action='store_true', default=False,
+        help="Center each predicted class's KNN_SHAP distances by the calibration-set "
+             "success/failure AUROC-F midpoint before computing metrics."
+    )
     
     args = parser.parse_args()
     
@@ -1613,5 +1631,7 @@ if __name__ == '__main__':
         concurrent_processes=args.concurrent_processes,
         max_loader_workers=args.max_loader_workers,
         run_mode=args.run_mode,
-        shap_only=args.shap_only
+        shap_only=args.shap_only,
+        knn_shap_mass_threshold=args.knn_shap_mass_threshold,
+        knn_shap_calibrate_auroc=args.knn_shap_calibrate_auroc
     )

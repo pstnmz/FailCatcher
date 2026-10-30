@@ -108,6 +108,29 @@ class MIDOGPatchDataset(Dataset):
         return image, label
 
 
+class RGBImageDataset(Dataset):
+    """Dataset for RGB images stored as numpy arrays."""
+
+    def __init__(self, images, labels, transform=None):
+        self.images = images
+        self.labels = labels
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        from PIL import Image as PILImage
+        img = self.images[idx]
+        label = self.labels[idx]
+        img_pil = PILImage.fromarray(img.astype(np.uint8), mode='RGB')
+        if self.transform:
+            img_tensor = self.transform(img_pil)
+        else:
+            img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+        return img_tensor, label
+
+
 class HMUCRCDataset(torch.utils.data.Dataset):
     """Dataset for HMU-CRC-Hist550K external test data (color RGB images).
 
@@ -125,6 +148,26 @@ class HMUCRCDataset(torch.utils.data.Dataset):
         self.images = images    # (N, 224, 224, 3) uint8
         self.labels = labels    # (N,) int64, raw HMU-CRC labels 0-7
         self.transform = transform
+
+    # Pickling a np.memmap serializes its full contents (~84 GB here) into every spawned
+    # worker; send the .npy path instead and re-open the memmap on the other side.
+    _MEMMAP_KEYS = ('images', 'labels')
+
+    def __getstate__(self):
+        import mmap
+        state = self.__dict__.copy()
+        for key in self._MEMMAP_KEYS:
+            arr = state[key]
+            if isinstance(arr, np.memmap) and isinstance(arr.base, mmap.mmap) and arr.filename:
+                state[key] = ('__npy_memmap__', arr.filename)
+        return state
+
+    def __setstate__(self, state):
+        for key in self._MEMMAP_KEYS:
+            value = state[key]
+            if isinstance(value, tuple) and value and value[0] == '__npy_memmap__':
+                state[key] = np.load(value[1], mmap_mode='r')
+        self.__dict__.update(state)
 
     def __len__(self):
         return len(self.images)
@@ -547,32 +590,6 @@ def load_midog_for_new_class_shift(transform, transform_tta, models=None, device
           f"= {len(artificial_images)} total")
     print(f" OOD rate: {100*len(failure_images)/len(artificial_images):.1f}%")
     print(f" (correct_idx computed dynamically per method; incorrect_idx = OOD only)")
-    
-    # Create custom dataset class for RGB images
-    class RGBImageDataset(Dataset):
-        """Dataset for RGB images stored as numpy arrays."""
-        def __init__(self, images, labels, transform=None):
-            self.images = images  # (N, H, W, 3) uint8
-            self.labels = labels
-            self.transform = transform
-        
-        def __len__(self):
-            return len(self.images)
-        
-        def __getitem__(self, idx):
-            from PIL import Image as PILImage
-            img = self.images[idx]  # (224, 224, 3) uint8
-            label = self.labels[idx]
-            
-            # Convert to PIL for transforms
-            img_pil = PILImage.fromarray(img.astype(np.uint8), mode='RGB')
-            
-            if self.transform:
-                img_tensor = self.transform(img_pil)
-            else:
-                img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-            
-            return img_tensor, label
     
     # Create datasets with original labels for model evaluation, binary_gt stored as attribute
     test_dataset = RGBImageDataset(artificial_images, original_labels, transform=transform)

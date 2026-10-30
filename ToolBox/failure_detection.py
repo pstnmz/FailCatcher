@@ -1761,6 +1761,8 @@ class FailureDetector:
         layer_name: str = 'avgpool',
         k: int = 5,
         n_shap_features: int = 50,
+        mass_threshold: Optional[float] = None,
+        calibrate_with_auroc: bool = False,
         cache_dir: Optional[str] = None,
         parallel: bool = False,
         n_jobs: int = 2,
@@ -1779,7 +1781,11 @@ class FailureDetector:
             flag: Dataset identifier (for caching)
             layer_name: Layer name for feature extraction
             k: Number of nearest neighbors
-            n_shap_features: Number of top SHAP features
+            n_shap_features: Number of top SHAP features (used only if mass_threshold is None)
+            mass_threshold: If set (0-1), select the minimal top-k SHAP features per class
+                covering this fraction of cumulative importance, instead of a fixed top-k count.
+            calibrate_with_auroc: If True, center each predicted class's KNN distances by the
+                calibration-set success/failure AUROC-F midpoint.
             cache_dir: Directory to cache SHAP values
             parallel: Enable parallel processing across folds
             n_jobs: Number of parallel workers
@@ -1799,6 +1805,8 @@ class FailureDetector:
                 layer_name=layer_name,
                 k=k,
                 n_shap_features=n_shap_features,
+                mass_threshold=mass_threshold,
+                calibrate_with_auroc=calibrate_with_auroc,
                 cache_dir=cache_dir,
                 parallel=parallel,
                 n_jobs=n_jobs,
